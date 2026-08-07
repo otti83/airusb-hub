@@ -1,0 +1,26 @@
+# Build products
+build/
+DerivedData/
+*.o
+*.dSYM/
+
+# Phase 0 probe binaries (rebuilt by poc/p0-probe/run_probe.sh)
+poc/p0-probe/p0_probe
+poc/p0-probe/probe_[A-Z]
+poc/p0-probe/*.plist.bak
+
+# Signing / local secrets — never commit
+*.mobileprovision
+*.provisionprofile
+*.p12
+*.cer
+
+# macOS
+.DS_Store
+
+# Logs and captures
+*.log
+captures/
+
+# Generated at runtime by poc/p0-probe/run_probe.sh
+poc/p0-probe/ent_*.plist
