@@ -28,6 +28,5 @@ poc/p1-capture-test/capture_test
 
 # CMake build tree
 airusb/build/
-airusb/tests/vectors/corpus/
 compile_commands.json
 .cache/
