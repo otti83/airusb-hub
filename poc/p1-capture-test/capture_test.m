@@ -101,6 +101,34 @@ static void collectBSDNames(io_service_t node, NSMutableSet<NSString *> *out)
 
 #pragma mark - listing
 
+/// Human-readable link speed.
+///
+/// Careful: the IORegistry exposes TWO different speed properties with DIFFERENT
+/// enumerations, and reading the wrong one silently misreports USB 3 as USB 2.
+///   "Device Speed" — LEGACY enum: Low=0, Full=1, High=2, Super=3, SuperPlus=4
+///   "USBSpeed"     — modern tIOUSBHostConnectionSpeed (IOUSBHostFamilyDefinitions.h:88):
+///                    None=0, Full=1, Low=2, High=3, Super=4, SuperPlus=5, SuperPlusBy2=6
+/// We use USBSpeed, and cross-check against UsbLinkSpeed (bits/second) so a
+/// mismatch is visible rather than silently believed.
+static NSString *speedDescription(io_service_t dev)
+{
+    static NSString *const kNames[] = { @"none", @"Full(12M)", @"Low(1.5M)", @"High(480M)",
+                                        @"Super(5G)", @"SuperPlus(10G)", @"SuperPlusBy2(20G)", @"other" };
+    NSNumber *modern = propNum(dev, CFSTR("USBSpeed"));
+    NSNumber *link   = propNum(dev, CFSTR("UsbLinkSpeed"));
+
+    NSString *name = @"unknown";
+    if (modern) {
+        NSUInteger v = modern.unsignedIntegerValue;
+        name = (v < sizeof(kNames)/sizeof(kNames[0])) ? kNames[v] : @"unknown";
+    }
+    if (link) {
+        return [NSString stringWithFormat:@"%@ (%.1f Gb/s link)", name,
+                link.doubleValue / 1e9];
+    }
+    return name;
+}
+
 /// Print a ready-to-paste command for every attached device, so the caller never has
 /// to substitute a placeholder by hand.
 static void printSuggestions(void)
@@ -140,7 +168,6 @@ static void listDevices(void)
         NSNumber *pid = propNum(dev, CFSTR("idProduct"));
         NSString *name = propStr(dev, CFSTR("USB Product Name"));
         NSString *vend = propStr(dev, CFSTR("USB Vendor Name"));
-        NSNumber *speed = propNum(dev, CFSTR("Device Speed"));
 
         NSMutableSet<NSString *> *bsd = [NSMutableSet set];
         collectBSDNames(dev, bsd);
@@ -148,7 +175,7 @@ static void listDevices(void)
         alog("ENUM", @"%04x:%04x  %@ %@  speed=%@  bsd=[%@]",
              vid.unsignedIntValue, pid.unsignedIntValue,
              vend ?: @"?", name ?: @"?",
-             speed ?: @"?",
+             speedDescription(dev),
              [[bsd allObjects] componentsJoinedByString:@","]);
         n++;
         IOObjectRelease(dev);
@@ -255,9 +282,9 @@ static int captureTest(uint16_t vid, uint16_t pid)
     io_service_t devService = findDevice(vid, pid);
     if (!devService) { alog("ERROR", @"device %04x:%04x not found", vid, pid); return 1; }
 
-    NSNumber *removable = propNum(devService, CFSTR("Removable"));
-    NSString *product   = propStr(devService, CFSTR("USB Product Name"));
-    alog("ATTACH", @"target %04x:%04x %@ (removable=%@)", vid, pid, product ?: @"?", removable ?: @"?");
+    NSString *product = propStr(devService, CFSTR("USB Product Name"));
+    alog("ATTACH", @"target %04x:%04x %@  speed=%@", vid, pid, product ?: @"?",
+         speedDescription(devService));
 
     NSMutableSet<NSString *> *bsd = [NSMutableSet set];
     collectBSDNames(devService, bsd);
@@ -386,16 +413,37 @@ static int captureTest(uint16_t vid, uint16_t pid)
     alog("DETACH", @"RESULT=RESTORED — the OS should re-enumerate and remount the volume shortly");
 
     // ---- verdict -----------------------------------------------------------
+    //
+    // Launch context is load-bearing for this test. FB16524420 reports that the
+    // failure occurs from a LaunchDaemon but NOT from Terminal/Xcode. A PASS from
+    // an interactive shell is therefore the EXPECTED result even when the bug is
+    // present, and must not be reported as closing the risk.
+    const char *ctx;
+    if (getppid() == 1)                 ctx = "launchd (daemon)";
+    else if (isatty(STDIN_FILENO))      ctx = "interactive terminal";
+    else                                ctx = "non-tty, not launchd";
+    const BOOL decisiveContext = (getppid() == 1);
+
+    alog("ATTACH", @"launch context: %s (ppid=%d)", ctx, getppid());
+
     if (ifTotal == 0) {
         alog("ERROR", @"VERDICT=INCONCLUSIVE (device exposed no IOUSBHostInterface children)");
         return 3;
     }
-    if (ifCaptured == ifTotal) {
-        alog("ATTACH", @"VERDICT=PASS — FB16524420 does NOT reproduce here; exporter design is viable");
+    if (ifCaptured != ifTotal) {
+        alog("ERROR", @"VERDICT=FAIL — interface capture blocked in context '%s'; "
+                       "exporter design must change", ctx);
+        return 4;
+    }
+    if (decisiveContext) {
+        alog("ATTACH", @"VERDICT=PASS — capture succeeded from a LaunchDaemon. This is the "
+                        "decisive context: FB16524420 does NOT reproduce on this build.");
         return 0;
     }
-    alog("ERROR", @"VERDICT=FAIL — interface capture blocked; exporter design must change");
-    return 4;
+    alog("ATTACH", @"VERDICT=PASS_NONDECISIVE — capture works from '%s', but FB16524420 is "
+                    "reported to spare exactly this context. Re-run as a LaunchDaemon "
+                    "(install_daemon.sh) to actually close the risk.", ctx);
+    return 0;
 }
 
 #pragma mark - main
