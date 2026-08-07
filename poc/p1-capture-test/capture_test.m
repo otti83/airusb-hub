@@ -356,12 +356,63 @@ static int captureTest(uint16_t vid, uint16_t pid)
         }
     }
 
-    // ---- STEP 3: THE FB16524420 TEST — capture each IOUSBHostInterface -----
-    // This is the step that reportedly regressed in macOS 15.3 for mass storage.
+    // ---- STEP 3: re-publish the interfaces WITHOUT driver matching ----------
+    //
+    // IOUSBHostObjectInitOptionsDeviceCapture terminated every driver and client of
+    // this device, including the IOUSBHostInterface nubs. Any io_service_t we
+    // enumerated before the capture is now stale, and IOUSBHostDevice.h warns:
+    //
+    //   "After the completion of this call, the interfaces are not guaranteed
+    //    to be immediately available."
+    //
+    // So we must re-select the configuration to republish them, with
+    // matchInterfaces:NO so IOUSBMassStorageDriver does not immediately re-attach
+    // and remount the drive we are trying to lease. Then wait for the nubs to
+    // appear rather than assuming they already have.
+    {
+        NSUInteger cfgValue = 1;
+        NSError *de = nil;
+        const IOUSBConfigurationDescriptor *cd =
+            [device configurationDescriptorWithIndex:0 error:&de];
+        if (cd) {
+            cfgValue = cd->bConfigurationValue;
+            alog("ENUM", @"config[0]: bConfigurationValue=%u wTotalLength=%u interfaces=%u",
+                 cd->bConfigurationValue, USBToHost16(cd->wTotalLength), cd->bNumInterfaces);
+        } else {
+            alog("ERROR", @"configurationDescriptorWithIndex:0 failed: %@", ioerr(de));
+        }
+
+        NSError *ce = nil;
+        alog("ATTACH", @"configureWithValue:%lu matchInterfaces:NO", (unsigned long)cfgValue);
+        if (![device configureWithValue:cfgValue matchInterfaces:NO error:&ce])
+            alog("ERROR", @"configureWithValue failed: %@", ioerr(ce));
+    }
+
+    // ---- STEP 4: THE FB16524420 TEST — capture each IOUSBHostInterface -----
     NSUInteger ifTotal = 0, ifCaptured = 0;
     NSMutableArray<IOUSBHostInterface *> *interfaces = [NSMutableArray array];
 
+    // Poll for the republished interface nubs. Under launchd this genuinely needs
+    // the wait; from Terminal enough time had usually elapsed to hide it.
     io_iterator_t it = IO_OBJECT_NULL;
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:5.0];
+    NSUInteger present = 0;
+    do {
+        present = 0;
+        if (IORegistryEntryGetChildIterator(devService, kIOServicePlane, &it) == KERN_SUCCESS) {
+            io_service_t c;
+            while ((c = IOIteratorNext(it))) {
+                if (IOObjectConformsTo(c, (char *)kIOUSBHostInterfaceClassName)) present++;
+                IOObjectRelease(c);
+            }
+            IOObjectRelease(it);
+        }
+        if (present > 0) break;
+        CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.1, true);
+    } while ([deadline timeIntervalSinceNow] > 0);
+
+    alog("ATTACH", @"interface nubs republished: %lu", (unsigned long)present);
+
     if (IORegistryEntryGetChildIterator(devService, kIOServicePlane, &it) == KERN_SUCCESS) {
         io_service_t child;
         while ((child = IOIteratorNext(it))) {
@@ -370,13 +421,43 @@ static int captureTest(uint16_t vid, uint16_t pid)
                 NSNumber *cls = propNum(child, CFSTR("bInterfaceClass"));
                 NSNumber *num = propNum(child, CFSTR("bInterfaceNumber"));
 
+                // -[IOUSBHostObject openWithOptions:error:] can THROW rather than
+                // return an NSError: on macOS 26.5 under launchd it built an
+                // NSDictionary from a nil value and raised NSInvalidArgumentException,
+                // killing the process. A root exporter daemon must never die that
+                // way, so every init is wrapped. This is a hard requirement for the
+                // real exporter, not just for this probe.
                 NSError *ie = nil;
-                IOUSBHostInterface *iface =
-                    [[IOUSBHostInterface alloc] initWithIOService:child
-                                                         options:IOUSBHostObjectInitOptionsDeviceCapture
-                                                           queue:nil
-                                                           error:&ie
-                                                 interestHandler:nil];
+                IOUSBHostInterface *iface = nil;
+                @try {
+                    iface = [[IOUSBHostInterface alloc] initWithIOService:child
+                                                                 options:IOUSBHostObjectInitOptionsNone
+                                                                   queue:nil
+                                                                   error:&ie
+                                                         interestHandler:nil];
+                } @catch (NSException *ex) {
+                    alog("ERROR", @"RESULT=INTERFACE_INIT_THREW num=%@ class=0x%02x  %@: %@",
+                         num ?: @"?", cls.unsignedIntValue, ex.name, ex.reason);
+                }
+
+                // Fall back to an explicit capture if the plain open did not take.
+                if (!iface) {
+                    NSError *ie2 = nil;
+                    @try {
+                        iface = [[IOUSBHostInterface alloc]
+                                    initWithIOService:child
+                                              options:IOUSBHostObjectInitOptionsDeviceCapture
+                                                queue:nil
+                                                error:&ie2
+                                      interestHandler:nil];
+                        if (iface) alog("ATTACH", @"  (needed DeviceCapture on the interface)");
+                    } @catch (NSException *ex) {
+                        alog("ERROR", @"RESULT=INTERFACE_CAPTURE_THREW num=%@  %@: %@",
+                             num ?: @"?", ex.name, ex.reason);
+                    }
+                    if (!iface && ie2) ie = ie2;
+                }
+
                 if (iface) {
                     ifCaptured++;
                     [interfaces addObject:iface];
@@ -393,9 +474,8 @@ static int captureTest(uint16_t vid, uint16_t pid)
                 } else {
                     alog("ERROR", @"RESULT=INTERFACE_CAPTURE_FAILED num=%@ class=0x%02x %@",
                          num ?: @"?", cls.unsignedIntValue, ioerr(ie));
-                    if (ie.code == kIOReturnInternalError) {
+                    if (ie.code == kIOReturnInternalError)
                         alog("ERROR", @"  ^ 0xE00002C9 kIOReturnInternalError == the FB16524420 signature");
-                    }
                 }
             }
             IOObjectRelease(child);
