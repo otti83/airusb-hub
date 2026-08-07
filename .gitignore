@@ -24,3 +24,4 @@ captures/
 
 # Generated at runtime by poc/p0-probe/run_probe.sh
 poc/p0-probe/ent_*.plist
+poc/p1-capture-test/capture_test
