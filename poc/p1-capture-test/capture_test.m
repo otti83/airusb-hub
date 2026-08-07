@@ -101,6 +101,31 @@ static void collectBSDNames(io_service_t node, NSMutableSet<NSString *> *out)
 
 #pragma mark - listing
 
+/// Print a ready-to-paste command for every attached device, so the caller never has
+/// to substitute a placeholder by hand.
+static void printSuggestions(void)
+{
+    io_iterator_t it = IO_OBJECT_NULL;
+    if (IOServiceGetMatchingServices(kIOMainPortDefault,
+                                     IOServiceMatching(kIOUSBHostDeviceClassName),
+                                     &it) != KERN_SUCCESS) return;
+
+    io_service_t dev; int n = 0;
+    while ((dev = IOIteratorNext(it))) {
+        NSNumber *vid = propNum(dev, CFSTR("idVendor"));
+        NSNumber *pid = propNum(dev, CFSTR("idProduct"));
+        NSString *name = propStr(dev, CFSTR("USB Product Name"));
+        if (n == 0) fprintf(stdout, "\nrun one of these (copy the whole line):\n\n");
+        fprintf(stdout, "  sudo ./capture_test --capture %04x:%04x      # %s\n",
+                vid.unsignedIntValue, pid.unsignedIntValue,
+                (name ?: @"unknown device").UTF8String);
+        n++;
+        IOObjectRelease(dev);
+    }
+    IOObjectRelease(it);
+    if (n == 0) fprintf(stdout, "\nno USB devices attached — plug in the test drive first.\n");
+}
+
 static void listDevices(void)
 {
     io_iterator_t it = IO_OBJECT_NULL;
@@ -187,7 +212,13 @@ static BOOL unmountVolumes(NSSet<NSString *> *bsdNames)
 
     for (NSString *bsd in bsdNames) {
         // Only unmount whole disks; kDADiskUnmountOptionWhole takes the slices with it.
-        if ([bsd rangeOfString:@"s" options:0 range:NSMakeRange(4, bsd.length - 4)].location != NSNotFound) continue;
+        // "disk22" -> whole disk, keep.  "disk22s1" -> slice, skip.
+        // Guard the range explicitly: this runs as root, and a short or unexpected
+        // BSD name must not become an out-of-bounds range.
+        if (bsd.length <= 4 || ![bsd hasPrefix:@"disk"]) continue;
+        if ([bsd rangeOfString:@"s"
+                       options:0
+                         range:NSMakeRange(4, bsd.length - 4)].location != NSNotFound) continue;
 
         DADiskRef disk = DADiskCreateFromBSDName(kCFAllocatorDefault, session, bsd.UTF8String);
         if (!disk) continue;
@@ -379,19 +410,22 @@ int main(int argc, const char *argv[])
 
         if (args.count >= 3 && [args[1] isEqualToString:@"--capture"]) {
             unsigned vid = 0, pid = 0;
-            if (sscanf(args[2].UTF8String, "%x:%x", &vid, &pid) != 2) {
-                alog("ERROR", @"bad VID:PID, expected hex like 0781:5583");
+            // Accept "058f:6387". Reject anything else, including the literal
+            // placeholder "VID:PID" — and then show the real commands.
+            if (sscanf(args[2].UTF8String, "%4x:%4x", &vid, &pid) != 2
+                || vid > 0xFFFF || pid > 0xFFFF) {
+                alog("ERROR", @"'%@' is not a VID:PID. It must be four hex digits, "
+                              "a colon, four hex digits.", args[2]);
+                printSuggestions();
                 return 1;
             }
             return captureTest((uint16_t)vid, (uint16_t)pid);
         }
 
         listDevices();
-        fprintf(stdout,
-                "\nusage:\n"
-                "  capture_test                     list USB devices (safe, read-only)\n"
-                "  sudo capture_test --capture VID:PID   full capture lifecycle test\n"
-                "\nUse a USB drive whose contents you do not care about.\n");
+        printSuggestions();
+        fprintf(stdout, "\nUse a USB drive whose contents you do not care about.\n"
+                        "The drive is unmounted and then handed back; nothing is written to it.\n");
         return 0;
     }
 }
