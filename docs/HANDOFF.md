@@ -17,21 +17,36 @@ authenticated as `otti83`).
 | Encryption + authentication | **done** — Noise_XX / Noise_IK, official vectors matched |
 | Session layer, L1 protocol, manifest | **done** |
 | Networking | **done** — real TCP, macOS↔macOS and macOS↔Linux |
-| Windows client | **cross-compiles**; never built with MSVC, never executed |
+| Windows client | **cross-compiles**; MSVC audited and one real break fixed, but MSVC still never *run* and the exe never executed |
 | Receiving on a Mac | **blocked on Apple** — FB24214361, see §2 |
 | Receiving on Windows / Linux | driver half not written |
 
 ```
 13 test suites / 0 failures
 3 fuzz targets / 0 crashes / 0 UB findings
-Zero warnings: macOS (Clang, full flag set), Linux (GCC 12, -Wall -Wextra)
+Zero warnings: macOS (Clang, full flag set), Linux (GCC 12, -Wall -Wextra),
+               Windows (MinGW, full flag set — -Wpedantic -Wconversion
+               -Wsign-conversion -Wshadow, not just -Wall -Wextra)
 ~21,500 lines ours + 10 vendored files
 ```
 
 ### THE NEXT TASK: verify on Windows
 
-Everything needed is built and published. §4 is the procedure. It is the one
-claim in this project that is currently *assumed* rather than measured.
+Still the one claim in this project that is *assumed* rather than measured — but
+the ground has moved since the last session, and the cheap half is now free:
+
+1. **Push, and let CI answer it.** `.github/workflows/ci.yml` exists and is
+   committed but **has never run, because nothing has been pushed**. Its Windows
+   job builds with MSVC 2022, runs the suites natively, and requires a complete
+   USB Mass Storage exchange over a real loopback socket. One `git push` turns
+   "never built with MSVC, never executed" into a measured result with no Windows
+   box involved. Do this first; it is one command.
+2. **Then the real box**, for the thing CI cannot do: a genuine two-machine LAN
+   run against the macOS exporter. §4.
+
+**MSVC would have failed before this session, and now should not.** It was
+audited against directly (§3.3); one real build break was found and fixed. That
+is a prediction, not a measurement — CI is what settles it.
 
 ---
 
@@ -288,15 +303,55 @@ suspend time). The fallback is ~15 ms granular; every deadline in the timeout
 table is hundreds of ms or more, so that costs precision in the PING latency
 figure and nothing else.
 
-**Not verified, and this is the point of the next task:**
+**The MSVC audit (2026-08-09) — read this before touching Windows again.**
 
-- **No MSVC build has ever been run.** MinGW proves headers, APIs and linkage.
-  MSVC is stricter under `/permissive-`; `/utf-8` is set because the sources carry
-  em dashes and typographic quotes inside user-facing string literals, which MSVC
-  would otherwise read in the active code page and mangle.
-- **The `.exe` has never been executed.** Wine is not installed on this Mac and
-  the Windows box has no SSH.
+MSVC cannot be run on this Mac, so the sources were audited against it instead:
+seven passes over the 21 TUs in the `airusb-net` target, every finding then
+adversarially re-checked against the real microsoft/STL sources.
+
+**It found exactly one hard build break, and it was fixed.**
+`crypto/Primitives.h` declared `std::string toHex(...)` while including
+`<string_view>` but not `<string>`. libc++ and libstdc++ both leak `<string>`
+elsewhere, which is why Clang and MinGW were silent for the life of the project.
+Microsoft's does not: `<string_view>` reaches `<xstring>` only under the opt-in
+`_LEGACY_CODE_ASSUMES_STRING_VIEW_INCLUDES_XSTRING`, and `std::string`'s alias
+lives nowhere else. 7 of the 10 TUs reaching that header had no prior `<string>`,
+and `crypto/Primitives.cpp` is the first source of the first library the
+documented command builds — MSVC would have died in the first minute.
+
+**What it refuted is the more useful half. Do not re-derive these:**
+
+| hypothesis | verdict |
+|---|---|
+| `SO_REUSEADDR` on the listener is a Windows port-hijack switch | REFUTED — keyed on the *second* binder, and needs the same user, who can already read the identity seed. `SO_EXCLUSIVEADDRUSE` was applied, then reverted: it blocks rebinding for up to 120 s of TIME_WAIT after Ctrl-C, the wrong trade for a hand-driven tool |
+| the pin store rejects CRLF and would silently unpair everyone | REFUTED — `writeFileAtomically` is `"wb"`, `readWholeFile` is `"rb"`; nothing writes CRLF, and Notepad has preserved LF since Win10 1809 |
+| the listening `SOCKET` truncated to `int` breaks on Windows | REFUTED as a defect — kernel handles are capped near 2²⁶ by the handle table and MSDN documents the truncate/sign-extend round trip. Fixed anyway as type hygiene |
+| `protocol/Messages.h` needs `<string_view>` | REFUTED — MSVC's `<string>` → `<xstring>` → `__msvc_string_view.hpp` supplies it |
+
+Checked and clean: header order (only three TUs include `windows.h`, none before
+`winsock2.h`), `WSAStartup` on both entry points, `BCryptGenRandom`'s NTSTATUS
+handling, `ws2_32`/`bcrypt` reaching the link line, `C_STANDARD 99` degrading to
+a no-op on MSVC, the `$<NOT:$<BOOL:${WIN32}>>` genex, zero bitfields, zero struct
+overlays on the wire, and no order-of-evaluation hazards.
+
+**Still not verified, and this is the point of the next task:**
+
+- **No MSVC build has ever been run.** The audit is a prediction. CI settles it.
+- **The `.exe` has never been executed.** Wine was considered and declined:
+  Homebrew's `wine-stable` is deprecated, fails macOS Gatekeeper, and Homebrew
+  disables it 2026-09-01. CI executes it on real Windows instead.
 - The Windows clock's behaviour across sleep has never been observed.
+- **Expect `/W4` warning noise on the first MSVC run**, not errors — there is no
+  `/WX` anywhere. Likely C4018/C4389 signed-unsigned comparisons at ~8 sites; the
+  one-line answer if it is loud is `/wd4018 /wd4389`. C4324 on `Blake2s` was
+  pre-empted by giving `_state` a `std::uint64_t` element type instead of an
+  `alignas` specifier — same 512 bytes, same 8-byte alignment, no warning to mute.
+
+**Residual risk the audit could not settle:** MSVC's optimizer is not modelled by
+either available compiler, and `RecordLayer::flush` returns `Ok` on a would-block
+short write without any caller re-flushing — unreachable at the current 16 KB
+record ceiling and ≤2 KB transfers, but the first thing to suspect if record
+sizes ever grow toward the 65519 ceiling.
 
 **The Windows machine:** `192.168.0.225`, reachable, **RDP 3389 open, SSH closed**.
 The assistant cannot run anything there; every Windows step must be handed to the
@@ -306,12 +361,28 @@ user as a copy-pasteable command.
 
 ## 4. NEXT TASK — verify on Windows
 
-A prebuilt binary is published so Visual Studio is not required for the first run:
-<https://github.com/otti83/airusb-hub/releases/tag/v0.1.0-preview>
-`airusb-net.exe`, sha256
-`a450f90f780d98282e781d2a994444e003dcf3f129fa59005eb4b332181b4ecc`
+### 4.0 Push first — it is one command and it does most of this for you
 
-### 4.1 Run it
+```bash
+cd "/Users/mba/Desktop/AirUSB Hub" && git push
+```
+
+`.github/workflows/ci.yml` then builds with MSVC 2022, runs the suites natively
+on Windows, and requires a full BOT exchange over a loopback socket. It also runs
+Linux under **ASan** for the first time — the handoff has said since P2 that ASan
+must run somewhere, because it hangs on this Mac and UBSan does not catch the
+heap out-of-bounds that R2/R5/R6 exist to stop. **Expect the ASan job to be the
+one that goes red first**; that is it doing its job, not a broken workflow.
+
+### 4.1 The two-machine run, which CI cannot do
+
+⚠️ **The published prebuilt binary is now stale.** The release at
+<https://github.com/otti83/airusb-hub/releases/tag/v0.1.0-preview>
+(`airusb-net.exe`, sha256
+`a450f90f780d98282e781d2a994444e003dcf3f129fa59005eb4b332181b4ecc`) predates the
+`<string>`, ATTACH-reject and handshake-timeout fixes. Do not test with it —
+take the `airusb-net-msvc-x64` artifact from a CI run, or rebuild. Re-cut the
+release once CI is green.
 
 **On the Mac:**
 
@@ -334,9 +405,10 @@ First run pairs and disconnects — that is trust-on-first-use. **Both sides pri
 six-digit SAS; confirm they match.** Run it a second time to attach and read.
 Success ends with `RESULT=PASS`.
 
-### 4.2 Then build it with MSVC
+### 4.2 Building it with MSVC by hand
 
-This has never been done and is the real acceptance test.
+CI does this for you now. Do it by hand only if CI is red and you need the full
+compiler output, or if you want the Windows box's own toolchain in the loop.
 
 *Developer PowerShell for VS 2022*, needs the "Desktop development with C++"
 workload:
@@ -404,9 +476,11 @@ Expect MSVC to find things MinGW did not. Paste whatever it says.
 - **AddressSanitizer hangs on this host** — any `-fsanitize=address` binary hangs
   before `main()`, including a hello-world with no libFuzzer. Bisected: `fuzzer`
   works, `fuzzer,undefined` works, `address` hangs. Fuzzing defaults to
-  `fuzzer,undefined`; `AIRUSB_FUZZ_ASAN=1` opts back in. **Linux CI must enable
-  ASan** — UBSan does not catch heap out-of-bounds, which is exactly what R2/R5/R6
-  exist to stop.
+  `fuzzer,undefined`; `AIRUSB_FUZZ_ASAN=1` opts back in. **Linux CI now enables
+  ASan** (`.github/workflows/ci.yml`, job `linux-asan`) — UBSan does not catch
+  heap out-of-bounds, which is exactly what R2/R5/R6 exist to stop. That job has
+  never run; it is the likeliest of the four to go red first, and that would be
+  a finding rather than a broken workflow.
 - **`timeout(1)` does not exist on macOS.**
 - **`.gitignore` has no trailing comments.** `path/  # note` matches nothing.
 - Objective-C files compile as C, not C++: no declaration-in-`if`.
@@ -436,6 +510,10 @@ airusb/
   scripts/     cross-build-windows.sh
 apple/         SwiftUI app (device list, detail, eject) + the entitlement probe
 poc/           p0-probe (entitlement matrix), p1-capture-test
+.github/workflows/ci.yml
+               Windows/MSVC + native ctest + a real loopback BOT exchange;
+               Linux under ASan; macOS; the MinGW cross-build. Committed,
+               NEVER RUN — nothing has been pushed yet.
 ```
 
 Layer graph, one direction only:
@@ -448,6 +526,16 @@ cd "/Users/mba/Desktop/AirUSB Hub/airusb"
 cmake -S . -B build && cmake --build build && (cd build && ctest --output-on-failure)
 ./tests/fuzz/build_and_run.sh 300000
 ./scripts/cross-build-windows.sh          # produces build-win/airusb-net.exe
+
+# The cross-build script passes only -Wall -Wextra. To check the Windows target
+# under the flag set CMake actually configures — which is how the last warning
+# in it was found — compile each TU with the full set:
+for f in tools/airusb_net_main.cpp tests/fakes/ScriptedDevice.cpp \
+         core/*.cpp crypto/*.cpp protocol/*.cpp transport/*.cpp \
+         session/*.cpp diag/*.cpp; do
+  x86_64-w64-mingw32-g++ -std=c++20 -O2 -I. -c -Wall -Wextra -Wpedantic \
+    -Wconversion -Wsign-conversion -Wshadow "$f" -o /dev/null || break
+done
 
 # hardware, needs the user (sudo is blocked for the assistant):
 sudo ./platform/macos/scripts/p28_run.sh 058f:6387
@@ -542,4 +630,5 @@ one and Super in the other. Read `USBSpeed`, cross-check `UsbLinkSpeed`.
 | OQ-6 | are the credit/pipeline constants in the safe direction? | unresolved; instrument in P2.9 |
 | OQ-7 | no `API_AVAILABLE` on the IOUSBHostCI headers, so the ABI could shift | pin a tested range; treat any exception at init as a hard refusal |
 | new | does the exporter's **write** path work under load? | **untested** — the probe is read-only |
-| new | does the Windows client actually run? | **THE NEXT TASK, §4** |
+| new | does the Windows client actually run? | **THE NEXT TASK, §4.** CI answers it on push; the two-machine LAN run still needs the box |
+| new | does MSVC accept the sources? | audited hard (§3.3), one real break found and fixed — but a prediction until CI runs |
