@@ -34,19 +34,36 @@ See `P0_MACOS_FEASIBILITY.md` §4 for the verification.
 
 ### Route A — Capability Requests tab (try first, 2 minutes)
 
-Apple added a self-service request tab:
-
 <https://developer.apple.com/help/account/capabilities/capability-requests/>
 
-> Certificates, Identifiers & Profiles → **Identifiers** → **Capability Requests**
+**The tab lives inside an individual App ID, not in the sidebar.** Apple's steps:
 
-Requires the **Account Holder** role. If `USB Host Controller Interface` appears in
-the list, request it there and skip Route B.
+> 1. Certificates, Identifiers & Profiles → **Identifiers**
+> 2. **Click the name of the identifier** in the list of App IDs
+> 3. Click the **Capability Requests** tab
 
-As of the most recent Apple DTS statement it is *not* listed there — Kevin Elliott
-(DTS, CoreOS/Hardware) said the request volume "is low enough that it's never been
-integrated into the developer portal" — but the tab is new and the list changes, so
-it costs nothing to look.
+So an App ID must exist before the tab exists at all. Nothing about building,
+signing, or notarizing an app registers an identifier — the list is a ledger you
+populate by hand with the **⊕** button.
+
+**Register the App ID first** (role: Account Holder or Admin):
+
+| field | value |
+|---|---|
+| type | App IDs → App |
+| Description | `AirUSB Hub` |
+| type | **Explicit App ID** |
+| Bundle ID | e.g. `com.<yourdomain>.airusbhub` — must later match the Xcode target |
+
+Leave the capability checkboxes alone for now; they can be changed later.
+
+Then open the App ID and check the Capability Requests tab for anything USB-related.
+
+**Expect it to be absent.** Apple's own documentation does not describe how to
+request a capability that is *not* listed there, which matches Kevin Elliott (DTS,
+CoreOS/Hardware) saying the request volume "is low enough that it's never been
+integrated into the developer portal". An empty or USB-free tab is the normal
+outcome, not a misconfiguration — go to Route B.
 
 ### Route B — Feedback Assistant (the documented path)
 
