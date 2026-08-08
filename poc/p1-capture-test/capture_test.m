@@ -268,6 +268,55 @@ static BOOL unmountVolumes(NSSet<NSString *> *bsdNames)
     return ctx.ok;
 }
 
+#pragma mark - authorization (run from a GUI session)
+
+/// Ask the console user to authorize this device and its interfaces, so that a
+/// later LaunchDaemon open can succeed without a session of its own.
+///
+/// This mirrors the real product shape: the unprivileged UI agent lives in the GUI
+/// session and can solicit consent; the root daemon cannot. If authorization
+/// persists across processes, the daemon's IOServiceOpen should stop returning
+/// kIOReturnNotPermitted after this has been run once.
+static int authorizeDevice(uint16_t vid, uint16_t pid)
+{
+    io_service_t dev = findDevice(vid, pid);
+    if (!dev) { alog("ERROR", @"device %04x:%04x not found", vid, pid); return 1; }
+
+    alog("ATTACH", @"authorizing %04x:%04x (a consent prompt may appear)", vid, pid);
+
+    kern_return_t kr = IOServiceAuthorize(dev, kIOServiceInteractionAllowed);
+    alog("ATTACH", @"IOServiceAuthorize(device) -> 0x%08X %s",
+         kr, kr == KERN_SUCCESS ? "(GRANTED)" : mach_error_string(kr));
+
+    int failures = (kr == KERN_SUCCESS) ? 0 : 1;
+
+    io_iterator_t it = IO_OBJECT_NULL;
+    if (IORegistryEntryGetChildIterator(dev, kIOServicePlane, &it) == KERN_SUCCESS) {
+        io_service_t child;
+        while ((child = IOIteratorNext(it))) {
+            if (IOObjectConformsTo(child, (char *)kIOUSBHostInterfaceClassName)) {
+                NSNumber *num = propNum(child, CFSTR("bInterfaceNumber"));
+                kern_return_t k2 = IOServiceAuthorize(child, kIOServiceInteractionAllowed);
+                alog("ATTACH", @"IOServiceAuthorize(interface %@) -> 0x%08X %s",
+                     num ?: @"?", k2, k2 == KERN_SUCCESS ? "(GRANTED)" : mach_error_string(k2));
+                if (k2 != KERN_SUCCESS) failures++;
+            }
+            IOObjectRelease(child);
+        }
+        IOObjectRelease(it);
+    }
+
+    IOObjectRelease(dev);
+
+    if (failures == 0) {
+        alog("ATTACH", @"RESULT=AUTHORIZED — now re-run the LaunchDaemon test:");
+        fprintf(stdout, "\n  sudo ./run_as_daemon.sh %04x:%04x\n\n", vid, pid);
+        return 0;
+    }
+    alog("ERROR", @"RESULT=AUTHORIZE_INCOMPLETE (%d failed)", failures);
+    return 1;
+}
+
 #pragma mark - the actual test
 
 static int captureTest(uint16_t vid, uint16_t pid)
@@ -433,6 +482,22 @@ static int captureTest(uint16_t vid, uint16_t pid)
                 // The framework calls IOServiceOpen(ioService, mach_task_self_, 0, &c)
                 // (+144..+168). Doing exactly that ourselves surfaces the real code.
                 {
+                    // IOKitLib.h:614-619 — IOServiceAuthorize returns exactly
+                    // kIOReturnNotPermitted when the service "is not authorized",
+                    // and it authorizes "either by confirming that it has been
+                    // previously authorized by the user, or by soliciting the
+                    // console user". A LaunchDaemon has no console user to solicit,
+                    // so ask without interaction first and report what a prior
+                    // authorization would look like.
+                    kern_return_t ar = IOServiceAuthorize(child, 0);
+                    alog("ATTACH", @"IOServiceAuthorize(interface, no-interaction) -> 0x%08X %s",
+                         ar, ar == KERN_SUCCESS ? "(ALREADY AUTHORIZED)" : mach_error_string(ar));
+                    if (ar != KERN_SUCCESS) {
+                        kern_return_t ai = IOServiceAuthorize(child, kIOServiceInteractionAllowed);
+                        alog("ATTACH", @"IOServiceAuthorize(interface, interaction-allowed) -> 0x%08X %s",
+                             ai, ai == KERN_SUCCESS ? "(GRANTED)" : mach_error_string(ai));
+                    }
+
                     io_connect_t probe = IO_OBJECT_NULL;
                     kern_return_t kr = IOServiceOpen(child, mach_task_self(), 0, &probe);
                     alog("ATTACH", @"raw IOServiceOpen(interface, type=0) -> 0x%08X %s",
@@ -563,6 +628,16 @@ int main(int argc, const char *argv[])
         NSArray<NSString *> *args = [NSProcessInfo processInfo].arguments;
         alog("ATTACH", @"capture_test  euid=%d  args=%@", geteuid(),
              [[args subarrayWithRange:NSMakeRange(1, args.count - 1)] componentsJoinedByString:@" "]);
+
+        if (args.count >= 3 && [args[1] isEqualToString:@"--authorize"]) {
+            unsigned vid = 0, pid = 0;
+            if (sscanf(args[2].UTF8String, "%4x:%4x", &vid, &pid) != 2) {
+                alog("ERROR", @"'%@' is not a VID:PID", args[2]);
+                printSuggestions();
+                return 1;
+            }
+            return authorizeDevice((uint16_t)vid, (uint16_t)pid);
+        }
 
         if (args.count >= 3 && [args[1] isEqualToString:@"--capture"]) {
             unsigned vid = 0, pid = 0;
