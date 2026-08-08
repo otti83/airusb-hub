@@ -161,8 +161,9 @@ worth knowing before spending effort on the wording rather than after.
 
 ## 4. Draft request text
 
-Fill in the two bracketed items and paste into *Describe the Issue*. Written to
-answer the question DTS says is the deciding one.
+Ready to paste into *Describe the Issue*. Nothing left to fill in. Written to
+answer the question DTS says is the deciding one — not "what went wrong" but
+"what are you building and why does it need to simulate a USB controller".
 
 ```
 Team ID: GZUV3UMV3B
@@ -217,35 +218,30 @@ DISTRIBUTION
 Developer ID signed and notarized, distributed outside the Mac App Store, with
 full source published under an open-source license.
 
-PROJECT / MATERIAL
+PROJECT
 
-The project is not yet published. Its current state:
+  https://github.com/otti83/airusb-hub
 
-- A feasibility report establishing that IOUSBHostControllerInterface is the only
-  supported route on macOS, with the alternatives evaluated and rejected.
-- A working exporter, verified against real hardware: a root LaunchDaemon captures
-  a USB device with IOUSBHostObjectInitOptionsDeviceCapture and an unprivileged
-  console-session agent performs bulk transfers on it. A complete USB Mass Storage
-  Bulk-Only Transport exchange (CBW, data, CSW) has been demonstrated end to end
-  against a SuperSpeed flash drive, and the drive is restored to the host cleanly
-  afterwards.
-- A full session layer: Noise_XX / Noise_IK (X25519, ChaCha20-Poly1305, BLAKE2s)
-  verified byte for byte against the official Noise cross-implementation test
-  vectors, mutual authentication with pinned peer identities, and a numeric
-  comparison code for pairing.
-- The importing half is the only part not built, because it is the only part that
-  needs this entitlement.
+Open source, full history, screenshots and hardware verification logs in the repo.
 
-I am happy to provide the source, the hardware verification logs, or a build to
-anyone at Apple who would like to see them.
+What is already built and working:
+
+- The sharing half, verified against real hardware. A root LaunchDaemon captures a
+  USB device with IOUSBHostObjectInitOptionsDeviceCapture; an unprivileged
+  console-session agent opens the interface and moves data. A complete USB Mass
+  Storage exchange (CBW, data, CSW) runs end to end against a SuperSpeed flash
+  drive and the drive is returned to the host cleanly afterwards.
+- Session security: Noise_XX / Noise_IK over X25519, ChaCha20-Poly1305 and
+  BLAKE2s, checked byte for byte against the official Noise cross-implementation
+  test vectors. Mutual authentication against pinned peer identities, with a
+  six-digit numeric comparison for pairing.
+- A SwiftUI app for device status and ejection.
+
+The importing half is the only part not built, because it is the only part that
+needs this entitlement.
 ```
 
-> **Before sending, consider publishing the repository.** Apple's stated criterion
-> is "marketing material for your product(s) and/or company", and the request above
-> currently answers that with a description rather than a link. A public repository
-> with the README, the feasibility report and the hardware evidence is the cheapest
-> thing that turns "I intend to build" into "here is what I built", and it is the
-> single change most likely to affect the outcome for an Individual account.
+> Published 2026-08-08: <https://github.com/otti83/airusb-hub>
 
 ---
 
