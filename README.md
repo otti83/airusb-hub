@@ -92,10 +92,11 @@ While developing and testing, use a USB drive you do not care about.
 
 | Document | Contents |
 |---|---|
+| [`docs/HANDOFF.md`](docs/HANDOFF.md) | **Start here.** Current state, verified facts, refuted hypotheses, open questions, next task. |
 | [`docs/P0_MACOS_FEASIBILITY.md`](docs/P0_MACOS_FEASIBILITY.md) | Can this be built on macOS through supported APIs? Evidence and verdict. |
-
-More documents (architecture, protocol, platform backends, test matrix, known
-limitations) arrive as the phases they describe are completed.
+| [`docs/P1_IMPLEMENTATION_PLAN.md`](docs/P1_IMPLEMENTATION_PLAN.md) | Architecture, wire protocol, concurrency model, timeout budget, test plan. |
+| [`docs/P1_CAPTURE_VERIFICATION.md`](docs/P1_CAPTURE_VERIFICATION.md) | What was measured on real hardware, and why the exporter is two processes. |
+| [`docs/ENTITLEMENT_REQUEST.md`](docs/ENTITLEMENT_REQUEST.md) | How to request the one Apple-managed entitlement the importer needs. |
 
 ---
 
