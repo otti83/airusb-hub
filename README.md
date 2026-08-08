@@ -26,8 +26,9 @@ entitlement (see below).
 |---|---|
 | Sharing a device from a Mac | **works on real hardware** |
 | Encryption and authentication | **done** — Noise_XX / Noise_IK |
+| Networking, cross-platform | **done** — a USB exchange runs macOS↔macOS and macOS↔Linux over TCP |
 | Receiving a device on a Mac | **blocked** — awaiting Apple, FB24214361 |
-| Windows, Linux | later |
+| Receiving on Windows / Linux | client works; the driver half is next |
 
 ---
 
@@ -78,6 +79,18 @@ restore: mount table matches 'before' exactly
 
 A complete USB Mass Storage exchange, through pipes obtained across the process
 split, with the drive handed back cleanly afterwards. The probe is read-only.
+
+The same exchange also runs **over the network, between operating systems** —
+macOS exporter to a Linux client, encrypted and mutually authenticated:
+
+```
+verdict=PASS  cbw=6 data=5 csw=6 stallRecoveries=0 boundariesIntact=yes
+RESULT=PASS — a USB Mass Storage exchange completed over an encrypted,
+              authenticated network session
+```
+
+The client is portable C++ and builds on Windows too — see
+[`docs/WINDOWS.md`](docs/WINDOWS.md).
 
 The Noise handshake is checked byte for byte against the official
 cross-implementation test vectors, including the final handshake hash — a Noise
@@ -130,6 +143,7 @@ Requires macOS 13+, Xcode 26. Tested on macOS 26.5, Apple M1.
 | [Why two processes](docs/P1_CAPTURE_VERIFICATION.md) | What was measured on real hardware. |
 | [The exporter](docs/P2_8_EXPORTER.md) | How sharing works, and the hardware evidence. |
 | [Security](docs/P2_4_SECURITY.md) | What protects a session, and how it was verified. |
+| [Windows](docs/WINDOWS.md) | Building and running the client on Windows against a Mac. |
 | [Entitlement](docs/ENTITLEMENT_REQUEST.md) | The one Apple-managed entitlement the receiving half needs. |
 
 ---

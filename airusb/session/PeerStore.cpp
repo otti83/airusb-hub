@@ -1,12 +1,10 @@
 #include "PeerStore.h"
 
-#include <cerrno>
+#include "../core/Platform.h"
+
 #include <cstdio>
 #include <cstring>
 #include <sstream>
-
-#include <fcntl.h>
-#include <unistd.h>
 
 namespace airusb::session {
 
@@ -182,67 +180,22 @@ bool PeerStore::deserialize(const std::string& text)
 
 Status PeerStore::save(const std::string& path) const
 {
-    const std::string text = serialize();
-    const std::string tmp = path + ".tmp";
-
-    const int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
-    if (fd < 0) return Status::NotPermitted;
-
-    std::size_t at = 0;
-    while (at < text.size()) {
-        const ssize_t n = ::write(fd, text.data() + at, text.size() - at);
-        if (n <= 0) {
-            if (n < 0 && errno == EINTR) continue;
-            ::close(fd);
-            (void)::unlink(tmp.c_str());
-            return Status::Internal;
-        }
-        at += static_cast<std::size_t>(n);
-    }
-
-    // fsync before rename. Without it a crash can leave the rename durable and
-    // the contents not, which produces an empty pin store — every peer silently
-    // unpaired, and the user prompted to re-pair as if nothing had happened.
-    if (::fsync(fd) != 0) {
-        ::close(fd);
-        (void)::unlink(tmp.c_str());
-        return Status::Internal;
-    }
-    ::close(fd);
-
-    if (::rename(tmp.c_str(), path.c_str()) != 0) {
-        (void)::unlink(tmp.c_str());
-        return Status::Internal;
-    }
-    return Status::Ok;
+    // Atomic replace, private to the owner. The durability detail lives in
+    // platform::writeFileAtomically because it is the one part that differs
+    // between fsync+rename and FlushFileBuffers+MoveFileEx.
+    return platform::writeFileAtomically(path, serialize(), /*privateToOwner=*/true)
+             ? Status::Ok : Status::Internal;
 }
 
 Status PeerStore::load(const std::string& path)
 {
-    const int fd = ::open(path.c_str(), O_RDONLY);
-    if (fd < 0) {
-        // No file is a first run, not a failure. The store stays empty, which
-        // means every peer is unpaired — the correct default.
-        if (errno == ENOENT) { _peers.clear(); return Status::Ok; }
-        return Status::NotPermitted;
-    }
-
     std::string text;
-    char buf[4096];
-    for (;;) {
-        const ssize_t n = ::read(fd, buf, sizeof buf);
-        if (n == 0) break;
-        if (n < 0) {
-            if (errno == EINTR) continue;
-            ::close(fd);
-            return Status::Internal;
-        }
-        text.append(buf, static_cast<std::size_t>(n));
-        // A pin store this large is not a pin store.
-        if (text.size() > (1u << 20)) { ::close(fd); return Status::LimitExceeded; }
+    if (!platform::readWholeFile(path, text, 1u << 20)) {
+        // A missing file is a first run, not a failure: the store stays empty,
+        // which means every peer is unpaired — the correct default.
+        _peers.clear();
+        return Status::Ok;
     }
-    ::close(fd);
-
     return deserialize(text) ? Status::Ok : Status::MalformedFrame;
 }
 

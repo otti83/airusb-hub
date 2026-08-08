@@ -10,7 +10,15 @@ extern "C" {
 #include <cstring>
 #include <string>
 
-#include <sys/random.h>
+#if defined(_WIN32)
+  #ifndef WIN32_LEAN_AND_MEAN
+    #define WIN32_LEAN_AND_MEAN
+  #endif
+  #include <windows.h>
+  #include <bcrypt.h>
+#else
+  #include <sys/random.h>
+#endif
 
 namespace airusb::crypto {
 
@@ -312,6 +320,17 @@ void wipe(void* p, std::size_t n) noexcept
 
 void randomBytes(std::span<std::uint8_t> out)
 {
+    if (out.empty()) return;
+
+#if defined(_WIN32)
+    // BCryptGenRandom with the system-preferred RNG. Not rand_s, not
+    // CryptGenRandom: this is the one Microsoft documents as the CSPRNG and the
+    // one that does not need a provider handle to be opened and leaked.
+    const NTSTATUS st = ::BCryptGenRandom(
+        nullptr, out.data(), static_cast<ULONG>(out.size()),
+        BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+    if (st != 0) std::abort();
+#else
     std::size_t at = 0;
     while (at < out.size()) {
         // getentropy(2) is capped at 256 bytes per call on both macOS and Linux.
@@ -324,6 +343,7 @@ void randomBytes(std::span<std::uint8_t> out)
         }
         at += chunk;
     }
+#endif
 }
 
 std::string toHex(std::span<const std::uint8_t> in)

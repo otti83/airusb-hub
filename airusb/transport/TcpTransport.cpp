@@ -1,50 +1,38 @@
 #include "TcpTransport.h"
 
-#include <arpa/inet.h>
-#include <cerrno>
+#include "../core/Platform.h"
+
 #include <cstring>
-#include <fcntl.h>
-#include <netdb.h>
-#include <netinet/in.h>
-#include <netinet/tcp.h>
-#include <sys/socket.h>
-#include <unistd.h>
 
 namespace airusb::transport {
 
 namespace {
 
-void setNonBlocking(int fd) noexcept
+void setNonBlocking(platform::SocketHandle fd) noexcept
 {
-    const int flags = ::fcntl(fd, F_GETFL, 0);
-    if (flags >= 0) ::fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+    (void)platform::setNonBlocking(fd);
 }
 
-void setNoDelay(int fd) noexcept
+void setNoDelay(platform::SocketHandle fd) noexcept
 {
     // USB control transfers are small and latency-critical, and every one of them
     // sits in the enumeration critical path. Nagle would coalesce them into 40 ms
     // stalls and make enumeration look broken.
     int one = 1;
-    ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+    ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY,
+                 reinterpret_cast<const char*>(&one), sizeof(one));
 }
 
-Status errnoToStatus(int e) noexcept
+/// The two families of socket error codes, mapped through one predicate set so
+/// the call sites read the same on every platform.
+Status socketErrorToStatus(int e) noexcept
 {
-    switch (e) {
-        case EAGAIN:
-#if EWOULDBLOCK != EAGAIN
-        case EWOULDBLOCK:
-#endif
-        case EINTR:       return Status::Ok;          // caller retries
-        case ECONNRESET:
-        case EPIPE:
-        case ENOTCONN:
-        case ETIMEDOUT:   return Status::TransportLost;
-        case EACCES:
-        case EPERM:       return Status::NotPermitted;
-        default:          return Status::TransportLost;
-    }
+    // "Would block" is Ok with zero bytes moved, not an error: the caller's loop
+    // retries. Conflating it with a real failure turns every non-blocking socket
+    // into a dead one.
+    if (platform::wouldBlock(e)) return Status::Ok;
+    if (platform::connectionLost(e)) return Status::TransportLost;
+    return Status::TransportLost;
 }
 
 } // namespace
@@ -55,32 +43,38 @@ TcpStream::~TcpStream() { close(); }
 
 void TcpStream::close()
 {
-    if (_fd >= 0) { ::close(_fd); _fd = -1; }
+    platform::closeSocket(_fd);
+    _fd = platform::kInvalidSocket;
 }
 
 IoResult TcpStream::write(std::span<const std::uint8_t> src)
 {
-    if (_fd < 0) return {Status::TransportLost, 0};
-    const ssize_t n = ::send(_fd, src.data(), src.size(), 0);
-    if (n < 0) return {errnoToStatus(errno), 0};
-    return {Status::Ok, static_cast<std::size_t>(n)};
+    if (!platform::isValid(_fd)) return {Status::TransportLost, 0};
+    // Winsock's send takes `const char*` and an int length; POSIX takes void*
+    // and size_t. platform::ioLength picks the right one and clamps.
+    const auto n = ::send(_fd, reinterpret_cast<const char*>(src.data()),
+                          platform::ioLength(src.size()), 0);
+    if (n < 0) return {socketErrorToStatus(platform::lastSocketError()), 0};
+    return {Status::Ok, static_cast<std::size_t>(n < 0 ? 0 : n)};
 }
 
 IoResult TcpStream::read(std::span<std::uint8_t> dst)
 {
-    if (_fd < 0) return {Status::TransportLost, 0};
-    const ssize_t n = ::recv(_fd, dst.data(), dst.size(), 0);
-    if (n < 0) return {errnoToStatus(errno), 0};
+    if (!platform::isValid(_fd)) return {Status::TransportLost, 0};
+    const auto n = ::recv(_fd, reinterpret_cast<char*>(dst.data()),
+                          platform::ioLength(dst.size()), 0);
+    if (n < 0) return {socketErrorToStatus(platform::lastSocketError()), 0};
     // A zero-length read on a stream socket is an orderly peer close, not "no data
     // yet" — conflating the two makes a closed connection look like a stall.
     if (n == 0) return {Status::TransportLost, 0};
-    return {Status::Ok, static_cast<std::size_t>(n)};
+    return {Status::Ok, static_cast<std::size_t>(n < 0 ? 0 : n)};
 }
 
 std::unique_ptr<TcpStream> TcpStream::connect(const std::string& host, std::uint16_t port,
                                               Status* status)
 {
     auto set = [&](Status s) { if (status) *status = s; };
+    if (!platform::ensureNetworkReady()) { set(Status::Internal); return nullptr; }
 
     struct addrinfo hints{};
     hints.ai_family   = AF_UNSPEC;
@@ -93,17 +87,21 @@ std::unique_ptr<TcpStream> TcpStream::connect(const std::string& host, std::uint
         return nullptr;
     }
 
-    int fd = -1;
+    platform::SocketHandle fd = platform::kInvalidSocket;
     for (struct addrinfo* p = res; p; p = p->ai_next) {
         fd = ::socket(p->ai_family, p->ai_socktype, p->ai_protocol);
-        if (fd < 0) continue;
-        if (::connect(fd, p->ai_addr, p->ai_addrlen) == 0) break;
-        ::close(fd);
-        fd = -1;
+        if (!platform::isValid(fd)) continue;
+        // Connect while still blocking, then switch to non-blocking. A
+        // non-blocking connect would need its own completion path on every
+        // platform for no benefit at session setup.
+        if (::connect(fd, p->ai_addr,
+                      static_cast<socklen_t>(p->ai_addrlen)) == 0) break;
+        platform::closeSocket(fd);
+        fd = platform::kInvalidSocket;
     }
     ::freeaddrinfo(res);
 
-    if (fd < 0) { set(Status::TransportLost); return nullptr; }
+    if (!platform::isValid(fd)) { set(Status::TransportLost); return nullptr; }
 
     setNoDelay(fd);
     setNonBlocking(fd);
@@ -111,15 +109,20 @@ std::unique_ptr<TcpStream> TcpStream::connect(const std::string& host, std::uint
     return std::make_unique<TcpStream>(fd);
 }
 
-int TcpStream::listen(std::uint16_t port, Status* status)
+platform::SocketHandle TcpStream::listen(std::uint16_t port, Status* status)
 {
     auto set = [&](Status s) { if (status) *status = s; };
+    if (!platform::ensureNetworkReady()) {
+        set(Status::Internal);
+        return platform::kInvalidSocket;
+    }
 
-    const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) { set(Status::TransportLost); return -1; }
+    const platform::SocketHandle fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (!platform::isValid(fd)) { set(Status::TransportLost); return platform::kInvalidSocket; }
 
     int one = 1;
-    ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR,
+                 reinterpret_cast<const char*>(&one), sizeof(one));
 
     struct sockaddr_in addr{};
     addr.sin_family      = AF_INET;
@@ -128,9 +131,9 @@ int TcpStream::listen(std::uint16_t port, Status* status)
 
     if (::bind(fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) != 0
         || ::listen(fd, 8) != 0) {
-        ::close(fd);
+        platform::closeSocket(fd);
         set(Status::TransportLost);
-        return -1;
+        return platform::kInvalidSocket;
     }
 
     setNonBlocking(fd);
@@ -138,11 +141,15 @@ int TcpStream::listen(std::uint16_t port, Status* status)
     return fd;
 }
 
-std::unique_ptr<TcpStream> TcpStream::accept(int listenFd, Status* status)
+std::unique_ptr<TcpStream> TcpStream::accept(platform::SocketHandle listenFd,
+                                            Status* status)
 {
     auto set = [&](Status s) { if (status) *status = s; };
-    const int fd = ::accept(listenFd, nullptr, nullptr);
-    if (fd < 0) { set(errnoToStatus(errno)); return nullptr; }
+    const platform::SocketHandle fd = ::accept(listenFd, nullptr, nullptr);
+    if (!platform::isValid(fd)) {
+        set(socketErrorToStatus(platform::lastSocketError()));
+        return nullptr;
+    }
     setNoDelay(fd);
     setNonBlocking(fd);
     set(Status::Ok);

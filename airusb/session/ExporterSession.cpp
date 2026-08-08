@@ -167,6 +167,7 @@ Status ExporterSession::handle(const Header& h, std::span<const std::uint8_t> bo
         case wire::Type::Attach:      return handleAttach(h, body);
         case wire::Type::Detach:      return handleDetach(h, body);
         case wire::Type::Submit:      return handleSubmit(h, body);
+        case wire::Type::EpClearHalt: return handleClearHalt(h);
 
         case wire::Type::Goodbye:
             _state = State::Closed;
@@ -330,6 +331,24 @@ Status ExporterSession::handleDetach(const Header& h, std::span<const std::uint8
     _attachId = 0;
     _state    = State::Idle;
     return s;
+}
+
+Status ExporterSession::handleClearHalt(const Header& h)
+{
+    if (_state != State::Leased || !_port)
+        return refuse(h, Status::Detaching, "That device is no longer attached.");
+    if (h.attachId != _attachId) return Status::Ok;      // R12: stale, drop silently
+
+    // The endpoint address is the low byte of the derived channel (§3.4), so the
+    // verb needs no body of its own.
+    const std::uint8_t epAddr = static_cast<std::uint8_t>(h.channel & 0xFFu);
+
+    // A verb, not a forwarded control transfer: -clearStallWithError: clears the
+    // device's stall AND the exporter host controller's data toggle. A raw
+    // CLEAR_FEATURE forward clears only the former and leaves every later
+    // transfer on that endpoint silently wrong.
+    const Status st = _port->clearHalt(epAddr);
+    return sendSimple(wire::Type::CtrlAck, st, h.requestId, {});
 }
 
 Status ExporterSession::handleSubmit(const Header& h, std::span<const std::uint8_t> body)

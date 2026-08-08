@@ -10,12 +10,21 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Debug)
 endif()
 
-add_compile_options(
-    -Wall -Wextra -Wpedantic
-    -Wconversion -Wsign-conversion
-    -Wshadow
-    -Wno-unused-parameter
-)
+if(MSVC)
+    # /W4 is MSVC's equivalent of -Wall -Wextra. The specific disables are the
+    # ones that fire on correct, portable C++ rather than on anything worth
+    # fixing: 4100 unreferenced parameter, 4267/4244 the size_t/int narrowing
+    # that the platform shim already handles at the socket boundary.
+    add_compile_options(/W4 /wd4100 /wd4267 /wd4244 /permissive- /Zc:__cplusplus)
+    add_compile_definitions(_CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN)
+else()
+    add_compile_options(
+        -Wall -Wextra -Wpedantic
+        -Wconversion -Wsign-conversion
+        -Wshadow
+        -Wno-unused-parameter
+    )
+endif()
 
 # ---------------------------------------------------------------------------
 # The layer graph. Each library depends only on the ones above it:
@@ -38,8 +47,14 @@ add_library(airusb_core STATIC
     core/Ep0Arbiter.cpp
     core/RequestTable.cpp
     core/CreditController.cpp
+    core/Platform.cpp
 )
 target_include_directories(airusb_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+if(WIN32)
+    # Winsock 2. ws2_32 is the sockets themselves; the platform shim calls
+    # WSAStartup lazily so no caller has to remember.
+    target_link_libraries(airusb_core PUBLIC ws2_32)
+endif()
 
 # ---------------------------------------------------------------------------
 # third_party/ — vendored crypto. NOT our code; see third_party/PROVENANCE.md.
@@ -56,7 +71,11 @@ add_library(airusb_thirdparty STATIC
     third_party/blake2s/blake2s-ref.c
 )
 set_target_properties(airusb_thirdparty PROPERTIES C_STANDARD 99 C_STANDARD_REQUIRED ON)
-target_compile_options(airusb_thirdparty PRIVATE -w)
+if(MSVC)
+    target_compile_options(airusb_thirdparty PRIVATE /W0)
+else()
+    target_compile_options(airusb_thirdparty PRIVATE -w)
+endif()
 
 # ---------------------------------------------------------------------------
 # crypto/ + the Noise handshake — the security layer.
@@ -74,6 +93,10 @@ add_library(airusb_crypto STATIC
     crypto/Identity.cpp
 )
 target_link_libraries(airusb_crypto PUBLIC airusb_core PRIVATE airusb_thirdparty)
+if(WIN32)
+    # BCryptGenRandom, the CSPRNG randomBytes() uses on Windows.
+    target_link_libraries(airusb_crypto PRIVATE bcrypt)
+endif()
 
 # ---------------------------------------------------------------------------
 # protocol/ — the wire format, and the handshake that protects it.
@@ -106,6 +129,8 @@ add_library(airusb_session STATIC
     session/PeerStore.cpp
     session/SecureSession.cpp
     session/ExporterSession.cpp
+    session/RemoteDevicePort.cpp
+    session/ImporterClient.cpp
 )
 target_link_libraries(airusb_session PUBLIC airusb_transport)
 
@@ -189,6 +214,19 @@ if(APPLE)
         $<$<COMPILE_LANGUAGE:OBJCXX>:-Wno-import-preprocessor-directive-pedantic>
     )
 endif()
+
+# ---------------------------------------------------------------------------
+# tools/ — the network, without the hardware.
+#
+# Portable C++ on purpose: this is what runs on Windows and Linux against a macOS
+# exporter, and proves the protocol, the crypto and the LAN path long before any
+# of those platforms has a driver.
+# ---------------------------------------------------------------------------
+add_executable(airusb-net
+    tools/airusb_net_main.cpp
+    tests/fakes/ScriptedDevice.cpp
+)
+target_link_libraries(airusb-net PRIVATE airusb_session airusb_diag)
 
 # ---------------------------------------------------------------------------
 # tests

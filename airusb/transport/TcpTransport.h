@@ -8,6 +8,7 @@
 #define AIRUSB_TRANSPORT_TCPTRANSPORT_H
 
 #include "IAirUsbTransport.h"
+#include "../core/Platform.h"
 
 #include <deque>
 #include <memory>
@@ -18,7 +19,7 @@ namespace airusb::transport {
 class TcpStream final : public IByteStream {
 public:
     TcpStream() = default;
-    explicit TcpStream(int fd) noexcept : _fd(fd) {}
+    explicit TcpStream(platform::SocketHandle fd) noexcept : _fd(fd) {}
     ~TcpStream() override;
 
     TcpStream(const TcpStream&) = delete;
@@ -28,22 +29,23 @@ public:
     static std::unique_ptr<TcpStream> connect(const std::string& host, std::uint16_t port,
                                               Status* status = nullptr);
 
-    /// Listening socket helper. Returns -1 on failure.
-    static int listen(std::uint16_t port, Status* status = nullptr);
+    /// Listening socket helper. Returns platform::kInvalidSocket on failure.
+    static platform::SocketHandle listen(std::uint16_t port, Status* status = nullptr);
 
     /// Accepts one connection from a listening fd. Returns nullptr when there is
     /// nothing pending.
-    static std::unique_ptr<TcpStream> accept(int listenFd, Status* status = nullptr);
+    static std::unique_ptr<TcpStream> accept(platform::SocketHandle listenFd,
+                                            Status* status = nullptr);
 
     IoResult write(std::span<const std::uint8_t> src) override;
     IoResult read(std::span<std::uint8_t> dst) override;
     void close() override;
-    bool isOpen() const noexcept override { return _fd >= 0; }
+    bool isOpen() const noexcept override { return platform::isValid(_fd); }
 
-    int fd() const noexcept { return _fd; }
+    platform::SocketHandle fd() const noexcept { return _fd; }
 
 private:
-    int _fd = -1;
+    platform::SocketHandle _fd = platform::kInvalidSocket;
 };
 
 /// A byte pipe in memory. Two of these cross-wired give a full-duplex connection

@@ -100,6 +100,7 @@ private:
     Status handleAttach(const protocol::Header& h, std::span<const std::uint8_t> body);
     Status handleDetach(const protocol::Header& h, std::span<const std::uint8_t> body);
     Status handleSubmit(const protocol::Header& h, std::span<const std::uint8_t> body);
+    Status handleClearHalt(const protocol::Header& h);
     Status handlePing(const protocol::Header& h, std::span<const std::uint8_t> body);
 
     Status sendRecord(std::span<const std::uint8_t> record);
