@@ -69,7 +69,18 @@ std::string trimmedAscii(const std::uint8_t* p, std::size_t n)
     return s;
 }
 
-std::string fmt(const char* f, ...) __attribute__((format(printf, 1, 2)));
+// Tells GCC and Clang to type-check the arguments against the format string.
+// MSVC has no equivalent attribute, so it simply gets no extra checking; the
+// alternative is dropping it everywhere, which loses a real diagnostic on the
+// two compilers that do support it.
+#if defined(__GNUC__) || defined(__clang__)
+  #define AIRUSB_PRINTF_LIKE(fmtIndex, firstArg) \
+      __attribute__((format(printf, fmtIndex, firstArg)))
+#else
+  #define AIRUSB_PRINTF_LIKE(fmtIndex, firstArg)
+#endif
+
+std::string fmt(const char* f, ...) AIRUSB_PRINTF_LIKE(1, 2);
 std::string fmt(const char* f, ...)
 {
     char buf[512];
@@ -206,8 +217,8 @@ BotProbe::CmdOutcome BotProbe::command(std::span<const std::uint8_t> cdb,
         // split or truncated a logical URB (open question OQ-1).
         if (_result) _result->transferBoundariesIntact = false;
         out.status = Status::XferShort;
-        out.detail = fmt("CBW went out as %u of %zu bytes — a logical transfer was split",
-                         moved, kCbwLength);
+        out.detail = fmt("CBW went out as %u of %llu bytes — a logical transfer was split",
+                         moved, static_cast<unsigned long long>(kCbwLength));
         return out;
     }
 
@@ -217,8 +228,9 @@ BotProbe::CmdOutcome BotProbe::command(std::span<const std::uint8_t> cdb,
         std::vector<std::uint8_t> data;
         const Status ds = _port.bulkIn(_eps.bulkIn, offerLen, data);
         if (_result) ++_result->dataPhases;
-        trace(fmt("DATA tag=%u offered=%u -> %s got=%zu",
-                  _tag, offerLen, statusName(ds), data.size()));
+        trace(fmt("DATA tag=%u offered=%u -> %s got=%llu",
+                  _tag, offerLen, statusName(ds),
+                  static_cast<unsigned long long>(data.size())));
 
         if (ds == Status::XferStall) {
             // Legal: the device is refusing the data phase and will still
@@ -257,8 +269,9 @@ BotProbe::CmdOutcome BotProbe::command(std::span<const std::uint8_t> cdb,
         cs = _port.bulkIn(_eps.bulkIn, static_cast<std::uint32_t>(kCswLength), csw);
         if (_result) ++_result->cswCount;
     }
-    trace(fmt("CSW  tag=%u -> %s got=%zu [%s]",
-              _tag, statusName(cs), csw.size(), hexHead(csw, 13).c_str()));
+    trace(fmt("CSW  tag=%u -> %s got=%llu [%s]",
+              _tag, statusName(cs), static_cast<unsigned long long>(csw.size()),
+              hexHead(csw, 13).c_str()));
 
     if (cs != Status::Ok && cs != Status::XferShort) {
         out.status = cs;
@@ -268,7 +281,9 @@ BotProbe::CmdOutcome BotProbe::command(std::span<const std::uint8_t> cdb,
     if (csw.size() != kCswLength) {
         if (_result) _result->transferBoundariesIntact = false;
         out.status = Status::XferShort;
-        out.detail = fmt("CSW came back as %zu bytes, not %zu", csw.size(), kCswLength);
+        out.detail = fmt("CSW came back as %llu bytes, not %llu",
+                         static_cast<unsigned long long>(csw.size()),
+                         static_cast<unsigned long long>(kCswLength));
         return out;
     }
 
@@ -355,7 +370,8 @@ BotProbeResult BotProbe::run()
 
         std::vector<std::uint8_t> in;
         const Status st = _port.controlTransfer(sp, {}, in);
-        trace(fmt("CTRL GET_MAX_LUN -> %s got=%zu", statusName(st), in.size()));
+        trace(fmt("CTRL GET_MAX_LUN -> %s got=%llu", statusName(st),
+                  static_cast<unsigned long long>(in.size())));
 
         BotStep s;
         s.name   = "GET_MAX_LUN";
@@ -413,7 +429,8 @@ BotProbeResult BotProbe::run()
         if (r.ok) {
             if (r.data.size() < 36) {
                 annotated.ok     = false;
-                annotated.detail = fmt("INQUIRY returned %zu of 36 bytes", r.data.size());
+                annotated.detail = fmt("INQUIRY returned %llu of 36 bytes",
+                                       static_cast<unsigned long long>(r.data.size()));
             } else {
                 annotated.detail = fmt("'%s' '%s' rev '%s' type=0x%02x removable=%s",
                                        result.vendor.c_str(), result.product.c_str(),
@@ -433,7 +450,8 @@ BotProbeResult BotProbe::run()
         if (r.ok) {
             if (r.data.size() < 8) {
                 annotated.ok     = false;
-                annotated.detail = fmt("READ CAPACITY returned %zu of 8 bytes", r.data.size());
+                annotated.detail = fmt("READ CAPACITY returned %llu of 8 bytes",
+                                       static_cast<unsigned long long>(r.data.size()));
             } else {
                 // Byte 0..3 is the LAST LBA, not the block count. Off-by-one here
                 // reads past the end of the medium on the final block.
@@ -468,8 +486,9 @@ BotProbeResult BotProbe::run()
             result.sector0 = r.data;
             if (r.data.size() != bs) {
                 annotated.ok = false;
-                annotated.detail = fmt("read %zu of %u bytes with residue %u",
-                                       r.data.size(), bs, r.residue);
+                annotated.detail = fmt("read %llu of %u bytes with residue %u",
+                                       static_cast<unsigned long long>(r.data.size()),
+                                       bs, r.residue);
             } else {
                 result.sector0HasBootSignature =
                     (bs >= 512 && r.data[510] == 0x55 && r.data[511] == 0xAA);
@@ -498,8 +517,9 @@ BotProbeResult BotProbe::run()
         if (r.ok) {
             if (r.data.size() != bs) {
                 annotated.ok = false;
-                annotated.detail = fmt("offered %u, expected exactly %u back, got %zu",
-                                       bs + 512u, bs, r.data.size());
+                annotated.detail = fmt("offered %u, expected exactly %u back, got %llu",
+                                       bs + 512u, bs,
+                                       static_cast<unsigned long long>(r.data.size()));
             } else if (!result.sector0.empty() && r.data != result.sector0) {
                 annotated.ok = false;
                 annotated.detail = "same LBA read twice returned different data";
@@ -528,9 +548,11 @@ BotProbeResult BotProbe::run()
         if (r.ok) {
             if (r.data.size() != want) {
                 annotated.ok = false;
-                annotated.detail = fmt("asked for %u bytes in one transfer, got %zu "
+                annotated.detail = fmt("asked for %u bytes in one transfer, got %llu "
                                        "(residue %u) — the transfer was fragmented",
-                                       want, r.data.size(), r.residue);
+                                       want,
+                                       static_cast<unsigned long long>(r.data.size()),
+                                       r.residue);
                 result.transferBoundariesIntact = false;
             } else if (!result.sector0.empty() &&
                        !std::equal(result.sector0.begin(), result.sector0.end(), r.data.begin())) {

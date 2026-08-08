@@ -5,6 +5,11 @@
 #  include <mach/mach_time.h>
 #elif defined(__linux__)
 #  include <ctime>
+#elif defined(_WIN32)
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
+#  endif
+#  include <windows.h>
 #endif
 
 namespace airusb::watchdog {
@@ -55,6 +60,39 @@ public:
         clock_gettime(CLOCK_BOOTTIME, &ts);
         return static_cast<ContinuousNs>(ts.tv_sec) * 1'000'000'000ull
              + static_cast<ContinuousNs>(ts.tv_nsec);
+#elif defined(_WIN32)
+        // The BIASED interrupt time, which INCLUDES time spent asleep.
+        //
+        // Not QueryUnbiasedInterruptTime: "unbiased" means the count EXCLUDES
+        // sleep and hibernation, which is exactly the property that must not
+        // hold here. The P1 plan named the unbiased call; that was wrong for
+        // this reason, and this is the correction.
+        //
+        // Getting it backwards produces the failure Clock.h describes: a lease
+        // that still looks fresh after the machine slept for hours, so the
+        // exporter hands the drive back to a peer that has long since given up.
+        //
+        // QueryInterruptTimePrecise lives in an API-set DLL with no import
+        // library on some toolchains (MinGW has none), so it is resolved at
+        // runtime and falls back to GetTickCount64 — which MSDN documents as
+        // also including suspend time, and which is always linkable. The
+        // fallback is ~15 ms granular; every deadline in the timeout table is
+        // hundreds of milliseconds or more, so that is precision lost from the
+        // PING latency figure and nothing else.
+        using QitpFn = void (WINAPI*)(PULONGLONG);
+        static const QitpFn qitp = [] {
+            const HMODULE h = ::GetModuleHandleW(L"kernelbase.dll");
+            return h ? reinterpret_cast<QitpFn>(reinterpret_cast<void*>(
+                           ::GetProcAddress(h, "QueryInterruptTimePrecise")))
+                     : nullptr;
+        }();
+
+        if (qitp) {
+            ULONGLONG hundredNs = 0;
+            qitp(&hundredNs);
+            return static_cast<ContinuousNs>(hundredNs) * 100ull;
+        }
+        return static_cast<ContinuousNs>(::GetTickCount64()) * 1'000'000ull;
 #else
 #  error "AirUSB needs a sleep-continuous monotonic clock on this platform"
 #endif

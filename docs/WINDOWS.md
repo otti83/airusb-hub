@@ -10,7 +10,18 @@ the UdeCx driver, and it is the next piece.
 
 ---
 
-## Build it
+## Quickest path: use the prebuilt binary
+
+A statically linked `airusb-net.exe` is attached to the latest
+[release](https://github.com/otti83/airusb-hub/releases). Download it and skip to
+"Run it against the Mac" — no Visual Studio, no toolchain.
+
+It is cross-compiled from the same sources with MinGW-w64
+(`scripts/cross-build-windows.sh`).
+
+---
+
+## Build it yourself
 
 Needs **Visual Studio 2022** (the "Desktop development with C++" workload) and
 **CMake**. Both ship with the VS installer.
@@ -27,6 +38,23 @@ cmake --build build --config Release --target airusb-net
 The binary lands at `build\Release\airusb-net.exe`.
 
 MinGW-w64 works too if you prefer it — `cmake -S . -B build -G "MinGW Makefiles"`.
+
+### What was actually verified
+
+The sources cross-compile cleanly to a Windows PE with MinGW-w64, which is how
+four real defects were found and fixed rather than guessed at:
+
+| defect | why it mattered |
+|---|---|
+| no continuous clock for Windows | a hard `#error`; the lease timers need a clock that keeps counting through sleep |
+| `__attribute__((format))` | GCC/Clang only; MSVC has no equivalent |
+| `%zu` in `printf` | MinGW's C runtime has no `z` length modifier |
+| the POSIX unix-socket layer was compiled into every target | Windows has no `sys/un.h`, and no need for that layer at all |
+
+MinGW proves headers, APIs and linkage. It does **not** prove MSVC, which is
+stricter under `/permissive-` and needs `/utf-8` for the non-ASCII characters in
+user-facing strings. Both are set in `CMakeLists.txt`; a real MSVC build is still
+the acceptance test, and that is the one thing here that has not been run.
 
 ---
 

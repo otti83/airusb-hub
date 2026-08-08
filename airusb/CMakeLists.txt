@@ -15,7 +15,10 @@ if(MSVC)
     # ones that fire on correct, portable C++ rather than on anything worth
     # fixing: 4100 unreferenced parameter, 4267/4244 the size_t/int narrowing
     # that the platform shim already handles at the socket boundary.
-    add_compile_options(/W4 /wd4100 /wd4267 /wd4244 /permissive- /Zc:__cplusplus)
+    # /utf-8 is not cosmetic. The sources contain non-ASCII characters inside
+    # string literals — em dashes and typographic quotes in user-facing text —
+    # and without it MSVC reads them in the active code page and mangles them.
+    add_compile_options(/W4 /wd4100 /wd4267 /wd4244 /permissive- /Zc:__cplusplus /utf-8)
     add_compile_definitions(_CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN)
 else()
     add_compile_options(
@@ -151,9 +154,17 @@ target_link_libraries(airusb_diag PUBLIC airusb_core)
 # parser between a root process and an unprivileged one, so it is unit-tested and
 # fuzzed in CI rather than only on the machine that has the drive plugged in.
 # ---------------------------------------------------------------------------
+#
+# AgentProtocol is the codec and is portable. AgentLink is the socket underneath
+# it and is POSIX — unix domain sockets, poll(2), getpeereid(2). Windows has no
+# equivalent and no need for one: the two-process split exists because of a macOS
+# security-session rule that does not apply there.
+#
+# Splitting them keeps the codec fuzzable everywhere while the transport stays
+# where it belongs.
 add_library(airusb_macos_ipc STATIC
     platform/macos/AgentProtocol.cpp
-    platform/macos/AgentLink.cpp
+    $<$<NOT:$<BOOL:${WIN32}>>:${CMAKE_CURRENT_SOURCE_DIR}/platform/macos/AgentLink.cpp>
 )
 target_link_libraries(airusb_macos_ipc PUBLIC airusb_protocol)
 
