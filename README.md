@@ -8,6 +8,11 @@ it really is attached. Not file sharing. The device itself is forwarded.
 
 Peer to peer, LAN only. No cloud, no account, no server.
 
+> **Paused, waiting on Apple.** The receiving half needs
+> `com.apple.developer.usb.host-controller-interface` — an entitlement only Apple
+> can grant, and not one you can request through the developer portal. Requested
+> 2026-08-08, **FB24214361**. Everything else is built and working.
+
 ![AirUSB Hub](docs/images/app.png)
 
 ---
@@ -21,7 +26,7 @@ entitlement (see below).
 |---|---|
 | Sharing a device from a Mac | **works on real hardware** |
 | Encryption and authentication | **done** — Noise_XX / Noise_IK |
-| Receiving a device on a Mac | blocked on `com.apple.developer.usb.host-controller-interface` |
+| Receiving a device on a Mac | **blocked** — awaiting Apple, FB24214361 |
 | Windows, Linux | later |
 
 ---
@@ -131,7 +136,8 @@ Requires macOS 13+, Xcode 26. Tested on macOS 26.5, Apple M1.
 
 ## License
 
-To be determined before the first release.
+[Apache License 2.0](LICENSE). Chosen over MIT for its explicit patent grant,
+which matters for something that implements a transport protocol.
 
 Vendors [Monocypher](https://github.com/LoupVaillant/Monocypher) 4.0.3 (BSD-2 / CC0)
 and the [BLAKE2](https://github.com/BLAKE2/BLAKE2) reference implementation (CC0),
