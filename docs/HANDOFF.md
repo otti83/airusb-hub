@@ -525,7 +525,37 @@ Expect MSVC to find things MinGW did not. Paste whatever it says.
    `bcdedit /set testsigning on` for development; EV certificate + Microsoft
    attestation for distribution — a paid process, not a discretionary approval.
    **Nothing about the Windows path waits on anyone's decision.**
-2. **Linux importer** — vhci-hcd shim (§4.7). Cheapest of the three.
+2. **Linux importer** — vhci-hcd shim. **Designed and proven feasible, not built.**
+   Full plan with staged evidence gates in
+   [`LINUX_IMPORTER_PLAN.md`](LINUX_IMPORTER_PLAN.md). This is the only importer
+   path that waits on nobody, and it is the one that would make this project do
+   the thing it exists to do for the first time on any platform.
+
+   **Feasibility settled by measurement, not argument.** vhci-hcd accepts an
+   `AF_UNIX` **socketpair** — the only checks are `sockfd_lookup()` and
+   `SOCK_STREAM`, with no address-family test anywhere in `drivers/usb/usbip/`.
+   That kills the TCP-loopback fallback the P1 plan assumed (§4.7, OQ-3) and,
+   better, means **no plaintext USB/IP ever exists on a socket anyone can reach**.
+   A full enumeration was driven over such a socketpair at both HS and SS during
+   the design pass, ending in `Attached SCSI removable disk` and `/dev/ttyACM0`.
+
+   **Three prerequisites are ours, not the kernel's**, and none is a blocker of
+   the approach: manifest/transfer **segmentation is unimplemented** (usb-storage
+   asks for 122 880 B per URB at HS and **1 MiB at SuperSpeed**, against a 65 431 B
+   record ceiling — raising the ceiling cannot close it); `RemoteDevicePort`
+   **cannot pipeline** (one SUBMIT at a time, any other `request_id` is fatal);
+   and **`airusb::Speed` does not match Linux's `usb_device_speed`** — see §8 R3,
+   it is the nastiest of the three.
+
+   **The environment claim in older notes was wrong in two ways.** Debian's
+   genericcloud kernel is not merely missing vhci-hcd: it is built with
+   `CONFIG_USB_SUPPORT` unset, so no package can ever supply it. And no reboot is
+   needed anywhere — Ubuntu 26.04 ships vhci-hcd in base `linux-modules`, 24.04
+   needs one `linux-modules-extra`. Resolve it at runtime with
+   `modinfo -n vhci_hcd` rather than encoding either as a rule.
+
+   A working VM already exists on this Mac: Lima **`airusb`** (Ubuntu 24.04,
+   aarch64), vhci-hcd loaded, `nports=16` as 8 `hs` + 8 `ss`, lockdown `[none]`.
 3. **P2.9 `CiHostBackend`** — blocked on Apple only.
 4. ~~**The exporter's write path**~~ — **DONE, 2026-08-09.** It was going to be
    "tested for free" by a real importer mounting a filesystem, which is a bad way
