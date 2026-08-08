@@ -1,109 +1,131 @@
 # AirUSB Hub
 
-**Your USB devices, anywhere on your LAN.**
+**Use a USB device that's plugged into another Mac, as if it were plugged into yours.**
 
-Plug a USB drive into one computer. Use it on another — as if you had plugged it in
-there yourself. The other machine's operating system loads its own normal drivers and
-mounts it as a normal volume, because as far as it can tell, the device really is
-attached to it.
+The receiving Mac enumerates the device through its own USB stack and loads its own
+drivers — a flash drive mounts as a normal volume, because as far as macOS can tell,
+it really is attached. Not file sharing. The device itself is forwarded.
 
-This is not file sharing. There is no SMB, no NFS, no sync folder. The USB device
-itself is forwarded.
+Peer to peer, LAN only. No cloud, no account, no server.
 
-- No cloud
-- No account
-- No central server
-- Peer to peer, on your local network
-- Native USB passthrough
-- Open source
+![AirUSB Hub](docs/images/app.png)
 
 ---
 
 ## Status
 
-**Early development.** Feasibility is settled and the sharing half is written.
-
-macOS turns out to ship a public API for exactly this — `IOUSBHostControllerInterface`
-in `IOUSBHost.framework` — and Apple's own kernel driver does the hard part. No kernel
-extension, no System Integrity Protection changes, no private APIs.
+Early development. **Not usable yet** — the receiving half is blocked on an Apple
+entitlement (see below).
 
 | | |
 |---|---|
-| Feasibility on macOS | done — [`docs/P0_MACOS_FEASIBILITY.md`](docs/P0_MACOS_FEASIBILITY.md) |
-| Protocol, transport, core | done, tested and fuzzed |
-| The sharing side (exporter) | working on real hardware — [`docs/P2_8_EXPORTER.md`](docs/P2_8_EXPORTER.md) |
-| The receiving side (importer) | blocked — needs an entitlement Apple grants on request |
-| Encryption | done — Noise_XX / Noise_IK, [`docs/P2_4_SECURITY.md`](docs/P2_4_SECURITY.md) |
-| Pairing and trust | key exchange, the confirmation code and the pin store are done; the pairing messages are not |
-
-Nothing is usable yet. Follow along rather than depending on it.
-
----
-
-## Where it is going
-
-| | |
-|---|---|
-| **Now** | macOS ↔ macOS, USB flash drives, wired and Wi-Fi LAN |
-| **Next** | Zero-configuration discovery, device pairing, more device classes |
-| **Later** | Windows and Linux, cross-platform in every direction |
-
-The first device class being proven is USB mass storage, because it is unforgiving:
-it needs correct bulk transfers, correct error handling, and correct disconnect
-behaviour, or you lose data. Once that is solid, HID, serial adapters, and phones
-follow.
+| Sharing a device from a Mac | **works on real hardware** |
+| Encryption and authentication | **done** — Noise_XX / Noise_IK |
+| Receiving a device on a Mac | blocked on `com.apple.developer.usb.host-controller-interface` |
+| Windows, Linux | later |
 
 ---
 
 ## How it works
 
 ```
- Computer A                            Computer B
- ──────────                            ──────────
- USB flash drive
-      │
-      │  captured from the OS
-      ▼
- AirUSB exporter
-      │
-      │         AirUSB protocol over your LAN
-      ├────────────────────────────────────────────►  AirUSB importer
-                                                            │
-                                                            │ virtual USB host controller
-                                                            ▼
-                                                      Operating system
-                                                            │
-                                                            │ loads its own driver
-                                                            ▼
-                                                      A normal mounted volume
+ Mac A                                        Mac B
+ ─────                                        ─────
+ USB drive
+    │  captured from the OS, unmounted
+    ▼
+ AirUSB exporter ──── encrypted, over your LAN ────► AirUSB importer
+                                                          │
+                                                          ▼
+                                                 virtual USB host controller
+                                                          │
+                                                          ▼
+                                                 macOS loads its own driver
 ```
 
-Every peer can export and import at the same time. There is no dedicated server.
+Every peer can share and receive. There is no dedicated server.
+
+**The sharing side is two processes**, because macOS requires it: capturing a device
+and unmounting its disk need root, while opening a USB interface needs membership of
+the console GUI session — and no process can be both. A root daemon captures; an
+unprivileged agent moves the data.
+
+**The receiving side needs a user-space USB host controller.** macOS provides exactly
+one supported API for this, `IOUSBHostControllerInterface`, and it requires an
+Apple-granted entitlement. No kernel extension, no SIP changes, no private APIs.
+
+---
+
+## Evidence
+
+Verified against a real SuperSpeed flash drive (`058f:6387`, 31.5 GB), with both
+halves running as real launchd jobs:
+
+```
+verdict=PASS  cbw=6 data=5 csw=6 stallRecoveries=0 boundariesIntact=yes
+  INQUIRY              'Generic' 'Flash Disk' rev '8.01'
+  READ_CAPACITY_10     61440000 blocks x 512 bytes = 31.46 GB
+  READ_10_LBA0         512 bytes, residue=0, bootsig=55AA
+  SHORT_READ_FIDELITY  offered 1024, device sent 512 — short read preserved
+  READ_10_MULTIBLOCK   2048 bytes in one transfer, residue=0
+restore: mount table matches 'before' exactly
+```
+
+A complete USB Mass Storage exchange, through pipes obtained across the process
+split, with the drive handed back cleanly afterwards. The probe is read-only.
+
+The Noise handshake is checked byte for byte against the official
+cross-implementation test vectors, including the final handshake hash — a Noise
+implementation that only talks to itself can be perfectly self-consistent and
+completely wrong.
+
+```
+11 test suites, 0 failures
+3 fuzz targets, 0 crashes
+```
 
 ---
 
 ## Safety
 
-A USB drive can only be mounted in one place at a time, or its filesystem is
-destroyed. AirUSB Hub unmounts the drive on the sharing computer before handing it
-over, and gives it back cleanly when you are done. If it cannot do that safely, it
-refuses rather than risking your data.
+A USB drive mounted in two places at once destroys its filesystem. AirUSB unmounts
+the drive on the sharing Mac before handing it over, holds that claim for the whole
+session, and gives it back cleanly. If it can't do that safely, it refuses.
 
-While developing and testing, use a USB drive you do not care about.
+While testing, use a drive you don't care about.
+
+---
+
+## Build
+
+```bash
+cd airusb
+cmake -S . -B build && cmake --build build
+(cd build && ctest)
+```
+
+The app:
+
+```bash
+cd apple && xcodegen generate
+xcodebuild -project AirUSBHub.xcodeproj -scheme AirUSBHub \
+           -destination 'platform=macOS' -allowProvisioningUpdates build
+```
+
+Requires macOS 13+, Xcode 26. Tested on macOS 26.5, Apple M1.
 
 ---
 
 ## Documentation
 
-| Document | Contents |
+| | |
 |---|---|
-| [`docs/HANDOFF.md`](docs/HANDOFF.md) | **Start here.** Current state, verified facts, refuted hypotheses, open questions, next task. |
-| [`docs/P0_MACOS_FEASIBILITY.md`](docs/P0_MACOS_FEASIBILITY.md) | Can this be built on macOS through supported APIs? Evidence and verdict. |
-| [`docs/P1_IMPLEMENTATION_PLAN.md`](docs/P1_IMPLEMENTATION_PLAN.md) | Architecture, wire protocol, concurrency model, timeout budget, test plan. |
-| [`docs/P1_CAPTURE_VERIFICATION.md`](docs/P1_CAPTURE_VERIFICATION.md) | What was measured on real hardware, and why the exporter is two processes. |
-| [`docs/P2_8_EXPORTER.md`](docs/P2_8_EXPORTER.md) | The macOS exporter: how it works, and the hardware evidence that it does. |
-| [`docs/P2_4_SECURITY.md`](docs/P2_4_SECURITY.md) | Encryption and authentication: what protects a session, and how it was verified. |
-| [`docs/ENTITLEMENT_REQUEST.md`](docs/ENTITLEMENT_REQUEST.md) | How to request the one Apple-managed entitlement the importer needs. |
+| [Feasibility](docs/P0_MACOS_FEASIBILITY.md) | Can this be built through supported APIs? Evidence and verdict. |
+| [Architecture](docs/P1_IMPLEMENTATION_PLAN.md) | Wire protocol, concurrency, timeouts, test plan. |
+| [Why two processes](docs/P1_CAPTURE_VERIFICATION.md) | What was measured on real hardware. |
+| [The exporter](docs/P2_8_EXPORTER.md) | How sharing works, and the hardware evidence. |
+| [Security](docs/P2_4_SECURITY.md) | What protects a session, and how it was verified. |
+| [Entitlement](docs/ENTITLEMENT_REQUEST.md) | The one Apple-managed entitlement the receiving half needs. |
 
 ---
 
@@ -111,14 +133,8 @@ While developing and testing, use a USB drive you do not care about.
 
 To be determined before the first release.
 
-AirUSB Hub vendors two pieces of third-party cryptography, unmodified, under
-permissive licences. Both are recorded with their upstream version and checksums
-in [`airusb/third_party/PROVENANCE.md`](airusb/third_party/PROVENANCE.md).
-
-| | | |
-|---|---|---|
-| [Monocypher](https://github.com/LoupVaillant/Monocypher) | 4.0.3 | BSD-2-Clause **or** CC0-1.0 |
-| [BLAKE2 reference implementation](https://github.com/BLAKE2/BLAKE2) | `ed1974ea` | CC0-1.0 |
-
-They are vendored rather than linked because the sharing daemon runs as root, and
-a library loaded from a user-writable path would be a way to run code as root.
+Vendors [Monocypher](https://github.com/LoupVaillant/Monocypher) 4.0.3 (BSD-2 / CC0)
+and the [BLAKE2](https://github.com/BLAKE2/BLAKE2) reference implementation (CC0),
+unmodified — see [`airusb/third_party/PROVENANCE.md`](airusb/third_party/PROVENANCE.md).
+Vendored rather than linked because the sharing daemon runs as root, and a library
+loaded from a user-writable path would be a way to run code as root.
