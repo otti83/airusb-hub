@@ -16,9 +16,9 @@ P1 plan §3.14, as far as the handshake reaches:
 - the six-digit SAS both users compare
 - a real `IRecordCipher`, replacing the stand-in
 
-Out of scope and still to do: the pin store, grants, the `PAIR_*` messages and
-the pairing rate limiter. Those are session-layer state, not cryptography, and
-are listed in §7.
+The session layer that drives it followed in the same phase: the L0 preamble,
+the handshake over `RecordLayer`, the trust gate and the pin store. Out of scope
+and still to do: the `PAIR_*` messages and the pairing rate limiter (§7).
 
 ---
 
@@ -36,10 +36,14 @@ airusb/
     Noise.{h,cpp}               CipherState, SymmetricState, HandshakeState
   transport/
     NoiseCipher.{h,cpp}         IRecordCipher over the two transport CipherStates
+  session/
+    SecureSession.{h,cpp}       preamble -> handshake -> trust gate -> transport
+    PeerStore.{h,cpp}           pinned identities, grants, atomic persistence
   tests/
     unit/test_crypto.cpp        primitives vs. the RFCs
     unit/test_noise.cpp         handshake vs. the official cross-impl vectors
     unit/test_identity.cpp      identity, SAS, record cipher, end to end
+    unit/test_session.cpp       the session layer, including a real man in the middle
     fuzz/fuzz_noise.cpp         the handshake parser
     vectors/CryptoVectors.h     extracted from RFC 7693/8439/7748/8032
     vectors/NoiseVectors.h      extracted from the cacophony vector set
@@ -146,8 +150,8 @@ only test that rules them out.
 ### 4.3 Properties the vectors cannot check
 
 ```
-10 suites / 0 failures    (1297 checks in test_identity alone)
-3 fuzz targets, 100,000 executions each, 0 crashes, 0 UB findings
+11 suites / 0 failures    (1297 checks in test_identity, 379 in test_session)
+3 fuzz targets, 120,000 executions each, 0 crashes, 0 UB findings
 Zero warnings under -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion
   -Wshadow, Objective-C++ included
 ```
@@ -181,6 +185,48 @@ sign their own pair of keys.
 
 ---
 
+## 4a. The session layer
+
+`SecureSession` is what turns a socket into an authenticated session:
+
+```
+L0 preamble (8 plaintext bytes, both directions)
+    -> Noise handshake, carried as pre-handshake records (<= 8 KiB, R1)
+    -> identity payload verified against the NEGOTIATED static key
+    -> trust gate: Paired with grants, or Unpaired
+    -> NoiseCipher adopted, record limit raised to the negotiated size
+```
+
+**The preamble is not protected, it is bound.** Both preambles become the Noise
+prologue, so rewriting one makes the two sides compute different prologues and
+the first MAC fails. That is tested with an actual man in the middle, not by
+asserting two byte arrays differ: a relay sits between two `MemoryPipe`s, flips
+`wire_minor` — a field nothing else validates — and the handshake dies. A second
+test relays the same bytes faithfully and requires the session to come up, so
+that the first test cannot pass merely because the relay is broken. The faithful
+relay also confirms the attacker sees neither identity key in the clear, because
+XX encrypts both statics.
+
+**Which pattern, and who decides.** The responder cannot guess whether the
+initiator has it pinned, so the initiator says so with a new `SEC_NOISE_IK` bit
+in the preamble. Saying it in the clear is safe for the same reason: flipping the
+bit makes the two sides run different patterns and the handshake fails, rather
+than downgrading. A stale pin also fails rather than falling back to XX — falling
+back is exactly what an attacker who can force a key rotation would want.
+
+**The trust gate.** An authenticated peer that is not pinned reaches `Unpaired`,
+where `mayList()` and `mayAttach()` are both false. There is no configuration
+that makes an unpinned peer trusted.
+
+**The pin store** is line-oriented text, because it is security state a user may
+need to read or delete by hand, and written atomically (temp file, fsync,
+rename). A partially-parsed file loads *nothing*: a half-loaded pin store looks
+like a working one while silently having forgotten peers, which surfaces as an
+unexplained pairing prompt and trains the user to click through it. Peer-supplied
+display names are sanitised so they cannot break the format.
+
+---
+
 ## 5. What the SAS does and does not give you
 
 `SAS = decimal6( HKDF(handshake_hash, "AirUSB-SAS-v1")[0..8) mod 10^6 )`, read
@@ -199,16 +245,20 @@ they do, the SAS is cryptographically sound and operationally incomplete.
 
 ## 6. Known limits
 
-- **The handshake is not yet wired into a live session.** `NoiseCipher` is a real
-  `IRecordCipher` and is tested end to end through `RecordLayer`, but nothing
-  drives the L0 preamble → handshake → `setHandshakeComplete` sequence over a
-  socket yet. That is the session layer's job.
-- **No pin store, no grants, no `PAIR_*` messages, no rate limiter.** So there is
-  currently no `UNPAIRED` state and no trust gate — §3.14's "there is no 'the LAN
-  is trusted' mode" is a requirement this phase has not yet delivered.
-- **No identity persistence.** `LocalIdentity::fromSeed` exists so an identity can
-  survive a restart; nothing writes the seed to
-  `/Library/Application Support/AirUSB/identity` yet.
+- **No `PAIR_*` messages and no rate limiter.** A peer can reach `Unpaired` and
+  both sides can compute the SAS, but there is no message exchange that carries a
+  confirmation, and nothing enforces the backoff the SAS's security bound depends
+  on. Until that exists, pairing is a capability the code has and the protocol
+  does not.
+- **Nothing calls `SecureSession` yet.** It is tested against `MemoryPipe`; no
+  daemon opens a TCP socket and drives it. The exporter and the session layer are
+  both finished and not yet joined.
+- **No identity persistence path.** `LocalIdentity::fromSeed` and
+  `PeerStore::save/load` exist and are tested; nothing yet writes them to
+  `/Library/Application Support/AirUSB/`.
+- **HELLO is not implemented.** §3.13's second negotiation axis — `proto_version`,
+  capability ANDing, the min of every numeric parameter — has no code. The record
+  limit is currently taken from config rather than negotiated.
 - **The test-only fixed-ephemeral hook is compiled into the library.** It is named
   `setFixedEphemeralForTestingOnly`, refuses to run once a handshake has started,
   and is unreachable from session code — but it exists, because without it the
@@ -221,8 +271,11 @@ they do, the SAS is cryptographically sound and operationally incomplete.
 
 ## 7. Next
 
-- Session layer: L0 preamble, handshake drive, pin store, grants, `PAIR_*`, the
-  pairing rate limiter, identity persistence.
+- `PAIR_REQUEST` / `PAIR_CONFIRM` / `PAIR_RESULT`, the pairing rate limiter, and
+  identity persistence on disk.
+- `HELLO` / `HELLO_OK` — the second negotiation axis (§3.13).
+- Join the two halves: a daemon that accepts a TCP connection, drives
+  `SecureSession`, and serves the exporter behind the trust gate.
 - **P2.9** `CiHostBackend` — the entitled importer half. Blocked on OQ-5 only.
 - **P2.10** real ↔ real over 127.0.0.1, which is also where the exporter's write
   path and sustained throughput first get tested.

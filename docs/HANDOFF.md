@@ -15,13 +15,20 @@ holds the capture. The split exporter is proven end to end, the drive was restor
 with the mount table byte-identical, and **OQ-1 is answered: transfer boundaries
 INTACT**. Full evidence in `docs/P2_8_EXPORTER.md` §4.
 
-**P2.4 is done too.** `NullCipher` is no longer the only `IRecordCipher`:
-`Noise_XX` / `Noise_IK` over X25519 + ChaCha20-Poly1305 + BLAKE2s, matched byte
-for byte against an independent implementation's official vectors, with the
-Ed25519 identity binding and the six-digit SAS. Evidence in
-`docs/P2_4_SECURITY.md`.
+**P2.4 is done too, and the session layer with it.** `NullCipher` is no longer
+the only `IRecordCipher`: `Noise_XX` / `Noise_IK` over X25519 +
+ChaCha20-Poly1305 + BLAKE2s, matched byte for byte against an independent
+implementation's official vectors, with the Ed25519 identity binding, the
+six-digit SAS, the L0 preamble, the trust gate and a persistent pin store.
+Evidence in `docs/P2_4_SECURITY.md`.
 
-The next task is the **session layer** — see §9.
+**What is left is blocked on you, not on code.** The importer half (P2.9) needs
+`com.apple.developer.usb.host-controller-interface`, which only an Account Holder
+can request from Apple. Procedure and a ready-to-paste draft are in
+`docs/ENTITLEMENT_REQUEST.md`; the two decisions it needs are in §8. Everything
+downstream — P2.10, P2.11 — depends on it.
+
+Unblocked work that remains is listed in §9.
 
 ### The process failure this section used to describe
 
@@ -144,7 +151,7 @@ explicitly accepted, tracked in §0.
 
 `docs/P1_CAPTURE_VERIFICATION.md`. See §4 — this is the most important finding.
 
-### Gate P2.4 — the security layer: **PASS**
+### Gate P2.4 + session layer: **PASS**
 
 `docs/P2_4_SECURITY.md`. The acceptance test is not a round trip — a Noise
 implementation that only talks to itself agrees with itself perfectly while being
@@ -159,6 +166,12 @@ official Noise vectors (independent implementation)
 Every handshake message, every transport message after the split, and the final
 handshake hash the SAS derives from. Primitives separately checked against
 RFC 7693 / 8439 / 7748 / 8032, extracted mechanically from the RFC text.
+
+The session layer on top is tested against **an actual man in the middle**: a
+relay between two pipes flips `wire_minor` — a field nothing else validates — and
+the handshake dies, because both preambles feed the Noise prologue. A control
+test relays the same bytes faithfully and requires the session to come up, so the
+attack test cannot pass merely because the relay is broken.
 
 ### Gate P2.8 — the real exporter, on real hardware: **PASS**
 
@@ -337,7 +350,7 @@ exist, but it is not the product path.
 ## 6. Code state
 
 ```
-10 suites / 0 failures
+11 suites / 0 failures
 3 fuzz targets / 0 crashes / 0 UB findings
 Zero warnings under -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion
   -Wshadow — Objective-C++ included
@@ -354,6 +367,8 @@ airusb/
   transport/  IAirUsbTransport, RecordLayer, FrameScheduler,
               TcpTransport (+ MemoryPipe), FaultTransport,
               NoiseCipher — the real IRecordCipher, replacing NullCipher
+  session/    SecureSession  preamble -> handshake -> trust gate -> transport
+              PeerStore      pinned identities, grants, atomic persistence
   crypto/     Primitives  the ONLY caller of third_party. BLAKE2s, HMAC,
                           Noise HKDF, ChaCha20-Poly1305, X25519, Ed25519
               Identity    identity keys, binding signature, fingerprint, SAS
@@ -377,7 +392,7 @@ airusb/
               scripts/agent_smoke.py  drives the real agent, no root needed
   tests/      TestHarness.h,
               unit/{codec,validate,core,transport,loopback,botprobe,macipc,
-                    crypto,noise,identity},
+                    crypto,noise,identity,session},
               fakes/ScriptedDevice, fuzz/{decode,agentipc,noise},
               vectors/{corpus*/,CryptoVectors.h,NoiseVectors.h}
 poc/
@@ -483,31 +498,39 @@ has no Xcode project yet.
 
 ---
 
-## 9. Next task: the session layer
+## 9. Next task
 
-P2.8 and P2.4 are both closed. What is missing between them is the thing that
-drives a real session: the crypto works and the exporter works, and nothing yet
-connects the two over a socket.
+### 9.1 THE blocker — only you can clear it
 
-### 9.1 The session layer
+P2.9 (the importer) needs `com.apple.developer.usb.host-controller-interface`.
+Requesting it needs the Account Holder role, so it cannot be done from here.
+`docs/ENTITLEMENT_REQUEST.md` has the procedure, the URLs and a ready-to-paste
+draft. §8 lists the two decisions it depends on: which Team ID, and the bundle
+ID. **P2.9, P2.10 and P2.11 are all downstream of this.**
 
-1. **L0 preamble** (§3.1): the 8 plaintext bytes, then the version check. The
-   prologue for Noise is the initiator preamble ‖ responder preamble, which is
-   what stops those 8 bytes being rewritten in flight. `HandshakeState` already
-   takes the prologue; nothing constructs it yet.
-2. **Drive the handshake** over `RecordLayer`, then `setHandshakeComplete()` and
-   swap `NullCipher` for `NoiseCipher`. Both halves exist and are tested; the
-   sequencing does not.
-3. **Identity persistence**: `/Library/Application Support/AirUSB/identity`, 0600,
-   for the daemon. `LocalIdentity::fromSeed` exists for exactly this.
-4. **Pin store, grants, `PAIR_*`, rate limiter** (§3.14). Until these exist there
-   is no `UNPAIRED` state and therefore no trust gate — the requirement that
-   "there is no 'the LAN is trusted' mode" is not yet met.
-5. **HELLO** carries `session_id[16]` at offset 40; that field is load-bearing for
-   the Noise prologue binding and the 56-byte HELLO size is pinned by a test for
-   exactly this reason.
+Apple approvals were observed as recently as July 2026, and every confirmed
+holder is an Organization team — that risk is unchanged and is why filing early
+matters.
 
-### 9.2 Then, in order
+### 9.2 Unblocked work, in rough order
+
+1. **Join the two halves.** The exporter works and the session layer works, and
+   nothing opens a TCP socket and drives `SecureSession` in front of the
+   exporter. This is the biggest remaining piece that needs no entitlement.
+2. **`PAIR_REQUEST` / `PAIR_CONFIRM` / `PAIR_RESULT`** and the pairing rate
+   limiter. Both sides can already compute the SAS; no message carries the
+   confirmation, and nothing enforces the backoff the SAS's one-in-a-million
+   bound depends on.
+3. **`HELLO` / `HELLO_OK`** — §3.13's second negotiation axis. `session_id[16]`
+   at offset 40 is load-bearing for the prologue binding, and the 56-byte HELLO
+   size is pinned by a test for exactly that reason.
+4. **Identity and pin-store persistence** under
+   `/Library/Application Support/AirUSB/`. `LocalIdentity::fromSeed` and
+   `PeerStore::save/load` exist and are tested; nothing calls them yet.
+5. **The exporter's write path.** P2.8's probe is read-only, so `bulkOut` has
+   only ever carried 31-byte CBWs.
+
+### 9.3 Then, once the entitlement lands
 
 - **P2.9** `CiHostBackend` — the entitled half. Blocked on OQ-5 only.
 - **P2.10** real ↔ real over 127.0.0.1 on one Mac. **This is where the write path

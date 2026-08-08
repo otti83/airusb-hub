@@ -32,9 +32,9 @@ extension, no System Integrity Protection changes, no private APIs.
 | Feasibility on macOS | done — [`docs/P0_MACOS_FEASIBILITY.md`](docs/P0_MACOS_FEASIBILITY.md) |
 | Protocol, transport, core | done, tested and fuzzed |
 | The sharing side (exporter) | working on real hardware — [`docs/P2_8_EXPORTER.md`](docs/P2_8_EXPORTER.md) |
-| The receiving side (importer) | not started; needs an entitlement Apple grants on request |
+| The receiving side (importer) | blocked — needs an entitlement Apple grants on request |
 | Encryption | done — Noise_XX / Noise_IK, [`docs/P2_4_SECURITY.md`](docs/P2_4_SECURITY.md) |
-| Pairing and trust | key exchange and the confirmation code are done; the pin store is not |
+| Pairing and trust | key exchange, the confirmation code and the pin store are done; the pairing messages are not |
 
 Nothing is usable yet. Follow along rather than depending on it.
 

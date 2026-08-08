@@ -18,6 +18,7 @@ airusb_test(test_macipc   airusb_macos_ipc)
 airusb_test(test_crypto   airusb_crypto)
 airusb_test(test_noise    airusb_crypto)
 airusb_test(test_identity airusb_crypto)
+airusb_test(test_session  airusb_crypto)
 
 find_package(Threads REQUIRED)
 target_link_libraries(test_macipc PRIVATE Threads::Threads)

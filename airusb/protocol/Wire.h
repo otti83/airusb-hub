@@ -38,6 +38,15 @@ inline constexpr std::uint8_t  kWireMinor = 0;
 enum PreambleFlags : std::uint16_t {
     kSecNoiseXX  = 1u << 0,   // MUST be set on TCP
     kSecTls13Rpk = 1u << 1,   // reserved for the QUIC transport
+
+    /// The initiator has the responder's static key pinned and is opening with
+    /// Noise_IK, which saves a round trip.
+    ///
+    /// The responder cannot guess the pattern, so the initiator has to say. It
+    /// is safe to say it in the clear because BOTH preambles feed the Noise
+    /// prologue: an attacker who flips this bit makes the two sides run
+    /// different patterns, and the handshake fails rather than downgrading.
+    kSecNoiseIK  = 1u << 2,
 };
 
 /// Record framing: u32 length prefix, then the record body.

@@ -35,6 +35,22 @@ void RecordLayer::setHandshakeComplete(std::uint32_t negotiated) noexcept
                                                         : negotiated;
 }
 
+Status RecordLayer::adoptCipher(std::unique_ptr<IRecordCipher> cipher,
+                                std::uint32_t negotiated)
+{
+    if (!cipher) return Status::BadArgument;
+
+    // Everything already queued was sealed under the OLD cipher. Swapping now
+    // would leave those bytes unreadable by a peer that has already rotated, so
+    // the caller must flush first. Refusing is better than silently sending a
+    // record the peer will treat as a forgery and close the session over.
+    if (pendingTxBytes() != 0) return Status::Busy;
+
+    _cipher = std::move(cipher);
+    setHandshakeComplete(negotiated);
+    return Status::Ok;
+}
+
 bool RecordLayer::isOpen() const noexcept
 {
     return !_fatal && _stream && _stream->isOpen();

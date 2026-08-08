@@ -66,6 +66,20 @@ public:
 
     /// R1: 8 KiB until the handshake completes, the negotiated value after.
     void setHandshakeComplete(std::uint32_t negotiatedMaxRecordBytes) noexcept;
+
+    /// Installs the transport cipher once the handshake has produced one, and
+    /// applies the negotiated record limit in the same step.
+    ///
+    /// The two are inseparable: a record sealed under the new cipher is a
+    /// different length from the same body under the old one, so changing the
+    /// limit and the cipher at different moments gives a window in which the
+    /// sender and receiver disagree about what fits.
+    ///
+    /// Returns Busy if anything is still buffered for sending. The handshake's
+    /// last record must be on the wire before the keys change, or it would be
+    /// sealed under a cipher the peer does not have yet.
+    Status adoptCipher(std::unique_ptr<IRecordCipher> cipher,
+                       std::uint32_t negotiatedMaxRecordBytes);
     std::uint32_t maxRecordBytes() const noexcept { return _maxRecord; }
 
     /// Drains whatever is buffered for sending. Returns Ok when the buffer is

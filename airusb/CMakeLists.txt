@@ -75,6 +75,8 @@ add_library(airusb_crypto STATIC
     crypto/Identity.cpp
     protocol/Noise.cpp
     transport/NoiseCipher.cpp
+    session/PeerStore.cpp
+    session/SecureSession.cpp
 )
 target_link_libraries(airusb_crypto PUBLIC airusb_protocol airusb_transport
                                    PRIVATE airusb_thirdparty)
