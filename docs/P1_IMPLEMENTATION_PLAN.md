@@ -497,9 +497,17 @@ Types: `0x0001 IMPL_STRING, 0x0002 NATIVE_STATUS, 0x0003 DEVICE_NAME, 0x0004 DEV
 ### 3.14 Pairing and authentication
 
 **Identity** (`/Library/Application Support/AirUSB/identity` for the daemon, 0600; user keychain for the agent): an Ed25519 identity keypair `I` (reusable as a TLS 1.3 raw-public-key cert key), a separate X25519 static keypair `S` for Noise, and a binding signature `sigS = Ed25519_Sign(I_sk, "AirUSB-identity-binding-v1" || I_pk || S_pk)`. Two keys, not one, so no key is used for both signing and DH.
-Fingerprint = first 20 bytes of `SHA-256("AirUSB-fp-v1" || I_pk)`, displayed as 4 base32 groups of 8.
+Fingerprint = first 20 bytes of `BLAKE2s-256("AirUSB-fp-v1" || I_pk)`, displayed as 4 base32 groups of 8.
 
-**Session establishment** — `Noise_XX_25519_ChaChaPoly_BLAKE2s` on first contact, `Noise_IK` once the static key is pinned. Prologue = initiator preamble ‖ responder preamble. `XX` payloads carry `I_pk || sigS`; each side verifies that `sigS` binds the received Noise static key to the claimed identity key, using libsodium's strict (non-malleable) verification. Any failure — including a parse error — rejects the session.
+> **P2.4 amendment.** This originally specified SHA-256. Changed to BLAKE2s, which the handshake already requires: adding a fourth hash function to a root daemon's attack surface to compute a display string is a bad trade. The fingerprint is internal — it names a pin, no other implementation parses it — so this is not a wire-compatibility change.
+
+**Session establishment** — `Noise_XX_25519_ChaChaPoly_BLAKE2s` on first contact, `Noise_IK` once the static key is pinned.
+
+> **P2.4 status: IMPLEMENTED and verified.** Both patterns match the official cross-implementation vectors byte for byte, including the final handshake hash. The SAS's eight bytes are read BIG endian — the spec did not say, and both peers must agree. Primitives are vendored (`third_party/`, pinned and checksummed) rather than linked, because the exporter is a root daemon and a library in a user-writable prefix is a privilege-escalation path. See `P2_4_SECURITY.md`. Prologue = initiator preamble ‖ responder preamble. `XX` payloads carry `I_pk || sigS`; each side verifies that `sigS` binds the received Noise static key to the claimed identity key, using a strict (non-malleable) verification that rejects non-canonical scalars and small-order public keys. Any failure — including a parse error — rejects the session.
+
+> **P2.4 correction.** This said "libsodium's" verification. The implementation vendors **Monocypher**, not libsodium; `crypto_ed25519_check` provides the same strict, non-malleable check. The property required is the strictness, not the library — but naming a library we do not use would send the next reader looking for code that is not there.
+
+> Also load-bearing, and easy to get wrong: the binding is verified against the Noise static key the handshake **actually negotiated**, never against a key carried in the payload. Verifying a payload's own claim about itself proves only that the sender can sign their own pair of keys — an eavesdropper could then replay a victim's `I_pk || sigS` and inherit their pin. `tests/unit/test_identity.cpp` runs exactly that attack.
 
 **Trust gate.** If the peer's `I_pk` is not pinned, the session is `UNPAIRED` and the *only* permitted messages are `PAIR_REQUEST`/`PAIR_CONFIRM`/`PAIR_RESULT`/`PING`/`GOODBYE`. `LIST_DEVICES` and `ATTACH` return `NOT_PAIRED`. **There is no "the LAN is trusted" mode.**
 

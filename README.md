@@ -33,7 +33,8 @@ extension, no System Integrity Protection changes, no private APIs.
 | Protocol, transport, core | done, tested and fuzzed |
 | The sharing side (exporter) | working on real hardware — [`docs/P2_8_EXPORTER.md`](docs/P2_8_EXPORTER.md) |
 | The receiving side (importer) | not started; needs an entitlement Apple grants on request |
-| Encryption | not started |
+| Encryption | done — Noise_XX / Noise_IK, [`docs/P2_4_SECURITY.md`](docs/P2_4_SECURITY.md) |
+| Pairing and trust | key exchange and the confirmation code are done; the pin store is not |
 
 Nothing is usable yet. Follow along rather than depending on it.
 
@@ -101,6 +102,7 @@ While developing and testing, use a USB drive you do not care about.
 | [`docs/P1_IMPLEMENTATION_PLAN.md`](docs/P1_IMPLEMENTATION_PLAN.md) | Architecture, wire protocol, concurrency model, timeout budget, test plan. |
 | [`docs/P1_CAPTURE_VERIFICATION.md`](docs/P1_CAPTURE_VERIFICATION.md) | What was measured on real hardware, and why the exporter is two processes. |
 | [`docs/P2_8_EXPORTER.md`](docs/P2_8_EXPORTER.md) | The macOS exporter: how it works, and the hardware evidence that it does. |
+| [`docs/P2_4_SECURITY.md`](docs/P2_4_SECURITY.md) | Encryption and authentication: what protects a session, and how it was verified. |
 | [`docs/ENTITLEMENT_REQUEST.md`](docs/ENTITLEMENT_REQUEST.md) | How to request the one Apple-managed entitlement the importer needs. |
 
 ---
@@ -108,3 +110,15 @@ While developing and testing, use a USB drive you do not care about.
 ## License
 
 To be determined before the first release.
+
+AirUSB Hub vendors two pieces of third-party cryptography, unmodified, under
+permissive licences. Both are recorded with their upstream version and checksums
+in [`airusb/third_party/PROVENANCE.md`](airusb/third_party/PROVENANCE.md).
+
+| | | |
+|---|---|---|
+| [Monocypher](https://github.com/LoupVaillant/Monocypher) | 4.0.3 | BSD-2-Clause **or** CC0-1.0 |
+| [BLAKE2 reference implementation](https://github.com/BLAKE2/BLAKE2) | `ed1974ea` | CC0-1.0 |
+
+They are vendored rather than linked because the sharing daemon runs as root, and
+a library loaded from a user-writable path would be a way to run code as root.

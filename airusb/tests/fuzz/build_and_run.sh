@@ -66,3 +66,31 @@ clang++ -std=c++20 -g -O1 -fsanitize="$SAN" \
 echo
 echo "running ${RUNS} executions over ${IPC_CORPUS} (sanitizers: ${SAN})"
 ./build/fuzz_agentipc -max_len=4096 -runs="${RUNS}" -print_final_stats=1 "$IPC_CORPUS"
+
+# ---------------------------------------------------------------------------
+# The Noise handshake parser (P2.4).
+#
+# HandshakeState::readMessage is the FIRST code in the system to touch bytes from
+# an unauthenticated peer -- before the version, the identity, or even "is this
+# Noise at all" has been established. Every length in it is peer-controlled.
+#
+# The vendored crypto is compiled in but is not the target: it has its own
+# audits and its own vectors. What is being fuzzed is our state machine around
+# it, and in particular that a malformed message can never advance a handshake.
+# ---------------------------------------------------------------------------
+NOISE_CORPUS="${4:-tests/vectors/corpus_noise}"
+mkdir -p "$NOISE_CORPUS"
+
+clang++ -std=c++20 -g -O1 -fsanitize="$SAN" \
+    -fno-sanitize-recover=undefined \
+    -Wno-deprecated-declarations \
+    tests/fuzz/fuzz_noise.cpp \
+    protocol/Noise.cpp crypto/Primitives.cpp crypto/Identity.cpp core/Status.cpp \
+    third_party/monocypher/monocypher.c \
+    third_party/monocypher/monocypher-ed25519.c \
+    third_party/blake2s/blake2s-ref.c \
+    -o build/fuzz_noise
+
+echo
+echo "running ${RUNS} executions over ${NOISE_CORPUS} (sanitizers: ${SAN})"
+./build/fuzz_noise -max_len=4096 -runs="${RUNS}" -print_final_stats=1 "$NOISE_CORPUS"

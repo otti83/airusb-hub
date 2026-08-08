@@ -15,7 +15,13 @@ holds the capture. The split exporter is proven end to end, the drive was restor
 with the mount table byte-identical, and **OQ-1 is answered: transfer boundaries
 INTACT**. Full evidence in `docs/P2_8_EXPORTER.md` §4.
 
-The next task is **P2.4 (Noise security)** — see §9.
+**P2.4 is done too.** `NullCipher` is no longer the only `IRecordCipher`:
+`Noise_XX` / `Noise_IK` over X25519 + ChaCha20-Poly1305 + BLAKE2s, matched byte
+for byte against an independent implementation's official vectors, with the
+Ed25519 identity binding and the six-digit SAS. Evidence in
+`docs/P2_4_SECURITY.md`.
+
+The next task is the **session layer** — see §9.
 
 ### The process failure this section used to describe
 
@@ -137,6 +143,22 @@ explicitly accepted, tracked in §0.
 ### Gate P1 hardware verification: **PASS**
 
 `docs/P1_CAPTURE_VERIFICATION.md`. See §4 — this is the most important finding.
+
+### Gate P2.4 — the security layer: **PASS**
+
+`docs/P2_4_SECURITY.md`. The acceptance test is not a round trip — a Noise
+implementation that only talks to itself agrees with itself perfectly while being
+wrong. It is the official cross-implementation vectors:
+
+```
+official Noise vectors (independent implementation)
+  Noise_IK_25519_ChaChaPoly_BLAKE2s   pass, byte for byte
+  Noise_XX_25519_ChaChaPoly_BLAKE2s   pass, byte for byte
+```
+
+Every handshake message, every transport message after the split, and the final
+handshake hash the SAS derives from. Primitives separately checked against
+RFC 7693 / 8439 / 7748 / 8032, extracted mechanically from the RFC text.
 
 ### Gate P2.8 — the real exporter, on real hardware: **PASS**
 
@@ -315,8 +337,8 @@ exist, but it is not the product path.
 ## 6. Code state
 
 ```
-7 suites / 0 failures
-2 fuzz targets, 150,000 executions each / 0 crashes / 0 UB findings
+10 suites / 0 failures
+3 fuzz targets / 0 crashes / 0 UB findings
 Zero warnings under -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion
   -Wshadow — Objective-C++ included
 ```
@@ -327,9 +349,17 @@ airusb/
   core/       Status, UsbTypes, Clock, Watchdog, DeviceManifest,
               Ep0Arbiter, RequestTable, CreditController, IUsbDevicePort
   protocol/   Wire.h (every offset a named constant + static_assert),
-              Codec, Validate (R1–R12)
+              Codec, Validate (R1–R12),
+              Noise — CipherState / SymmetricState / HandshakeState, XX and IK
   transport/  IAirUsbTransport, RecordLayer, FrameScheduler,
-              TcpTransport (+ MemoryPipe), FaultTransport
+              TcpTransport (+ MemoryPipe), FaultTransport,
+              NoiseCipher — the real IRecordCipher, replacing NullCipher
+  crypto/     Primitives  the ONLY caller of third_party. BLAKE2s, HMAC,
+                          Noise HKDF, ChaCha20-Poly1305, X25519, Ed25519
+              Identity    identity keys, binding signature, fingerprint, SAS
+  third_party/ vendored, pinned, checksummed — see PROVENANCE.md
+              monocypher/ X25519, RFC 8032 Ed25519, RFC 8439 ChaCha20-Poly1305
+              blake2s/    the BLAKE2 designers' reference implementation
   diag/       BotProbe — read-only Bulk-Only Transport prober. A test
               instrument, not the data path; nothing in core/protocol/
               transport includes it.
@@ -346,14 +376,16 @@ airusb/
               scripts/p28_run.sh      the hardware gate, production shape
               scripts/agent_smoke.py  drives the real agent, no root needed
   tests/      TestHarness.h,
-              unit/{codec,validate,core,transport,loopback,botprobe,macipc},
-              fakes/ScriptedDevice, fuzz/{decode,agentipc}, vectors/corpus*/
+              unit/{codec,validate,core,transport,loopback,botprobe,macipc,
+                    crypto,noise,identity},
+              fakes/ScriptedDevice, fuzz/{decode,agentipc,noise},
+              vectors/{corpus*/,CryptoVectors.h,NoiseVectors.h}
 poc/
   p0-probe/           entitlement authorization matrix
   p1-capture-test/    capture_test.m + 5 runner scripts
 docs/
   P0_MACOS_FEASIBILITY.md  P1_IMPLEMENTATION_PLAN.md
-  P1_CAPTURE_VERIFICATION.md  P2_8_EXPORTER.md
+  P1_CAPTURE_VERIFICATION.md  P2_8_EXPORTER.md  P2_4_SECURITY.md
   ENTITLEMENT_REQUEST.md  HANDOFF.md
 ```
 
@@ -451,21 +483,29 @@ has no Xcode project yet.
 
 ---
 
-## 9. Next task: P2.4 — Noise security
+## 9. Next task: the session layer
 
-P2.8 is closed. `docs/P2_8_EXPORTER.md` has the gate evidence; the short version
-is in §0 and §4a below.
+P2.8 and P2.4 are both closed. What is missing between them is the thing that
+drives a real session: the crypto works and the exporter works, and nothing yet
+connects the two over a socket.
 
-### 9.1 P2.4 — the record cipher
+### 9.1 The session layer
 
-Noise_XX (first contact, with a 6-digit SAS to confirm) and Noise_IK (paired
-peers, 1-RTT). `IRecordCipher` is already the slot in `transport/RecordLayer`;
-`NullCipher` is the current stand-in and is named so its presence in a shipping
-config is obvious.
-
-Note the binding that already exists and must not be broken: HELLO carries
-`session_id[16]` at offset 40, and that field is load-bearing for the Noise
-prologue. The 56-byte HELLO size is pinned by a test for exactly this reason.
+1. **L0 preamble** (§3.1): the 8 plaintext bytes, then the version check. The
+   prologue for Noise is the initiator preamble ‖ responder preamble, which is
+   what stops those 8 bytes being rewritten in flight. `HandshakeState` already
+   takes the prologue; nothing constructs it yet.
+2. **Drive the handshake** over `RecordLayer`, then `setHandshakeComplete()` and
+   swap `NullCipher` for `NoiseCipher`. Both halves exist and are tested; the
+   sequencing does not.
+3. **Identity persistence**: `/Library/Application Support/AirUSB/identity`, 0600,
+   for the daemon. `LocalIdentity::fromSeed` exists for exactly this.
+4. **Pin store, grants, `PAIR_*`, rate limiter** (§3.14). Until these exist there
+   is no `UNPAIRED` state and therefore no trust gate — the requirement that
+   "there is no 'the LAN is trusted' mode" is not yet met.
+5. **HELLO** carries `session_id[16]` at offset 40; that field is load-bearing for
+   the Noise prologue binding and the 56-byte HELLO size is pinned by a test for
+   exactly this reason.
 
 ### 9.2 Then, in order
 

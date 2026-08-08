@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(airusb CXX)
+project(airusb C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -41,6 +41,43 @@ add_library(airusb_transport STATIC
 target_include_directories(airusb_transport PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(airusb_transport PUBLIC airusb_protocol)
 target_include_directories(airusb_protocol PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+
+# ---------------------------------------------------------------------------
+# third_party/ — vendored crypto. NOT our code; see third_party/PROVENANCE.md.
+#
+# Compiled with warnings OFF, deliberately. The alternative is editing upstream
+# source to silence them, which makes the next diff against upstream unreadable
+# and is exactly how a vendored library quietly forks. Correctness here is
+# established by the standards' own test vectors (tests/unit/test_crypto.cpp),
+# not by our warning flags.
+# ---------------------------------------------------------------------------
+add_library(airusb_thirdparty STATIC
+    third_party/monocypher/monocypher.c
+    third_party/monocypher/monocypher-ed25519.c
+    third_party/blake2s/blake2s-ref.c
+)
+set_target_properties(airusb_thirdparty PROPERTIES C_STANDARD 99 C_STANDARD_REQUIRED ON)
+target_compile_options(airusb_thirdparty PRIVATE -w)
+
+# ---------------------------------------------------------------------------
+# crypto/ + the Noise handshake — the security layer.
+#
+# crypto/ is the ONLY place third_party is called from, and third_party is linked
+# PRIVATE so that nothing above this line can reach a raw primitive by accident.
+#
+# Noise lives here rather than in airusb_protocol because it depends on crypto/
+# and airusb_protocol does not: putting it there would make the two libraries
+# mutually dependent, which is a sign the layering is wrong rather than a build
+# quirk to work around.
+# ---------------------------------------------------------------------------
+add_library(airusb_crypto STATIC
+    crypto/Primitives.cpp
+    crypto/Identity.cpp
+    protocol/Noise.cpp
+    transport/NoiseCipher.cpp
+)
+target_link_libraries(airusb_crypto PUBLIC airusb_protocol airusb_transport
+                                   PRIVATE airusb_thirdparty)
 
 # ---------------------------------------------------------------------------
 # diag/  — test instruments. Portable, and deliberately NOT on the data path:
