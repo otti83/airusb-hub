@@ -141,9 +141,14 @@ target_link_libraries(airusb_session PUBLIC airusb_transport)
 # diag/  — test instruments. Portable, and deliberately NOT on the data path:
 # nothing in core/, protocol/ or transport/ may include it. BotProbe understands
 # SCSI so that P2.8 has an instrument it can trust; AirUSB itself does not.
+#
+# BotProbe never writes, and its header says so without qualification. WriteProbe
+# is a separate type precisely so that promise stays absolute rather than becoming
+# conditional on a flag.
 # ---------------------------------------------------------------------------
 add_library(airusb_diag STATIC
     diag/BotProbe.cpp
+    diag/WriteProbe.cpp
 )
 target_link_libraries(airusb_diag PUBLIC airusb_core)
 

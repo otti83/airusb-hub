@@ -84,7 +84,7 @@ jobs:
       # Verified locally on macOS: attempt 1 exits 3 and pairs, attempt 2 exits 0
       # with RESULT=PASS.
       # ---------------------------------------------------------------------
-      - name: A USB Mass Storage exchange over an encrypted loopback session
+      - name: A USB Mass Storage exchange, read AND write, over a loopback session
         shell: pwsh
         run: |
           # Absolute: Start-Process resolves a relative path against the host
@@ -115,7 +115,9 @@ jobs:
             $passed = $false
             foreach ($attempt in 1..12) {
               Write-Host "--- connect attempt $attempt ---"
-              $out = & $exe connect --host 127.0.0.1 --port 7714 --probe 2>&1
+              # --write-test implies --probe and adds the host->device half.
+              # Until this landed, bulkOut had only ever carried 31-byte CBWs.
+              $out = & $exe connect --host 127.0.0.1 --port 7714 --write-test 2>&1
               $code = $LASTEXITCODE
               $out | ForEach-Object { Write-Host $_ }
               Write-Host "exit $code"
@@ -172,7 +174,7 @@ jobs:
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: ctest --output-on-failure
 
-      - name: A USB Mass Storage exchange over an encrypted loopback session
+      - name: A USB Mass Storage exchange, read AND write, over a loopback session
         env:
           ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
@@ -191,7 +193,7 @@ jobs:
           passed=0
           for attempt in $(seq 1 12); do
             echo "--- connect attempt $attempt ---"
-            if ./build/airusb-net connect --host 127.0.0.1 --port 7714 --probe 2>&1 \
+            if ./build/airusb-net connect --host 127.0.0.1 --port 7714 --write-test 2>&1 \
                  | tee attempt.out && grep -q 'RESULT=PASS' attempt.out; then
               passed=1; break
             fi

@@ -22,7 +22,7 @@ authenticated as `otti83`).
 | Receiving on Windows / Linux | driver half not written |
 
 ```
-13 test suites / 0 failures
+14 test suites / 0 failures
 3 fuzz targets / 0 crashes / 0 UB findings
 Zero warnings: macOS (Clang, full flag set), Linux (GCC 12, -Wall -Wextra),
                Windows (MinGW, full flag set — -Wpedantic -Wconversion
@@ -527,9 +527,24 @@ Expect MSVC to find things MinGW did not. Paste whatever it says.
    **Nothing about the Windows path waits on anyone's decision.**
 2. **Linux importer** — vhci-hcd shim (§4.7). Cheapest of the three.
 3. **P2.9 `CiHostBackend`** — blocked on Apple only.
-4. **The exporter's write path** — P2.8's probe is read-only, so `bulkOut` has only
-   ever carried 31-byte CBWs. A real importer mounting a filesystem tests it for
-   free.
+4. ~~**The exporter's write path**~~ — **DONE, 2026-08-09.** It was going to be
+   "tested for free" by a real importer mounting a filesystem, which is a bad way
+   to find out: the free test is performed on somebody's data. `diag/WriteProbe`
+   now exercises it deliberately, and `airusb-net connect --write-test` runs it
+   over the network in CI on every commit.
+
+   Measured over a loopback session: `outTransfers=4 largestOut=16384
+   bytesWritten=35328 mismatched=0 outBoundariesIntact=yes restored=yes`. The
+   16384-byte run matters — it exceeds the record payload ceiling, so a single
+   logical OUT transfer has to be fragmented and reassembled, and nothing had ever
+   made the record layer do that in this direction. It came back byte-identical.
+
+   **It is a SEPARATE class from BotProbe on purpose.** BotProbe's header promises
+   without qualification that pointing it at a drive cannot damage its contents.
+   An opt-in flag would have turned an absolute guarantee into a conditional one,
+   which is the kind a tired person misreads with a drive attached. The write
+   instrument is a different type, and the only entry point is named
+   `runDestructiveWriteTest`.
 5. **`PAIR_*` messages and the pairing rate limiter.** The SAS's one-in-a-million
    bound assumes attempts cannot be retried; nothing enforces that yet.
 6. **Manifest segmentation.** A manifest larger than one record needs it; the
@@ -713,7 +728,7 @@ one and Super in the other. Read `USBSpeed`, cross-check `UsbLinkSpeed`.
 | OQ-5 | will Apple grant the entitlement to an Individual team? | **filed, FB24214361, awaiting** |
 | OQ-6 | are the credit/pipeline constants in the safe direction? | unresolved; instrument in P2.9 |
 | OQ-7 | no `API_AVAILABLE` on the IOUSBHostCI headers, so the ABI could shift | pin a tested range; treat any exception at init as a hard refusal |
-| new | does the exporter's **write** path work under load? | **untested** — the probe is read-only |
+| new | does the exporter's **write** path work? | **ANSWERED: yes** — `diag/WriteProbe`, byte-exact to 16 KB over the network, in CI. Sustained load is still unmeasured |
 | new | does the Windows client actually run? | **ANSWERED: yes.** MSVC 19.51, 13/13 suites, RESULT=PASS over a real socket, in CI |
 | new | does MSVC accept the sources? | **ANSWERED: yes**, after one missing `<string>` was fixed. Zero warnings at /W4 /permissive- |
 | new | does anything break under ASan? | **ANSWERED: no.** First ASan run ever, Linux, 13/13 + RESULT=PASS, no findings |

@@ -16,6 +16,7 @@
 #include "../core/Platform.h"
 #include "../crypto/Identity.h"
 #include "../diag/BotProbe.h"
+#include "../diag/WriteProbe.h"
 #include "../session/ExporterSession.h"
 #include "../session/ImporterClient.h"
 #include "../session/PeerStore.h"
@@ -210,7 +211,7 @@ int runServe(std::uint16_t port, const std::string& idPath, const std::string& p
     }
 }
 
-int runConnect(const std::string& host, std::uint16_t port, bool probe,
+int runConnect(const std::string& host, std::uint16_t port, bool probe, bool writeTest,
                const std::string& idPath, const std::string& peersPath)
 {
     LocalIdentity identity = loadOrCreateIdentity(idPath);
@@ -299,14 +300,36 @@ int runConnect(const std::string& host, std::uint16_t port, bool probe,
     }
     std::fflush(stdout);
 
+    // The write half, only when asked for in so many words. Everything above this
+    // point is read-only and safe to point at anything; everything below it is
+    // not, which is why it is a separate instrument behind a separate flag.
+    bool writeOk = true;
+    if (writeTest && r.passed) {
+        diag::WriteProbe wp(*devicePort, eps);
+        wp.setTrace([](const std::string& l) { logLine("XFER", l); });
+
+        diag::WriteProbe::Options wopt;
+        wopt.blockSize = r.blockSize ? r.blockSize : 512;
+        // Well past the end of anything a partition table lives in, so an
+        // accident against a real disk damages free space rather than the map of
+        // where everything is. It is still an accident; the flag is the guard.
+        wopt.startLba  = 1024;
+
+        const diag::WriteProbeResult wr = wp.runDestructiveWriteTest(wopt);
+        std::printf("\n--- BOT write probe over the network ---\n%s", wr.summary().c_str());
+        std::fflush(stdout);
+        writeOk = wr.passed;
+        if (!wr.passed) logLine("ERROR", "WRITE=FAIL — " + wr.failure);
+    }
+
     (void)client.detach();
 
-    if (r.passed) {
+    if (r.passed && writeOk) {
         logLine("XFER", "RESULT=PASS — a USB Mass Storage exchange completed over "
                         "an encrypted, authenticated network session");
         return 0;
     }
-    logLine("ERROR", "RESULT=FAIL — " + r.failure);
+    if (!r.passed) logLine("ERROR", "RESULT=FAIL — " + r.failure);
     return 6;
 }
 
@@ -315,10 +338,15 @@ void usage(const char* argv0)
     std::fprintf(stderr,
         "usage:\n"
         "  %s serve   [--port N] [--id PATH] [--peers PATH]\n"
-        "  %s connect --host H [--port N] [--probe] [--id PATH] [--peers PATH]\n"
+        "  %s connect --host H [--port N] [--probe] [--write-test]\n"
+        "                    [--id PATH] [--peers PATH]\n"
         "\n"
-        "  serve     offer a simulated USB drive over the network\n"
-        "  connect   attach to one, and with --probe read from it\n"
+        "  serve       offer a simulated USB drive over the network\n"
+        "  connect     attach to one, and with --probe read from it\n"
+        "  --write-test  ALSO WRITE TO THE DEVICE, to exercise the host->device\n"
+        "                path. DESTROYS DATA from LBA 1024 onward. It restores\n"
+        "                what it overwrote if it completes, and cannot if it is\n"
+        "                interrupted. Never point this at a disk you care about.\n"
         "\n"
         "  Portable: the client builds and runs on macOS, Linux and Windows.\n", argv0, argv0);
 }
@@ -345,6 +373,7 @@ int main(int argc, char* argv[])
     std::string idPath = mode == "serve" ? "airusb-serve.id" : "airusb-connect.id";
     std::string peersPath = mode == "serve" ? "airusb-serve.peers" : "airusb-connect.peers";
     bool probe = false;
+    bool writeTest = false;
 
     for (int i = 2; i < argc; ++i) {
         const std::string a = argv[i];
@@ -354,11 +383,12 @@ int main(int argc, char* argv[])
         else if (a == "--id" && i + 1 < argc)    idPath = argv[++i];
         else if (a == "--peers" && i + 1 < argc) peersPath = argv[++i];
         else if (a == "--probe")                 probe = true;
+        else if (a == "--write-test")          { probe = true; writeTest = true; }
         else { usage(argv[0]); return 64; }
     }
 
     if (mode == "serve")   return runServe(port, idPath, peersPath);
-    if (mode == "connect") return runConnect(host, port, probe, idPath, peersPath);
+    if (mode == "connect") return runConnect(host, port, probe, writeTest, idPath, peersPath);
 
     usage(argv[0]);
     return 64;
