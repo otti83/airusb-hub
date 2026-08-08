@@ -333,6 +333,10 @@ void usage(const char* argv0)
 // otherwise be answered for the first time by a compiler nobody has run yet.
 int main(int argc, char* argv[])
 {
+    // First, before anything prints. The SAS line a user has to read is one of
+    // the strings this protects.
+    const platform::ConsoleUtf8 utf8Console;
+
     if (argc < 2) { usage(argv[0]); return 64; }
 
     const std::string mode = argv[1];

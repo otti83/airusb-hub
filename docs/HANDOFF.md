@@ -32,10 +32,11 @@ CI: 4/4 green — Windows/MSVC, Linux/ASan+UBSan, macOS/Clang, MinGW cross
 ~21,500 lines ours + 10 vendored files
 ```
 
-### Windows is verified. THE NEXT TASK is the two-machine LAN run.
+### Windows is DONE. THE NEXT TASK is the UdeCx driver.
 
-CI ran on 2026-08-09 and **all four jobs are green**. What used to be the open
-question is now measured, on Windows Server 2025 with **MSVC 19.51.36252.0**:
+CI ran on 2026-08-09 and **all four jobs are green**, and the two-machine run was
+then done on real hardware (§3.4). Measured on Windows Server 2025 with
+**MSVC 19.51.36252.0**:
 
 ```
 13/13 suites pass natively on Windows      zero MSVC warnings at /W4 /permissive-
@@ -47,12 +48,14 @@ RESULT=PASS — a USB Mass Storage exchange completed over an encrypted,
 **ASan ran for the first time in this project's life**, on Linux, and found
 nothing: 13/13 plus its own `RESULT=PASS` under `address,undefined`.
 
-That leaves exactly one thing CI structurally cannot do, and it is the next task:
-**a genuine two-machine run**, macOS exporter ↔ a second machine, over a real
-network rather than loopback. Everything else in §4 is done.
+And the part CI structurally cannot do — **two machines, two operating systems,
+a real network** — was done by hand the same day and passed, with the SAS
+confirmed identical on both consoles (§3.4).
 
-⚠️ **Read §4.1 before wiring it up.** The addresses in older notes are stale and
-the two machines are not on the same LAN.
+**Nothing about the portable half is unmeasured any more.** The next task is
+§5.1, the UdeCx driver: the piece that makes Windows *enumerate* the device
+rather than merely drive it. Windows' gate is self-service (`bcdedit /set
+testsigning on`), so unlike the macOS importer it waits on nobody's decision.
 
 ---
 
@@ -218,7 +221,7 @@ here, before the App Group was added, signed cleanly and produced nothing.
 | Windows, built with MSVC 19.51, loopback | **PASS** — 13/13 suites + a full BOT exchange, in CI |
 | Linux under ASan + UBSan, loopback | **PASS** — 13/13 + BOT exchange, no sanitizer findings |
 | Windows client, cross-compiled to a PE | **builds** (CI job `windows-cross`) |
-| **two machines, real network, one of them Windows** | **NOT DONE — the next task** |
+| **Windows exporter ↔ macOS importer, two machines, real network** | **PASS** — 2026-08-09, see §3.4 |
 
 The passing runs end with a complete USB Mass Storage exchange:
 
@@ -367,7 +370,44 @@ user as a copy-pasteable command.
 
 ---
 
-## 4. NEXT TASK — verify on Windows
+### 3.4 The two-machine run — PASS, 2026-08-09
+
+Roles reversed deliberately: **Windows was the exporter, the Mac the importer.**
+The documented direction could not run, because Windows has no route back to the
+Mac (§4.1); `airusb-net` is symmetric, so serving from Windows proves the same
+protocol across the same two operating systems.
+
+```
+Windows GMKtec 192.168.0.109   MSVC 19.51 build, sha256 2fc7164a…
+   fingerprint CH3XOC7N EMWISCDU 4RST5S5V VW5B3TEB
+macOS M1       192.168.2.15    Clang build
+   fingerprint 4DWO33UF HJZESZT6 NY67S5LR VDGIUCTJ
+
+Each side reported the other's fingerprint exactly. SAS 927920 on BOTH consoles.
+
+attempt 1  exit 3   trust on first use: pinned, dropped
+attempt 2  exit 0   attached, manifest validated
+           verdict=PASS  cbw=6 data=5 csw=6 stallRecoveries=0 shortReads=0
+           SHORT_READ_FIDELITY ok — offered 1024, device sent 512, short read preserved
+           RESULT=PASS
+exporter:  served 18 transfer(s), 21 message(s)
+```
+
+Two details worth keeping:
+
+- **`SHORT_READ_FIDELITY` passing across the network is the load-bearing one.**
+  It says a device returning less than was asked for is reported as such after
+  crossing two operating systems, a cipher and a record layer. Rounding that up
+  is how a filesystem gets corrupted.
+- **The exporter logged three spurious `peer connected` lines before the real
+  handshake.** They were `nc -z` reachability probes from the Mac-side script. A
+  bare TCP connect is *accepted* and enters the handshake loop, so probing the
+  port perturbs the thing being measured — the exact hazard the CI job avoids by
+  retrying the real client instead. Do not probe the port; just retry `connect`.
+
+---
+
+## 4. Verifying Windows again (all of this now passes)
 
 ### 4.0 Done — CI covers it
 
@@ -385,7 +425,7 @@ Measured 2026-08-09:
 |---|---|
 | Mac, LAN (`en0`) | `192.168.2.15` |
 | Mac, Tailscale | `100.120.39.113` |
-| Windows box | `192.168.0.225` — **a different LAN**, reached through `utun8` |
+| Windows box (`GMKtec`) | `192.168.0.109` — **a different LAN**, reached through `utun8`. NOT `.225`, which is some other machine that also answers on 445/3389 |
 | Windows box on Tailscale? | **no** — every Windows peer in `tailscale status` is offline |
 | open on it | 3389 (RDP), 445 (SMB). 22 closed |
 
@@ -476,7 +516,9 @@ Expect MSVC to find things MinGW did not. Paste whatever it says.
 
 ---
 
-## 5. After Windows verification
+## 5. What is left
+
+### 5.1 THE NEXT TASK — the UdeCx driver
 
 1. **UdeCx driver** — `UdecxHostBackend` + `airusb.sys`, KMDF, design in
    `P1_IMPLEMENTATION_PLAN.md` §4.6. Windows' gate is self-service:
@@ -507,7 +549,7 @@ Expect MSVC to find things MinGW did not. Paste whatever it says.
 | Signing identities | `Apple Development … (WT36SR3Q23)`, `Apple Distribution … (GZUV3UMV3B)` |
 | Test USB device | `058f:6387` Generic Mass Storage, 31.5 GB exFAT, **SuperSpeed**, `disk22` |
 | Linux VM | Lima `kbuild`, Debian 12 aarch64, GCC 12.2; Mac host at 192.168.5.2 |
-| Windows box | 192.168.0.225, RDP open, **SSH closed** |
+| Windows box | `GMKtec`, **192.168.0.109**, RDP + SMB open, **SSH closed**, no Tailscale. Different LAN from the Mac — reached only via the `ts-464` subnet router. `.225` is a DIFFERENT machine |
 | Cross-compiler | `x86_64-w64-mingw32-g++` (Homebrew mingw-w64) |
 | GitHub | `gh` authenticated as `otti83` |
 
@@ -675,4 +717,5 @@ one and Super in the other. Read `USBSpeed`, cross-check `UsbLinkSpeed`.
 | new | does the Windows client actually run? | **ANSWERED: yes.** MSVC 19.51, 13/13 suites, RESULT=PASS over a real socket, in CI |
 | new | does MSVC accept the sources? | **ANSWERED: yes**, after one missing `<string>` was fixed. Zero warnings at /W4 /permissive- |
 | new | does anything break under ASan? | **ANSWERED: no.** First ASan run ever, Linux, 13/13 + RESULT=PASS, no findings |
-| new | two machines, real network, one Windows | **THE NEXT TASK, §4.1.** Measure the route first — they are not on the same LAN |
+| new | two machines, real network, one Windows | **ANSWERED: PASS** (§3.4), SAS confirmed on both consoles |
+| new | does the console mangle user-facing text on a Japanese Windows? | **it did** — CP932 read the em dash as `窶・` in the SAS line. Fixed with `platform::ConsoleUtf8` |

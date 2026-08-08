@@ -117,6 +117,39 @@ inline IoLength ioLength(std::size_t n) noexcept
 /// depends on its precision.
 void sleepMs(unsigned ms) noexcept;
 
+/// Makes a Windows console read this process's output as UTF-8, and puts the code
+/// page back afterwards. A no-op everywhere else.
+///
+/// `/utf-8` only settles what the COMPILER does with the em dashes and
+/// typographic quotes in user-facing literals; the bytes reaching stdout are
+/// UTF-8 either way. It is the console that misreads them: a Japanese console
+/// runs CP932, takes the em dash's `E2 80 94` for two Shift-JIS characters, and
+/// prints `窶・` — observed on real hardware, in the middle of
+///
+///     peer is not paired — pinning it because this is a test tool. SAS would be 927920
+///
+/// which is precisely the line a person is asked to read the SAS off before
+/// trusting a peer. Garbling the sentence that explains a security decision is
+/// not a cosmetic problem.
+///
+/// Restores on destruction because the code page belongs to the console, which
+/// outlives this process, and leaving it changed would affect whatever the user
+/// runs next in the same window. Redirected output is unaffected either way: a
+/// pipe or a file receives the same UTF-8 bytes regardless of the console's code
+/// page, which is why CI never saw this.
+class ConsoleUtf8 {
+public:
+    ConsoleUtf8() noexcept;
+    ~ConsoleUtf8();
+    ConsoleUtf8(const ConsoleUtf8&)            = delete;
+    ConsoleUtf8& operator=(const ConsoleUtf8&) = delete;
+
+private:
+#if defined(_WIN32)
+    unsigned _previous = 0;   ///< 0 means "nothing to restore"
+#endif
+};
+
 /// Writes `data` to `path` via a temporary file, flushes it to disk, and renames
 /// it over the target.
 ///

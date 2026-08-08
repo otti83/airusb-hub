@@ -72,6 +72,34 @@ void sleepMs(unsigned ms) noexcept
 }
 
 // ---------------------------------------------------------------------------
+// console encoding
+// ---------------------------------------------------------------------------
+
+#if defined(_WIN32)
+
+ConsoleUtf8::ConsoleUtf8() noexcept
+{
+    const UINT prev = ::GetConsoleOutputCP();
+    // 0 means there is no console attached — output is redirected, or this is a
+    // service. Nothing to change and nothing to restore; the bytes are already
+    // UTF-8 on the way to the pipe.
+    if (prev == 0 || prev == CP_UTF8) return;
+    if (::SetConsoleOutputCP(CP_UTF8)) _previous = prev;
+}
+
+ConsoleUtf8::~ConsoleUtf8()
+{
+    if (_previous != 0) (void)::SetConsoleOutputCP(_previous);
+}
+
+#else
+
+ConsoleUtf8::ConsoleUtf8() noexcept = default;
+ConsoleUtf8::~ConsoleUtf8()         = default;
+
+#endif
+
+// ---------------------------------------------------------------------------
 // files
 // ---------------------------------------------------------------------------
 
