@@ -42,11 +42,23 @@ See `P0_MACOS_FEASIBILITY.md` §4 for the verification.
 > 2. **Click the name of the identifier** in the list of App IDs
 > 3. Click the **Capability Requests** tab
 
-So an App ID must exist before the tab exists at all. Nothing about building,
-signing, or notarizing an app registers an identifier — the list is a ledger you
-populate by hand with the **⊕** button.
+So an App ID must exist before the tab exists at all.
 
-**Register the App ID first** (role: Account Holder or Admin):
+**How App IDs actually get registered** — there are three ways, and only one of
+them is manual:
+
+| how the app is signed | registers an App ID in the portal? |
+|---|---|
+| Xcode with *Automatically manage signing* | **yes** — Xcode calls the Developer API and creates it on demand |
+| Sideloading tools (AltStore, SideStore, …) | **yes** — same API, which is why such App IDs carry the team ID in the bundle string |
+| `codesign -s …` on a bare binary | **no** — codesign never contacts the portal |
+| the **⊕** button | yes, manually |
+
+AirUSB Hub has no App ID yet because it has no Xcode project yet: `capture_test`
+is a bare clang binary signed with `codesign` directly. Either build it from an
+Xcode project with automatic signing, or register the App ID by hand.
+
+**To register by hand** (role: Account Holder or Admin):
 
 | field | value |
 |---|---|
