@@ -17,7 +17,7 @@ authenticated as `otti83`).
 | Encryption + authentication | **done** — Noise_XX / Noise_IK, official vectors matched |
 | Session layer, L1 protocol, manifest | **done** |
 | Networking | **done** — real TCP, macOS↔macOS and macOS↔Linux |
-| Windows client | **cross-compiles**; MSVC audited and one real break fixed, but MSVC still never *run* and the exe never executed |
+| Windows client | **works** — MSVC 19.51 builds it, 13/13 suites pass natively, full BOT exchange over a real socket |
 | Receiving on a Mac | **blocked on Apple** — FB24214361, see §2 |
 | Receiving on Windows / Linux | driver half not written |
 
@@ -26,27 +26,33 @@ authenticated as `otti83`).
 3 fuzz targets / 0 crashes / 0 UB findings
 Zero warnings: macOS (Clang, full flag set), Linux (GCC 12, -Wall -Wextra),
                Windows (MinGW, full flag set — -Wpedantic -Wconversion
-               -Wsign-conversion -Wshadow, not just -Wall -Wextra)
+               -Wsign-conversion -Wshadow, not just -Wall -Wextra),
+               Windows (MSVC 19.51, /W4 /permissive-) — measured in CI
+CI: 4/4 green — Windows/MSVC, Linux/ASan+UBSan, macOS/Clang, MinGW cross
 ~21,500 lines ours + 10 vendored files
 ```
 
-### THE NEXT TASK: verify on Windows
+### Windows is verified. THE NEXT TASK is the two-machine LAN run.
 
-Still the one claim in this project that is *assumed* rather than measured — but
-the ground has moved since the last session, and the cheap half is now free:
+CI ran on 2026-08-09 and **all four jobs are green**. What used to be the open
+question is now measured, on Windows Server 2025 with **MSVC 19.51.36252.0**:
 
-1. **Push, and let CI answer it.** `.github/workflows/ci.yml` exists and is
-   committed but **has never run, because nothing has been pushed**. Its Windows
-   job builds with MSVC 2022, runs the suites natively, and requires a complete
-   USB Mass Storage exchange over a real loopback socket. One `git push` turns
-   "never built with MSVC, never executed" into a measured result with no Windows
-   box involved. Do this first; it is one command.
-2. **Then the real box**, for the thing CI cannot do: a genuine two-machine LAN
-   run against the macOS exporter. §4.
+```
+13/13 suites pass natively on Windows      zero MSVC warnings at /W4 /permissive-
+verdict=PASS  cbw=6 data=5 csw=6 stallRecoveries=0 shortReads=0
+RESULT=PASS — a USB Mass Storage exchange completed over an encrypted,
+              authenticated network session
+```
 
-**MSVC would have failed before this session, and now should not.** It was
-audited against directly (§3.3); one real build break was found and fixed. That
-is a prediction, not a measurement — CI is what settles it.
+**ASan ran for the first time in this project's life**, on Linux, and found
+nothing: 13/13 plus its own `RESULT=PASS` under `address,undefined`.
+
+That leaves exactly one thing CI structurally cannot do, and it is the next task:
+**a genuine two-machine run**, macOS exporter ↔ a second machine, over a real
+network rather than loopback. Everything else in §4 is done.
+
+⚠️ **Read §4.1 before wiring it up.** The addresses in older notes are stale and
+the two machines are not on the same LAN.
 
 ---
 
@@ -209,8 +215,10 @@ here, before the App Group was added, signed cleanly and produced nothing.
 |---|---|
 | macOS exporter ↔ macOS client, TCP loopback | **PASS** |
 | macOS exporter ↔ Linux client, real network | **PASS** |
-| Windows client, cross-compiled to a PE | **builds**; never run |
-| Windows client built with MSVC | **never attempted** |
+| Windows, built with MSVC 19.51, loopback | **PASS** — 13/13 suites + a full BOT exchange, in CI |
+| Linux under ASan + UBSan, loopback | **PASS** — 13/13 + BOT exchange, no sanitizer findings |
+| Windows client, cross-compiled to a PE | **builds** (CI job `windows-cross`) |
+| **two machines, real network, one of them Windows** | **NOT DONE — the next task** |
 
 The passing runs end with a complete USB Mass Storage exchange:
 
@@ -341,11 +349,11 @@ overlays on the wire, and no order-of-evaluation hazards.
   Homebrew's `wine-stable` is deprecated, fails macOS Gatekeeper, and Homebrew
   disables it 2026-09-01. CI executes it on real Windows instead.
 - The Windows clock's behaviour across sleep has never been observed.
-- **Expect `/W4` warning noise on the first MSVC run**, not errors — there is no
-  `/WX` anywhere. Likely C4018/C4389 signed-unsigned comparisons at ~8 sites; the
-  one-line answer if it is loud is `/wd4018 /wd4389`. C4324 on `Blake2s` was
-  pre-empted by giving `_state` a `std::uint64_t` element type instead of an
-  `alignas` specifier — same 512 bytes, same 8-byte alignment, no warning to mute.
+- **The predicted `/W4` noise did not appear.** MSVC 19.51 emitted **zero**
+  warnings. The C4324 on `Blake2s` was pre-empted by giving `_state` a
+  `std::uint64_t` element type instead of an `alignas` specifier (same 512 bytes,
+  same alignment, nothing to mute), and the expected C4018/C4389 signed-unsigned
+  noise never materialised. `/wd4018 /wd4389` is therefore NOT needed.
 
 **Residual risk the audit could not settle:** MSVC's optimizer is not modelled by
 either available compiler, and `RecordLayer::flush` returns `Ok` on a would-block
@@ -361,28 +369,62 @@ user as a copy-pasteable command.
 
 ## 4. NEXT TASK — verify on Windows
 
-### 4.0 Push first — it is one command and it does most of this for you
+### 4.0 Done — CI covers it
 
-```bash
-cd "/Users/mba/Desktop/AirUSB Hub" && git push
+`.github/workflows/ci.yml` builds with MSVC, runs the suites natively on Windows,
+and requires a full BOT exchange over a loopback socket; it also runs Linux under
+ASan. All four jobs are green (§0). Push and it re-verifies itself. What follows
+is only the part CI structurally cannot do.
+
+### 4.1 The two-machine run — MEASURE THE NETWORK FIRST
+
+**The addresses in older notes are stale, and this cost real time once already.**
+Measured 2026-08-09:
+
+| | |
+|---|---|
+| Mac, LAN (`en0`) | `192.168.2.15` |
+| Mac, Tailscale | `100.120.39.113` |
+| Windows box | `192.168.0.225` — **a different LAN**, reached through `utun8` |
+| Windows box on Tailscale? | **no** — every Windows peer in `tailscale status` is offline |
+| open on it | 3389 (RDP), 445 (SMB). 22 closed |
+
+The two machines are **not on the same LAN**. The Mac reaches the Windows box
+only because `ts-464` (`100.67.175.141`) is a Tailscale subnet router advertising
+`192.168.0.0/24`. Subnet routers SNAT by default, so:
+
+- **Mac → Windows works** (ping, 3389 and 445 all verified).
+- **Windows → Mac probably does not.** The Windows box has no route to
+  `100.120.39.113` and none to `192.168.2.15`.
+
+That matters because the documented direction — Mac serves, Windows connects —
+runs the wrong way down that path. **Measure before assuming.** On the Windows
+box:
+
+```powershell
+Test-NetConnection 100.120.39.113 -Port 7714 -InformationLevel Detailed
 ```
 
-`.github/workflows/ci.yml` then builds with MSVC 2022, runs the suites natively
-on Windows, and requires a full BOT exchange over a loopback socket. It also runs
-Linux under **ASan** for the first time — the handoff has said since P2 that ASan
-must run somewhere, because it hangs on this Mac and UBSan does not catch the
-heap out-of-bounds that R2/R5/R6 exist to stop. **Expect the ASan job to be the
-one that goes red first**; that is it doing its job, not a broken workflow.
+- **reachable** → the documented direction works. Mac runs `serve`, Windows runs
+  `connect --host 100.120.39.113`.
+- **not reachable** → **reverse the roles.** `airusb-net` is symmetric and
+  `serve` is fully portable, so run `serve --port 7714` on Windows and `connect`
+  from the Mac. It proves the same protocol, crypto and session layer across two
+  operating systems and a real network; the only difference is which side drives
+  the exporter FSM and which drives the importer. Note it in the result.
+- To get the documented direction instead, install Tailscale on the Windows box —
+  it then has a `100.x` address both ways.
 
-### 4.1 The two-machine run, which CI cannot do
+`serve` binds `INADDR_ANY`, so it accepts on the LAN and Tailscale addresses
+alike — verified on this Mac.
 
-⚠️ **The published prebuilt binary is now stale.** The release at
+⚠️ **Do not test with the published preview binary.** The release at
 <https://github.com/otti83/airusb-hub/releases/tag/v0.1.0-preview>
 (`airusb-net.exe`, sha256
 `a450f90f780d98282e781d2a994444e003dcf3f129fa59005eb4b332181b4ecc`) predates the
-`<string>`, ATTACH-reject and handshake-timeout fixes. Do not test with it —
-take the `airusb-net-msvc-x64` artifact from a CI run, or rebuild. Re-cut the
-release once CI is green.
+`<string>`, ATTACH-reject and handshake-timeout fixes — that build does not even
+compile under MSVC. Take the `airusb-net-msvc-x64` artifact from a CI run, or
+rebuild. **Re-cutting the release is worth doing now that CI is green.**
 
 **On the Mac:**
 
@@ -630,5 +672,7 @@ one and Super in the other. Read `USBSpeed`, cross-check `UsbLinkSpeed`.
 | OQ-6 | are the credit/pipeline constants in the safe direction? | unresolved; instrument in P2.9 |
 | OQ-7 | no `API_AVAILABLE` on the IOUSBHostCI headers, so the ABI could shift | pin a tested range; treat any exception at init as a hard refusal |
 | new | does the exporter's **write** path work under load? | **untested** — the probe is read-only |
-| new | does the Windows client actually run? | **THE NEXT TASK, §4.** CI answers it on push; the two-machine LAN run still needs the box |
-| new | does MSVC accept the sources? | audited hard (§3.3), one real break found and fixed — but a prediction until CI runs |
+| new | does the Windows client actually run? | **ANSWERED: yes.** MSVC 19.51, 13/13 suites, RESULT=PASS over a real socket, in CI |
+| new | does MSVC accept the sources? | **ANSWERED: yes**, after one missing `<string>` was fixed. Zero warnings at /W4 /permissive- |
+| new | does anything break under ASan? | **ANSWERED: no.** First ASan run ever, Linux, 13/13 + RESULT=PASS, no findings |
+| new | two machines, real network, one Windows | **THE NEXT TASK, §4.1.** Measure the route first — they are not on the same LAN |
