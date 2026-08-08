@@ -120,6 +120,25 @@ platform::SocketHandle TcpStream::listen(std::uint16_t port, Status* status)
     const platform::SocketHandle fd = ::socket(AF_INET, SOCK_STREAM, 0);
     if (!platform::isValid(fd)) { set(Status::TransportLost); return platform::kInvalidSocket; }
 
+    // SO_REUSEADDR, deliberately, on Windows as well as POSIX. SO_EXCLUSIVEADDRUSE
+    // was considered here and rejected; the reasoning is recorded so it is not
+    // re-litigated:
+    //
+    //   * Winsock's hijack rule is keyed on the SECOND binder, not the first. A
+    //     socket that sets SO_REUSEADDR can bind over one that set no options at
+    //     all, so dropping the option here would not have prevented anything.
+    //     Only SO_EXCLUSIVEADDRUSE on THIS socket blocks it.
+    //   * Since Server 2003 that hijack requires the same user account — and a
+    //     process running as this user can already read the Ed25519 seed that
+    //     loadOrCreateIdentity writes (on Windows `privateToOwner` is a no-op and
+    //     the file inherits the directory ACL). Someone who can steal the port
+    //     can already steal the identity, so it is inside the trust boundary
+    //     rather than a new primitive.
+    //   * SO_EXCLUSIVEADDRUSE has a real cost: Windows refuses a wildcard bind
+    //     under it while any socket on the port sits in TIME_WAIT. Ctrl-C on
+    //     `serve` with a session open makes this side the active closer, so the
+    //     next `serve` on the same port fails for up to 120 s. For a tool whose
+    //     job is repeated hand-driven bring-up, that trade is the wrong way round.
     int one = 1;
     ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR,
                  reinterpret_cast<const char*>(&one), sizeof(one));

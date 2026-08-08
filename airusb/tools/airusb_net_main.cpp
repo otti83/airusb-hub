@@ -122,8 +122,15 @@ int runServe(std::uint16_t port, const std::string& idPath, const std::string& p
     logLine("ATTACH", "pinned peers: " + std::to_string(peers.size()));
 
     Status st = Status::Ok;
-    const int listenFd = TcpStream::listen(port, &st);
-    if (listenFd < 0) {
+    // Not `int`. A socket handle is a signed int on POSIX but an unsigned
+    // UINT_PTR on Windows, so storing one in an int truncates it on 64-bit
+    // Windows and then sign-extends the wreckage when it is passed to accept().
+    // The error test has to be platform::isValid() for the same reason:
+    // INVALID_SOCKET is (SOCKET)~0, which is not "< 0" in an unsigned type.
+    // MSVC would have warned C4244 here, but /wd4244 is on for the narrowings
+    // the shim handles deliberately, so this one would have passed in silence.
+    const platform::SocketHandle listenFd = TcpStream::listen(port, &st);
+    if (!platform::isValid(listenFd)) {
         logLine("ERROR", "could not listen on port " + std::to_string(port));
         return 1;
     }
@@ -318,7 +325,13 @@ void usage(const char* argv0)
 
 } // namespace
 
-int main(int argc, const char* argv[])
+// `char*`, not `const char*`. The standard names exactly two forms of main, and
+// GCC and Clang accept the const variant silently even under -pedantic-errors,
+// so nothing on this side of the fence would ever have said so. Conforming to
+// the spelled form costs nothing here — every use immediately becomes a
+// std::string or is passed as a const char* — and removes a question that would
+// otherwise be answered for the first time by a compiler nobody has run yet.
+int main(int argc, char* argv[])
 {
     if (argc < 2) { usage(argv[0]); return 64; }
 

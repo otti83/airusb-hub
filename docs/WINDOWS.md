@@ -56,6 +56,44 @@ stricter under `/permissive-` and needs `/utf-8` for the non-ASCII characters in
 user-facing strings. Both are set in `CMakeLists.txt`; a real MSVC build is still
 the acceptance test, and that is the one thing here that has not been run.
 
+The whole Windows target now also compiles warning-free under the flag set CMake
+actually configures — `-Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion
+-Wshadow` — and not merely under the `-Wall -Wextra` the cross-build script uses.
+Those are different claims and only the weaker one used to be true.
+
+### The MSVC audit, and the one thing it found
+
+Because MSVC could not be run, the sources were audited against it directly:
+seven passes over the 21 translation units in the `airusb-net` target — missing
+transitive includes, GNU extensions, the Windows API shim, `/permissive-`
+strictness, Windows runtime behaviour, the CMake configure, and byte-level wire
+compatibility — with every finding then adversarially re-checked.
+
+**One genuine build break existed and is fixed.** `crypto/Primitives.h` declared
+`std::string toHex(...)` while including `<string_view>` but not `<string>`.
+libc++ and libstdc++ both leak `<string>` through other headers, so Clang and
+MinGW never complained. Microsoft's does not: `<string_view>` reaches `<xstring>`
+only under the opt-in `_LEGACY_CODE_ASSUMES_STRING_VIEW_INCLUDES_XSTRING`, and
+`std::string`'s alias lives nowhere else. Seven of the ten translation units that
+reach that header had no prior `<string>`, and `crypto/Primitives.cpp` is the
+first source of the first library the documented command builds — so MSVC would
+have failed almost immediately, with `C2039: 'string': is not a member of 'std'`.
+
+Everything else that looked like a Windows defect was refuted on inspection, and
+the refutations are worth more than the findings:
+
+| looked like | why it is not |
+|---|---|
+| `SO_REUSEADDR` on the listener is a Windows port-hijack switch | the hijack is keyed on the *second* binder, and since Server 2003 needs the same user — who can already read the identity seed. `SO_EXCLUSIVEADDRUSE` would also block rebinding for up to 120 s of `TIME_WAIT` after Ctrl-C, which is the worse trade for a hand-driven tool |
+| the pin store's parser rejects CRLF and would silently unpair everyone | nothing writes CRLF: `writeFileAtomically` is `"wb"` and `readWholeFile` is `"rb"`. Notepad has preserved LF since Windows 10 1809 |
+| the listening `SOCKET` is truncated to `int` | real type-hygiene slip, fixed — but not a defect: Windows kernel handles are capped near 2²⁶ by the handle table, and MSDN documents the truncate/sign-extend round trip |
+
+Two latent defects unrelated to Windows were found and fixed on the way: an
+out-of-bounds read in the importer's ATTACH reject path on a peer-controlled
+body, and a handshake timeout that counted iterations rather than reading a clock
+(making the documented 15 s window about four minutes on Windows, where the sleep
+tick is 15.625 ms).
+
 ---
 
 ## Run it against the Mac

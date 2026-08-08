@@ -63,7 +63,11 @@ inline bool connectionLost(int e) noexcept
 inline bool setNonBlocking(SocketHandle s) noexcept
 {
     u_long on = 1;
-    return ::ioctlsocket(s, FIONBIO, &on) == 0;
+    // FIONBIO is defined as an unsigned long (0x8004667E) but ioctlsocket takes a
+    // signed long, so the canonical MSDN call is a sign-changing conversion. The
+    // bit pattern is what the API matches on and it is preserved; the cast just
+    // stops -Wsign-conversion reporting the value change as news.
+    return ::ioctlsocket(s, static_cast<long>(FIONBIO), &on) == 0;
 }
 
 /// Winsock needs initialising once per process, and is refcounted, so calling

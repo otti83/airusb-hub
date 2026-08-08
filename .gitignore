@@ -31,6 +31,9 @@ airusb/build/
 compile_commands.json
 .cache/
 
+# Output of scripts/cross-build-windows.sh
+airusb/build-win/
+
 # Xcode.
 #
 # .gitignore has no trailing comments — "path/  # note" makes the pattern

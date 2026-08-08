@@ -1,0 +1,237 @@
+# AirUSB Hub — continuous integration.
+#
+# This file exists to answer one question that no amount of reading could settle:
+# does the portable half of this project actually build and run on Windows with
+# MSVC? Cross-compiling with MinGW proved headers, APIs and linkage, and found
+# four real defects doing it — but MinGW is still GCC, and it shares GCC's
+# permissiveness. MSVC under /permissive- is a different compiler with a
+# different standard library, and until this workflow ran, nobody had ever
+# pointed it at these sources.
+#
+# The Windows job therefore does three things in order, each strictly stronger
+# than the last:
+#
+#   1. compiles every portable target with MSVC
+#   2. runs the unit suites natively on Windows
+#   3. runs a complete encrypted session over a real loopback socket and requires
+#      a USB Mass Storage exchange to complete
+#
+# Step 3 is the one that matters. It is the same BOT probe that drove a physical
+# drive during the P2.8 hardware gate, so a failure there means Windows is wrong,
+# not that the instrument is.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+defaults:
+  run:
+    working-directory: airusb
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # THE POINT OF THIS FILE.
+  # ---------------------------------------------------------------------------
+  windows-msvc:
+    name: Windows / MSVC 2022
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain versions (evidence, not decoration)
+        shell: pwsh
+        run: |
+          cmake --version
+          Get-CimInstance Win32_OperatingSystem | Select-Object Caption, Version | Format-List
+
+      - name: Configure
+        shell: pwsh
+        run: cmake -S . -B build
+
+      - name: Build
+        shell: pwsh
+        run: cmake --build build --config Release
+
+      # "Built with MSVC" is a claim; this is the line that supports it. Read the
+      # identity out of CMake's own cache rather than invoking cl.exe for its
+      # banner — cl.exe with no input files exits non-zero, which would fail this
+      # step for no reason.
+      - name: Record the compiler actually used
+        shell: pwsh
+        run: |
+          Select-String -Path build\CMakeCache.txt -Pattern '^CMAKE_CXX_COMPILER:'
+          Get-ChildItem -Recurse -Filter CMakeCXXCompiler.cmake build\CMakeFiles |
+            ForEach-Object { Select-String -Path $_.FullName -Pattern 'COMPILER_ID|COMPILER_VERSION' }
+
+      - name: Unit suites, natively on Windows
+        shell: pwsh
+        working-directory: airusb/build
+        run: ctest --build-config Release --output-on-failure
+
+      # ---------------------------------------------------------------------
+      # A complete session over a real socket. serve and connect default to
+      # separate identity and pin files, so both halves can share one machine
+      # without one clobbering the other's trust store.
+      #
+      # At least two connects are always needed, and that is not flakiness: the
+      # first is trust-on-first-use. The exporter pins the new peer and drops the
+      # connection, because the grants were read at handshake time and pretending
+      # they applied mid-session would be a lie. Only a later connect can attach.
+      # Verified locally on macOS: attempt 1 exits 3 and pairs, attempt 2 exits 0
+      # with RESULT=PASS.
+      # ---------------------------------------------------------------------
+      - name: A USB Mass Storage exchange over an encrypted loopback session
+        shell: pwsh
+        run: |
+          # Absolute: Start-Process resolves a relative path against the host
+          # process's directory, which is not necessarily PowerShell's location.
+          if (-not (Test-Path .\build\Release\airusb-net.exe)) {
+            Get-ChildItem -Recurse -Filter airusb-net.exe build | ForEach-Object { Write-Host $_.FullName }
+            throw "airusb-net.exe was not where the documented procedure says it is"
+          }
+          $exe = (Resolve-Path .\build\Release\airusb-net.exe).Path
+
+          $server = Start-Process -FilePath $exe `
+            -ArgumentList 'serve','--port','7714' `
+            -PassThru -NoNewWindow `
+            -RedirectStandardOutput 'serve.out' -RedirectStandardError 'serve.err'
+
+          try {
+            # Deliberately NOT a port-readiness probe. A bare TCP connect is
+            # ACCEPTED by the exporter, which then sits in its handshake loop
+            # waiting for a preamble that never comes — so probing the port
+            # perturbs the thing it is measuring. Retrying the real client
+            # instead is race-free: an attempt made before the listener is up
+            # simply fails to connect and is retried.
+            #
+            # It also absorbs the pairing round without special-casing it. The
+            # first attempt that reaches the exporter pins the peer and is
+            # dropped; the next one attaches. Success is defined only as
+            # exit 0 AND RESULT=PASS in the transcript.
+            $passed = $false
+            foreach ($attempt in 1..12) {
+              Write-Host "--- connect attempt $attempt ---"
+              $out = & $exe connect --host 127.0.0.1 --port 7714 --probe 2>&1
+              $code = $LASTEXITCODE
+              $out | ForEach-Object { Write-Host $_ }
+              Write-Host "exit $code"
+              if ($code -eq 0 -and ($out -match 'RESULT=PASS')) { $passed = $true; break }
+              if ($server.HasExited) { throw "the exporter died (exit $($server.ExitCode))" }
+              Start-Sleep -Milliseconds 500
+            }
+            if (-not $passed) { throw "no attempt produced exit 0 with RESULT=PASS" }
+            Write-Host 'PASS: a USB Mass Storage exchange completed on Windows.'
+          }
+          finally {
+            if ($server -and -not $server.HasExited) {
+              Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
+            }
+            Write-Host '--- exporter stdout ---'
+            if (Test-Path serve.out) { Get-Content serve.out }
+            Write-Host '--- exporter stderr ---'
+            if (Test-Path serve.err) { Get-Content serve.err }
+          }
+
+      - name: Publish the binary MSVC actually produced
+        uses: actions/upload-artifact@v4
+        with:
+          name: airusb-net-msvc-x64
+          path: airusb/build/Release/airusb-net.exe
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Linux, with AddressSanitizer.
+  #
+  # ASan runs HERE and not on macOS because any -fsanitize=address binary hangs
+  # before main() on the development Mac — bisected: `fuzzer` works,
+  # `fuzzer,undefined` works, `address` hangs. UBSan does not catch heap
+  # out-of-bounds, which is precisely what the R2/R5/R6 validation rules exist to
+  # stop, so a build that actually runs ASan has to exist somewhere.
+  # ---------------------------------------------------------------------------
+  linux-asan:
+    name: Linux / GCC + ASan + UBSan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure with sanitizers
+        run: |
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=undefined" \
+            -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=undefined" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+      - run: cmake --build build -j
+      - name: Unit suites under ASan
+        working-directory: airusb/build
+        env:
+          ASAN_OPTIONS: detect_leaks=1:abort_on_error=1:strict_string_checks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: ctest --output-on-failure
+
+      - name: A USB Mass Storage exchange over an encrypted loopback session
+        env:
+          ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: |
+          # pipefail matters here: without it `client | tee` reports tee's status,
+          # which always succeeds, and the client's exit code would go unchecked.
+          set -u -o pipefail
+          ./build/airusb-net serve --port 7714 > serve.out 2> serve.err &
+          server=$!
+          trap 'kill $server 2>/dev/null || true; echo "--- exporter ---"; cat serve.out serve.err' EXIT
+
+          # Same reasoning as the Windows job: retry the real client rather than
+          # probing the port, because a bare connect is accepted by the exporter
+          # and stalls its handshake loop. The pairing round is absorbed by the
+          # retry instead of being special-cased.
+          passed=0
+          for attempt in $(seq 1 12); do
+            echo "--- connect attempt $attempt ---"
+            if ./build/airusb-net connect --host 127.0.0.1 --port 7714 --probe 2>&1 \
+                 | tee attempt.out && grep -q 'RESULT=PASS' attempt.out; then
+              passed=1; break
+            fi
+            kill -0 $server 2>/dev/null || { echo "the exporter died"; break; }
+            sleep 0.5
+          done
+          [ "$passed" = 1 ] || { echo "no attempt produced RESULT=PASS"; exit 1; }
+
+  # ---------------------------------------------------------------------------
+  # macOS. The development platform, and the only one with the real exporter.
+  # The IOKit half is not exercised here — it needs a physical device and root —
+  # but everything portable is, and the Objective-C++ half must still compile.
+  # ---------------------------------------------------------------------------
+  macos:
+    name: macOS / Clang
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cmake -S . -B build
+      - run: cmake --build build -j
+      - working-directory: airusb/build
+        run: ctest --output-on-failure
+
+  # ---------------------------------------------------------------------------
+  # The MinGW cross-build. Kept in CI because it is the cheapest way to catch a
+  # Windows portability regression from a Mac, and because the prebuilt binary
+  # published for people without Visual Studio comes out of exactly this script.
+  # ---------------------------------------------------------------------------
+  windows-cross:
+    name: Windows / MinGW cross-build from Linux
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y g++-mingw-w64-x86-64
+      - name: Cross-compile
+        env:
+          MINGW_CXX: x86_64-w64-mingw32-g++-posix
+        run: ./scripts/cross-build-windows.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: airusb-net-mingw-x64
+          path: airusb/build-win/airusb-net.exe
+          if-no-files-found: error

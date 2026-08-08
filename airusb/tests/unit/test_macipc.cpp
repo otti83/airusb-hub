@@ -12,14 +12,25 @@
 //      boundaries and peer death are all covered by the same code that runs on
 //      the machine with the drive plugged in.
 
+// The file is split by that same distinction. AgentProtocol is the codec and is
+// portable, so its tests build and run everywhere — including Windows, which is
+// the point of compiling the codec everywhere in the first place. AgentLink is
+// the socket underneath it and is POSIX: unix domain sockets, socketpair(2),
+// getpeereid(2). CMake already excludes AgentLink.cpp from the Windows build, so
+// the tests that drive it are excluded here to match, rather than the whole
+// suite being dropped and the codec losing its Windows coverage with it.
+
 #include "../TestHarness.h"
-#include "../../platform/macos/AgentLink.h"
 #include "../../platform/macos/AgentProtocol.h"
 
-#include <sys/socket.h>
-#include <unistd.h>
+#if !defined(_WIN32)
+  #include "../../platform/macos/AgentLink.h"
 
-#include <thread>
+  #include <sys/socket.h>
+  #include <unistd.h>
+
+  #include <thread>
+#endif
 
 using namespace airusb;
 using namespace airusb::macos::ipc;
@@ -324,8 +335,9 @@ void testBodyCodecs()
 }
 
 // ---------------------------------------------------------------------------
-// The real socket path.
+// The real socket path. POSIX only — see the note at the top of the file.
 // ---------------------------------------------------------------------------
+#if !defined(_WIN32)
 
 /// A minimal agent: echoes BulkIn requests with `length` bytes of a pattern,
 /// acknowledges BulkOut with the payload size it actually received, and exits on
@@ -532,6 +544,8 @@ void testUnixSocketLifecycle()
     }
 }
 
+#endif // !_WIN32
+
 } // namespace
 
 int main()
@@ -539,7 +553,11 @@ int main()
     std::printf("test_macipc\n");
     testFrameCodec();
     testBodyCodecs();
+#if !defined(_WIN32)
     testSocketPath();
     testUnixSocketLifecycle();
+#else
+    std::printf("socket path: skipped — AgentLink is POSIX and is not built here\n");
+#endif
     TEST_MAIN_END();
 }

@@ -31,7 +31,24 @@ Status ImporterClient::connect(std::unique_ptr<transport::IByteStream> stream,
 
     // Spin the handshake. The stream is non-blocking, so Busy simply means the
     // peer has not answered yet.
-    for (std::uint32_t i = 0; i < cfg.handshakeTimeoutMs; ++i) {
+    //
+    // Measured against the clock, not counted in iterations. Counting assumed
+    // sleepMs(1) sleeps one millisecond; on Windows the platform tick is 15.625
+    // ms, so the documented 15 s window was really about four minutes there, and
+    // a half-open peer pinned this single-threaded client for all of it. The
+    // clock is the continuous one, so a laptop that suspends mid-handshake does
+    // not come back with the deadline still fresh.
+    //
+    // Deadline::afterMs treats 0 as "never" — right for an interrupt IN that may
+    // idle forever, wrong here, where 0 must stay "do not wait at all" as the
+    // counted loop did.
+    if (cfg.handshakeTimeoutMs == 0) {
+        _why = "the peer did not complete the handshake";
+        return Status::XferTimeout;
+    }
+    const Clock& clock = Clock::system();
+    const Deadline deadline = Deadline::afterMs(clock, cfg.handshakeTimeoutMs);
+    while (!deadline.expired(clock)) {
         const Status s = _secure.pump();
         if (_secure.established()) return Status::Ok;
         if (_secure.state() == SecureSession::State::Failed) {
@@ -146,13 +163,26 @@ Status ImporterClient::attach(const DeviceUid& uid, std::uint8_t slot,
     if (static_cast<Status>(h.status) != Status::Ok) {
         // The reason TLV is the part a user can act on — "close the app using
         // it" rather than "error 0x27".
-        forEachTlv(std::span<const std::uint8_t>(body).subspan(kBodyAttachOk),
-                   [&](const TlvView& t) {
-                       if (static_cast<wire::Tlv>(t.type) == wire::Tlv::RejectReason)
-                           _why.assign(reinterpret_cast<const char*>(t.value.data()),
-                                       t.value.size());
-                       return true;
-                   });
+        //
+        // The length check is not decoration. call() validates the header and
+        // that the body is as long as body_len claims, but it does not run
+        // validateHeader on a REPLY, so nothing upstream has established that a
+        // rejecting ATTACH_OK carries the 40-byte fixed body at all. A peer
+        // answering ATTACH_OK with status != Ok and body_len == 0 reached
+        // subspan(40) on an empty span here, which is unsigned wraparound to a
+        // 2^64-sized span over a null pointer — forEachTlv then reads it and the
+        // process dies. Conforming exporters always send the 40 bytes, so this
+        // costs nothing against a peer that is behaving; the point is the one
+        // that is not, and the importer dials out to an address a user typed.
+        if (body.size() >= kBodyAttachOk) {
+            forEachTlv(std::span<const std::uint8_t>(body).subspan(kBodyAttachOk),
+                       [&](const TlvView& t) {
+                           if (static_cast<wire::Tlv>(t.type) == wire::Tlv::RejectReason)
+                               _why.assign(reinterpret_cast<const char*>(t.value.data()),
+                                           t.value.size());
+                           return true;
+                       });
+        }
         if (whyNot) *whyNot = _why;
         return static_cast<Status>(h.status);
     }

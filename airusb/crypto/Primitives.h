@@ -32,6 +32,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -75,7 +76,17 @@ public:
 private:
     // Opaque, sized to blake2s_state. Checked with a static_assert in the .cpp so
     // a vendored-header change is a compile error rather than a stack overflow.
-    alignas(std::uint64_t) unsigned char _state[512];
+    //
+    // std::uint64_t rather than `alignas(std::uint64_t) unsigned char`: both give
+    // 512 bytes at 8-byte alignment, but the array type carries the alignment
+    // itself instead of asking for it, and MSVC's /W4 emits C4324 ("structure was
+    // padded due to alignment specifier") on every TU that materialises this
+    // class when the specifier is what forces the tail padding. Getting the same
+    // layout from the element type is the fix that removes the warning rather
+    // than muting it — /wd4324 would also hide genuine accidental over-alignment
+    // later. Nothing indexes this buffer bytewise; every use is sizeof, memset,
+    // wipe, or a cast to blake2s_state*.
+    std::uint64_t _state[64];
     bool _done = false;
 };
 
