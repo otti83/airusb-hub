@@ -26,9 +26,18 @@ Required entitlement:   Importer: com.apple.developer.usb.host-controller-interf
                                   -> RESTRICTED *and* MANAGED. Not self-serve.
                                      Must be granted by Apple and carried in an
                                      Apple-issued provisioning profile.
-                        Exporter: none, if the capture helper runs as root.
-                                  (com.apple.vm.device-access is the alternative,
-                                   but it is MAS-hypervisor-only per Apple DTS.)
+                        Exporter: none. But see the correction below — the exporter
+                                  needs no entitlement and yet cannot be a single
+                                  process.
+
+CORRECTION (2026-08-08, after hardware testing):
+    This report assumed the exporter is one root daemon. It cannot be.
+    Opening IOUSBHostInterface requires CONSOLE-SESSION membership, which a
+    LaunchDaemon can never have, while DeviceCapture and the DiskArbitration
+    unmount require root, which a console-session agent does not have. The
+    exporter therefore splits into a root daemon plus an unprivileged
+    console-session agent. Both halves verified on real hardware.
+    See docs/P1_CAPTURE_VERIFICATION.md and P1_IMPLEMENTATION_PLAN.md 7.4.
 
 SIP:                    Not Required   (for the shipping, entitled product)
                         Required to disable ONLY as an interim development
@@ -351,7 +360,7 @@ Keeping them separate means the exporter half is fully implementable and testabl
 | # | Risk | Severity | Status |
 |---|---|---|---|
 | 1 | Entitlement may not be granted to an **Individual** developer account | **HIGH** | Unproven either way. Requires filing the request. Blocks the importer only. |
-| 2 | FB16524420 — `IOUSBHostInterface` capture fails for mass storage from a LaunchDaemon since 15.3 | **HIGH** | Untested on 26.5 (no USB device attached). **First Phase 1 task.** |
+| 2 | ~~FB16524420~~ **RESOLVED** — the gate is security-session membership, not privilege. A LaunchDaemon cannot open `IOUSBHostInterface`; a console-session agent can, even unprivileged. | **CLOSED** | Verified on hardware 2026-08-08. Exporter splits into a root daemon + a session agent. See `P1_CAPTURE_VERIFICATION.md`. |
 | 3 | The CI message protocol is documented only in headers; no Apple sample code exists | MEDIUM | Mitigate with a strict message-encoder unit-test suite before touching the kernel |
 | 4 | Malformed messages may destabilize the kernel driver | MEDIUM | Kernel signals `IOUSBHostCIExceptionType*` and expects teardown; implement exception handling first, use Apple's example capabilities verbatim |
 | 5 | Watchdog: command timeout is 2^n seconds and a timeout is **fatal** | MEDIUM | Never block the command handler on network I/O. Respond locally, pipeline remotely. |

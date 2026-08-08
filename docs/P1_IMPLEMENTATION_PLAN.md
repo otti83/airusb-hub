@@ -916,20 +916,48 @@ ORPHANED → RELEASING         on (a) definitive DETACH/GOODBYE, (b) T_lease_exp
 
 **The `DADiskClaim` is held for the ENTIRE lease**, not just across the unmount. A naive claim → unmount → capture → unclaim sequence leaves a window in which any event that re-registers the interfaces for matching lets `IOUSBMassStorageDriver` match and `diskarbitrationd` automount underneath a live lease. Two independent barriers, both held through `LEASED`/`SUSPENDED`/`DRAINING`/`ORPHANED`: **capture at the driver layer, claim at the mount layer.**
 
-### 7.4 FB16524420 tolerance
+### 7.4 FB16524420 — RESOLVED. The exporter is two processes, not one.
 
-Since macOS 15.3, a root LaunchDaemon may fail to capture `IOUSBHostInterface` for **mass storage** with `kIOReturnInternalError (0xE00002C9)` unless SIP is off or the process was launched from Terminal/Xcode. Unverified on 26.5. This is the first device class we target, so it hits the PoC directly.
+**This section supersedes the mitigation ladder that used to be here. Neither rung was the answer.** Full evidence in `P1_CAPTURE_VERIFICATION.md`; the conclusion is binding on the rest of §7.
 
-**Mitigation ladder, tried in order at step 6 of §7.2:**
+Measured on macOS 26.5.1 against real hardware:
 
-1. **Plain `-initWithIOService:` after `configureWithValue:matchInterfaces:NO`.** The hypothesis: FB16524420 is a failure to *capture an interface away from an already-matched driver*; if no driver ever matches the interface, there is nothing to capture away. **This is a hypothesis derived from the header, not an observation** — P2.5 resolves it.
-2. If that fails, retry with `IOUSBHostObjectInitOptionsDeviceCapture` on the interface and record the exact `IOReturn`.
-3. If both fail: unwind the **entire** attach (release the device object, `DADiskUnclaim`) so the local OS remounts the drive; set a sticky per-daemon `degraded` flag so the user is not asked to unmount repeatedly.
+| operation | needs root | needs console session |
+|---|---|---|
+| DiskArbitration whole-disk unmount | **yes** (`0xF8DA0009 kDAReturnNotPrivileged`) | no |
+| `IOUSBHostDevice` + `DeviceCapture` | **yes** | **no** — works under launchd |
+| `IOUSBHostInterface` open | **no** — works as uid 501 | **yes** |
 
-**Protocol-visible handling:** `ATTACH_OK{status = CAPTURE_FAILED}` + `TLV NATIVE_STATUS{platform_id=1, native_code=0xE00002C9}` + `TLV REJECT_REASON`, so the importer shows a real diagnostic. It never becomes a silent hang.
-**User-facing:** *"Could not take control of \<Drive\>. It has been returned to this Mac."* plus a Help link naming the two known workarounds (launch from Terminal; disable SIP on a dev machine). Never a bare error code in the primary text.
+The gate is **security-session membership**, not privilege. The kernel states it:
+`(Sandbox) System Policy: <proc>(pid) deny(1) iokit-open-service IOUSBHostInterface`.
+A LaunchDaemon (uid 0, ppid 1, no tty, *system* session) is denied; a LaunchAgent (uid 501, ppid 1, no tty, *Aqua* session) succeeds. Same parent, same lack of a terminal, less privilege — session is the only variable. `SessionCreate` in the plist does not help; a *new* session is not the *console* session. Staging the binary outside TCC-protected paths does not help either.
 
-P2.5 records results in all three launch contexts (LaunchDaemon, Terminal, Xcode) on macOS 26.5.
+No process in a shippable product can be both root and in the console session (`SMAppService.daemon` → system session; `SMAppService.agent` → console session but unprivileged). **Therefore the exporter splits:**
+
+```
+airusb-exportd   root LaunchDaemon      DiskArbitration unmount/claim,
+                                        IOUSBHostDevice + DeviceCapture,
+                                        lease ownership, restore on release
+        │  local IPC (unix socket, SCM_RIGHTS not required)
+        ▼
+airusb-agent     console-session Agent  IOUSBHostInterface, copyPipeWithAddress:,
+                 (unprivileged)         bulk/interrupt transfers, the data plane
+```
+
+Verified: with the daemon holding the capture, a separate non-root console-session process opens the interface user client successfully (`run_split_test.sh`).
+
+**Still unproven, and it is P2.8's first job:** actual bulk transfers through pipes obtained that way while the daemon holds the device. The gate is passed; the plumbing behind it is untested.
+
+**Consequences elsewhere in this plan:**
+
+- §7.1's single-mount safety theorem must be restated over two processes. The **daemon** remains the single source of exclusivity truth; the agent never unmounts, never claims, and never captures.
+- §7.2's capture order splits: steps up to and including `configureWithValue:matchInterfaces:NO` are the daemon's; interface open and `rebuildPipeTable()` (§7.5) are the agent's.
+- Each side must tolerate the other dying. Daemon death → agent's pipes fail → report `DEVICE_GONE`. Agent death → daemon must release the capture and restore the drive rather than leaving it captured-but-unused. The daemon owns the watchdog for this, because it owns the lease.
+- `matchInterfaces:NO` is still **required** — it stops `IOUSBMassStorageDriver` re-attaching and remounting a leased drive — it is simply not *sufficient*.
+- Every `IOUSBHostObject` init stays wrapped in `@try`/`@catch`: Apple's error path raises `NSInvalidArgumentException` instead of returning an `NSError` when `IOServiceOpen` fails, and where the real `IOReturn` matters, call `IOServiceOpen` directly.
+
+**Protocol-visible handling** is unchanged: `ATTACH_OK{status = CAPTURE_FAILED}` + `TLV NATIVE_STATUS{platform_id=1, native_code=<IOReturn>}` + `TLV REJECT_REASON`.
+**User-facing:** *"Could not take control of \<Drive\>. It has been returned to this Mac."* Never a bare error code in the primary text.
 
 ### 7.5 Pipe-handle validity — `rebuildPipeTable()`
 
@@ -1078,7 +1106,7 @@ The L1 header maps 1:1 onto the mandated fields, so `airusb_log_msg(tag, hdr, bo
 | # | Question | Why it matters | How it gets answered |
 |---|---|---|---|
 | **OQ-1** | Are the chaining semantics of `NormalTransfer` arrays on a **non-control** endpoint really one-TD-per-URB? The `data0` 28-bit length and the singular `currentTransferMessage` strongly suggest yes, but the ground truth does not state it | Splitting one logical transfer injects a spurious short packet and desynchronises Bulk-Only Transport; coalescing destroys the CBW's transfer boundary. Both are silent data corruption | P2.9: runtime assertion + trace-ring capture of every TD chain seen on a real mass-storage read/write; if the assumption is violated, the assembly rule changes before the importer ships |
-| **OQ-2** | Does the FB16524420 mitigation (`matchInterfaces:NO` + plain interface open) actually work on 26.5, from a LaunchDaemon? | If both ladder steps fail, the exporter has no supported shape on 15.3+ and we need a different launch context or an Apple escalation | P2.8 / I-1, before the importer exists |
+| **OQ-2** | ~~Does the FB16524420 mitigation work from a LaunchDaemon?~~ **RESOLVED 2026-08-08.** It does not, and the premise was wrong: the gate is security-session membership, not privilege or TCC path. The exporter splits into a root daemon (unmount + device capture) and a console-session agent (interfaces + bulk I/O). Verified on hardware. | Decided the exporter architecture | See §7.4 and `P1_CAPTURE_VERIFICATION.md` |
 | **OQ-3** | Does `vhci_hcd`'s `store_attach` accept an `AF_UNIX` socket on hardened/older kernels? | Determines whether the loopback shim needs the 127.0.0.1 fallback | Probe at first run, cache per kernel version. Phase 4 |
 | **OQ-4** | Does UdeCx's `EvtUsbDeviceEndpointsConfigure` callback ordering carry enough information to reconstruct the intended configuration and alt setting in every case? | If not, the exporter's handle state silently desyncs from what Windows believes | Dedicated spike before committing to the Windows backend. Phase 3 |
 | **OQ-5** | Is the entitlement `com.apple.developer.usb.host-controller-interface` grantable to this team? Every confirmed holder found is an Organization account | Blocks only P2.9/P2.10 | Request filed at Phase 1 start; P2.0–P2.8 proceed regardless |

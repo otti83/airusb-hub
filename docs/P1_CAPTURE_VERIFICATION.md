@@ -2,143 +2,225 @@
 
 **Date:** 2026-08-08
 **Host:** macOS 26.5.1 (25F80), Apple M1 (T8103), SIP enabled, Secure Boot Reduced
-**Tool:** `poc/p1-capture-test/`
-**Purpose:** resolve P0 open risk #2 (FB16524420) before writing exporter code.
+**Device:** `058f:6387` Generic Mass Storage, 31.5 GB exFAT, **SuperSpeed 5 Gb/s**
+**Tools:** `poc/p1-capture-test/`
+
+**Resolves:** P0 open risk #2 (FB16524420) and P1 OQ-2.
 
 ---
 
-## Result summary
+## Verdict
 
-| Question | Answer | Decisive? |
+**The exporter is viable, but it must be split across two processes.**
+
+FB16524420 reproduces on macOS 26.5.1. The cause is not what the radar describes,
+and not what this project first assumed. It is **security-session membership**, not
+privilege, not the TCC status of the binary's path, and not an IOUSBHost bug.
+
+```
+root LaunchDaemon      : DiskArbitration unmount + IOUSBHostDevice capture + lifecycle
+console-session agent  : IOUSBHostInterface + IOUSBHostPipe + bulk/interrupt transfers
+```
+
+Both halves are verified on real hardware, and the two were verified working
+**simultaneously against the same device**.
+
+---
+
+## 1. The permission map
+
+Measured, not inferred. Each cell is a real run against the real device.
+
+| Operation | needs root | needs console session |
 |---|---|---|
-| Does `IOUSBHostObjectInitOptionsDeviceCapture` work as root on 26.5? | **Yes** | Yes |
-| Does `IOUSBHostInterface` capture work for **mass storage**? | **Yes, from Terminal** | **No — see §3** |
-| Do raw control transfers work on a captured device? | **Yes** | Yes |
-| Does DiskArbitration unmount + capture + restore round-trip cleanly? | **Yes, no data loss** | Yes |
-| Is FB16524420 closed? | **Not yet** | Needs the LaunchDaemon run |
+| DiskArbitration whole-disk unmount | **yes** — `0xF8DA0009` `kDAReturnNotPrivileged` | no |
+| `IOUSBHostDevice` + `…OptionsDeviceCapture` | **yes** | **no** — works under launchd |
+| `sendDeviceRequest` on ep0 | with the above | no |
+| `configureWithValue:matchInterfaces:NO` | with the above | no |
+| **`IOUSBHostInterface` open** | **no** — succeeds as uid 501 | **yes** |
+
+No process in a shippable macOS product can be both root and a member of the console
+session: `SMAppService.daemon` runs in the system session, `SMAppService.agent` runs
+in the console session but as the user. Hence the split.
 
 ---
 
-## 1. Test device
+## 2. How the discriminator was isolated
 
-```
-058f:6387  Generic / "Mass Storage"   (Alcor Micro class controller)
-31.5 GB, MBR, exFAT volume "Memory 32GB"
-USBSpeed = 4 (kIOUSBHostConnectionSpeedSuper), UsbLinkSpeed = 5,000,000,000
-```
+`run_matrix.sh`, five contexts, one device, raw `IOServiceOpen` on the interface nub:
 
-**The device operates at SuperSpeed (USB 3.0, 5 Gb/s), not High Speed.**
-
-This was initially misreported. The IORegistry exposes two speed properties with
-**different enumerations**, and reading the wrong one silently misreports USB 3 as USB 2:
-
-| Property | Enumeration | Value here | Means |
+| | context | raw open | |
 |---|---|---|---|
-| `Device Speed` | **legacy**: Low=0, Full=1, High=2, **Super=3** | 3 | Super |
-| `USBSpeed` | `tIOUSBHostConnectionSpeed` (`IOUSBHostFamilyDefinitions.h:88`): None=0, Full=1, Low=2, **High=3**, Super=4 | 4 | Super |
+| A | direct — root, console session | `0x00000000` | SUCCESS |
+| B | LaunchDaemon — root, system session | `0xE00002E2` | `kIOReturnNotPermitted` |
+| C | LaunchDaemon + `SessionCreate` | `0xE00002E2` | `kIOReturnNotPermitted` |
+| D | `launchctl asuser 501` — root, console session | `0x00000000` | SUCCESS |
+| E | LaunchDaemon, binary staged to `/usr/local/libexec` | `0xE00002E2` | `kIOReturnNotPermitted` |
 
-Both say Super; the trap is that the same integer `3` means *High* in one enum and
-*Super* in the other. Corroborating evidence from the device descriptor:
-`bcdUSB = 0x0320` (USB 3.2) and `bMaxPacketSize0 = 9`, which for SuperSpeed is an
-**exponent** (2⁹ = 512 bytes), not a byte count. A High Speed device would report 64.
+**E refutes the TCC-path hypothesis.** Moving the binary out of `~/Desktop` changed
+nothing, so the protected path was never the cause of the denial.
 
-The tool now reads `USBSpeed` and cross-checks `UsbLinkSpeed`, printing
-`speed=Super(5G) (5.0 Gb/s link)`.
+**C refutes `SessionCreate`.** Creating a *new* security session does not help; the
+check wants the *console* session specifically.
 
-**Implication for Phase 2:** the device manifest must carry the BOS descriptor and
-SuperSpeed Endpoint Companion descriptors (`bDescriptorType` 0x30). The P1 plan's
-manifest contract (§3.7) already requires both. If the first PoC should exercise the
-simpler USB 2.0 path instead, insert a USB 2.0 hub to force High Speed operation —
-this is a deliberate choice to make, not something to leave to chance.
+The kernel names the gate outright:
+
+```
+(Sandbox) System Policy: capture_test(20182) deny(1) iokit-open-service IOUSBHostInterface
+(Sandbox) System Policy: configd(342)        deny(1) iokit-open-service IOUSBHostInterface
+```
+
+Apple's own `configd` is denied identically, which is a useful sanity check that this
+is a blanket policy rather than something about our binary.
+
+Then the measurement that settled it — a **non-root** process in the console session:
+
+```
+probe: euid=501 ppid=22958 no-tty
+raw IOServiceOpen(interface 0, type=0) -> 0x00000000 (SUCCESS)
+```
+
+Root is not required. Compare the two launchd-parented runs, which differ in
+*nothing* but session:
+
+| | uid | ppid | tty | session | result |
+|---|---|---|---|---|---|
+| LaunchDaemon | 0 | 1 | none | system | **denied** |
+| LaunchAgent | 501 | 1 | none | Aqua | **success** |
+
+Same parent, same absence of a controlling terminal, *less* privilege — and it works.
+Session membership is the entire variable.
 
 ---
 
-## 2. Verified transcript
+## 3. The split, verified end to end
 
-Run as `sudo ./capture_test --capture 058f:6387` from an interactive Terminal:
+`run_split_test.sh`: a root LaunchDaemon captures the device and holds it for 25 s
+while a separate non-root console-session process opens the interface.
 
 ```
-@@AIRUSB_ATTACH@@ capture_test  euid=0  args=--capture 058f:6387
-@@AIRUSB_ATTACH@@ target 058f:6387 Mass Storage
-@@AIRUSB_ATTACH@@ BSD media: [disk22,disk22s1]
-@@AIRUSB_ATTACH@@ unmounting /dev/disk22 (whole disk)
-@@AIRUSB_ATTACH@@ unmounted /dev/disk22
-@@AIRUSB_ATTACH@@ capturing IOUSBHostDevice with IOUSBHostObjectInitOptionsDeviceCapture
-@@AIRUSB_ATTACH@@ RESULT=DEVICE_CAPTURED
-@@AIRUSB_ENUM@@ deviceDescriptor: USB 0320  class=00/00/00  VID=058f PID=6387
-                bcdDevice=0002  ep0MaxPacket=9  numConfigs=1
-@@AIRUSB_REQ@@ RESULT=CONTROL_OK GET_DESCRIPTOR(DEVICE) bytes=18 head=12 01 20 03
-@@AIRUSB_ATTACH@@ RESULT=INTERFACE_CAPTURED num=0 class=0x08
-@@AIRUSB_ENUM@@   interface 0 alt 0: class=08/06/50 endpoints=2
-@@AIRUSB_ATTACH@@ interfaces: 1 captured / 1 present
-@@AIRUSB_DETACH@@ releasing interfaces and destroying device (triggers reset + driver rematch)
-@@AIRUSB_DETACH@@ RESULT=RESTORED
-@@AIRUSB_ATTACH@@ VERDICT=PASS
+=== step 1: root LaunchDaemon captures 058f:6387 and holds it 25s ===
+  RESULT=DEVICE_CAPTURED
+  interface nubs republished: 1
+  HOLDING capture for 25s
+
+=== step 2: non-root console-session process probes the interface ===
+  raw IOServiceOpen(interface 0, type=0) -> 0x00000000 (SUCCESS)
+  VERDICT=PASS
+
+=== step 3 ===
+  RESULT=RESTORED (hold mode)
+
+SPLIT IS VIABLE
 ```
 
-### What each line proves
+And in the actual production shape, a real LaunchAgent:
 
-- **`unmounted /dev/disk22`** — the DiskArbitration safe-unmount path works, so the
-  exclusivity lifecycle in P1 §7 has a working first step.
-- **`RESULT=DEVICE_CAPTURED`** — `IOUSBHostObjectInitOptionsDeviceCapture` succeeds
-  with root and **no entitlement**, confirming the P0 §5 reading of the header. The
-  built-in `IOUSBMassStorageDriver` was evicted.
-- **`GET_DESCRIPTOR bytes=18 head=12 01 20 03`** — decoded: `bLength=0x12` (18),
-  `bDescriptorType=0x01` (DEVICE), `bcdUSB=0x0320` little-endian. A **real control
-  transfer completed against real hardware** through the public API. This is the same
-  request the importer's kernel will issue at us in Phase 2, so the round trip is
-  de-risked at both ends.
-- **`INTERFACE_CAPTURED num=0 class=0x08`** and
-  **`class=08/06/50 endpoints=2`** — Mass Storage (0x08) / SCSI transparent (0x06) /
-  **Bulk-Only Transport (0x50)** with two endpoints (bulk IN + bulk OUT). A textbook
-  BOT profile, and exactly the class FB16524420 concerns.
-- **`RESULT=RESTORED`** — plain `destroy` reset the device and re-registered drivers.
-  Verified afterwards: the volume remounted at `/Volumes/Memory 32GB` with contents
-  intact. **No data loss.**
+```
+probe: euid=501 ppid=1 launchd
+raw IOServiceOpen(interface 0, type=0) -> 0x00000000 (SUCCESS)
+```
+
+### What is proven, and what is not
+
+**Proven:** the interface user client can be opened, from the production process
+shape, while a different root process holds the device capture.
+
+**Not yet proven:** actual bulk transfers through pipes obtained that way, with the
+daemon holding the device. `copyPipeWithAddress:` and a real CBW/data/CSW exchange
+are P2.8. The *gate* that was blocking is passed; the plumbing behind it is untested.
 
 ---
 
-## 3. Why this is NOT yet a close on FB16524420
+## 4. The exception was a second, separate Apple bug
 
-FB16524420 states the interface-capture failure occurs **from a LaunchDaemon**, and
-**not** from Terminal or Xcode. This run was from an interactive Terminal.
-
-> A PASS from an interactive shell is the **expected** result even when the bug is
-> present. It therefore proves the API works, but says nothing about whether the bug
-> affects us.
-
-This matters because AirUSB Hub's exporter *must* be a root LaunchDaemon — that is the
-supported shape for a notarized Developer ID product (an `SMAppService`/launchd daemon
-plus an unprivileged UI). The LaunchDaemon result is the one that decides the
-architecture.
-
-The tool now detects its launch context (`getppid() == 1`) and reports
-`VERDICT=PASS_NONDECISIVE` rather than `PASS` when run interactively, so this
-distinction cannot be lost again.
-
-### The decisive run
+Under launchd the process did not merely fail — it died:
 
 ```
-sudo ./run_as_daemon.sh 058f:6387
+-[IOUSBHostObject openWithOptions:error:] + 432
+NSInvalidArgumentException: attempt to insert nil object from objects[0]
 ```
 
-Loads a one-shot LaunchDaemon, runs the same test, prints the log, then unloads and
-removes itself. Nothing stays installed.
+Disassembly (lldb, arm64e) shows why. `IOServiceOpen` fails at +168; the framework
+falls through to build an `NSError` userInfo from three
+`-[NSBundle localizedStringForKey:…]` results (+208…+404) and raises at +428 because
+one is nil. `objects[0]` is the first value, so `+[NSBundle mainBundle]` itself
+returned nil — a message to a nil receiver returns nil.
 
-| Outcome | Meaning |
-|---|---|
-| `VERDICT=PASS` + `launch context: launchd (daemon)` | FB16524420 does not affect us. Exporter design confirmed; P1 §7.4's mitigation ladder becomes dead code and should be deleted. |
-| `VERDICT=FAIL` + `0xE00002C9` | It does. Run the §7.4 ladder: retry after `configureWithValue:matchInterfaces:NO`, then decide between a different launch context and an Apple escalation. |
+Two consequences, both binding on the real exporter:
+
+1. **Every `IOUSBHostObject` init must be wrapped in `@try`/`@catch`.** Apple's error
+   path can raise instead of returning an `NSError`. A root exporter daemon that dies
+   from an uncaught exception takes the captured device down with it and leaves the
+   user's drive unmounted.
+2. **Never rely on the `NSError`.** Call `IOServiceOpen` directly when the real
+   `IOReturn` matters; the framework destroys it on this path.
+
+An earlier revision of this document blamed the third `localizedStringForKey:` call,
+which does pass a nil key at +376. That was wrong — the exception names `objects[0]`,
+and tracing the stores at +268/+340/+404 shows `objects[0]` is the *first* value.
 
 ---
 
-## 4. Status of P0 risk #2
+## 5. Device facts worth carrying into Phase 2
 
-**Downgraded from HIGH to MEDIUM, not closed.**
+```
+bcdUSB 0x0320, bMaxPacketSize0 = 9 (exponent -> 512), numConfigurations = 1
+config[0]: bConfigurationValue=1, wTotalLength=44, bNumInterfaces=1
+interface 0 alt 0: class 08/06/50 -> Mass Storage / SCSI transparent /
+                   Bulk-Only Transport, 2 endpoints
+USBSpeed = 4 (Super), UsbLinkSpeed = 5,000,000,000
+GET_DESCRIPTOR(DEVICE) -> 18 bytes, 12 01 20 03 …
+```
 
-What is now certain: device capture, interface capture, control transfers, and the
-unmount/capture/restore lifecycle all work through public API, as root, with SIP
-enabled and no entitlement. The remaining uncertainty is narrow and specific — whether
-the launch context changes the interface-capture result — and one command settles it.
+**The device runs at SuperSpeed, not High Speed.** The IORegistry exposes two speed
+properties with *different* enumerations, and reading the wrong one silently
+misreports USB 3 as USB 2:
 
-Tracked as **OQ-2** in `P1_IMPLEMENTATION_PLAN.md`.
+| property | enumeration | value | means |
+|---|---|---|---|
+| `Device Speed` | legacy: Low=0, Full=1, High=2, **Super=3** | 3 | Super |
+| `USBSpeed` | `tIOUSBHostConnectionSpeed`: …, **High=3**, Super=4 | 4 | Super |
+
+The same integer `3` means *High* in one and *Super* in the other. The tool now reads
+`USBSpeed` and cross-checks `UsbLinkSpeed`.
+
+Consequence: the Phase 2 manifest must carry the BOS descriptor and SuperSpeed
+Endpoint Companion descriptors (`bDescriptorType` 0x30). AirUSB passes descriptors
+through verbatim, so this costs nothing — but a design that assumed USB 2.0 would
+have broken here.
+
+---
+
+## 6. What this changes in the plan
+
+`P1_IMPLEMENTATION_PLAN.md` §7 assumed a single root daemon owns the whole exporter.
+That is now false. Required changes:
+
+- §7.2 capture order splits across two processes, with the interface phase moved to
+  the session agent.
+- §7.4's FB16524420 mitigation ladder is obsolete. Neither rung was the answer:
+  `matchInterfaces:NO` is still necessary (it stops `IOUSBMassStorageDriver`
+  re-attaching) but is not sufficient, and retrying with `DeviceCapture` on the
+  interface fails identically.
+- A daemon↔agent IPC contract is now a Phase 2 deliverable: the daemon owns the
+  lease and the device capture, the agent owns the interfaces and the transfer plane.
+- The agent must handle the daemon dying, and the daemon must handle the agent dying,
+  without leaving the drive captured-but-unused. The exclusivity theorem in §7.1 has
+  to be restated over two processes.
+
+---
+
+## 7. Reproducing
+
+```
+./build.sh
+./capture_test                                   # list devices (read-only)
+./capture_test --probe-interface 058f:6387       # non-destructive, no root
+sudo ./run_matrix.sh 058f:6387                   # five execution contexts
+sudo ./run_split_test.sh 058f:6387               # the split-architecture test
+./run_as_agent.sh 058f:6387                      # LaunchAgent, no sudo
+sudo ./run_as_daemon.sh 058f:6387                # LaunchDaemon
+```
+
+`--probe-interface` performs no unmount and no capture, so it is safe in any context.
