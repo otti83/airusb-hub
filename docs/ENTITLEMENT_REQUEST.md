@@ -1,5 +1,20 @@
 # Requesting `com.apple.developer.usb.host-controller-interface`
 
+> ## FILED
+>
+> **FB24214361** — 2026-08-08 14:08, Team ID `GZUV3UMV3B`.
+>
+> Verified against Apple DTS's own instructions in
+> <https://developer.apple.com/forums/thread/802495>: macOS / "Request for
+> Entitlement - com.apple.developer.usb.host-controller-interface" / Problem Area
+> USB / Other Bug. The submitted request matches.
+>
+> **Remaining step:** post the Feedback ID in that forum thread. Kevin Elliott
+> (DTS, CoreOS/Hardware) in the same thread: *"if you post the bug number here I'm
+> happy to make sure it gets to the right place."* Filing alone puts it in the
+> ordinary queue; posting the number is what routes it to the engineer who
+> approves these.
+
 > ## READ THIS BEFORE OPENING THE PORTAL
 >
 > **You will not find it. There is nothing to find.**
