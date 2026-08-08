@@ -421,12 +421,40 @@ static int captureTest(uint16_t vid, uint16_t pid)
                 NSNumber *cls = propNum(child, CFSTR("bInterfaceClass"));
                 NSNumber *num = propNum(child, CFSTR("bInterfaceNumber"));
 
+                // Get the REAL error code, bypassing Apple's broken error path.
+                //
+                // Disassembly of -[IOUSBHostObject openWithOptions:error:] shows the
+                // throw happens on the FAILURE branch: IOServiceOpen returns non-zero,
+                // and the framework then builds the NSError userInfo with
+                //   -[NSBundle localizedStringForKey:nil value:@"" table:nil]
+                // (x2 = 0 at +376), which returns nil, and NSDictionary raises on the
+                // nil value at +428. So the exception hides the actual IOReturn.
+                //
+                // The framework calls IOServiceOpen(ioService, mach_task_self_, 0, &c)
+                // (+144..+168). Doing exactly that ourselves surfaces the real code.
+                {
+                    io_connect_t probe = IO_OBJECT_NULL;
+                    kern_return_t kr = IOServiceOpen(child, mach_task_self(), 0, &probe);
+                    alog("ATTACH", @"raw IOServiceOpen(interface, type=0) -> 0x%08X %s",
+                         kr, kr == KERN_SUCCESS ? "(SUCCESS)" : mach_error_string(kr));
+                    if (kr == kIOReturnInternalError)
+                        alog("ERROR", @"  ^ 0xE00002C9 kIOReturnInternalError == the FB16524420 signature");
+                    else if (kr == kIOReturnExclusiveAccess)
+                        alog("ERROR", @"  ^ kIOReturnExclusiveAccess — something else holds this interface");
+                    else if (kr == kIOReturnNotPermitted)
+                        alog("ERROR", @"  ^ kIOReturnNotPermitted — an authorization/session check refused it");
+                    if (kr == KERN_SUCCESS) {
+                        // Must release it again or the framework's own open will
+                        // collide with ours.
+                        IOServiceClose(probe);
+                        alog("ATTACH", @"  raw open SUCCEEDED and was closed; the framework path should work");
+                    }
+                }
+
                 // -[IOUSBHostObject openWithOptions:error:] can THROW rather than
-                // return an NSError: on macOS 26.5 under launchd it built an
-                // NSDictionary from a nil value and raised NSInvalidArgumentException,
-                // killing the process. A root exporter daemon must never die that
-                // way, so every init is wrapped. This is a hard requirement for the
-                // real exporter, not just for this probe.
+                // return an NSError (see above). A root exporter daemon must never die
+                // that way, so every init is wrapped. This is a hard requirement for
+                // the real exporter, not just for this probe.
                 NSError *ie = nil;
                 IOUSBHostInterface *iface = nil;
                 @try {
