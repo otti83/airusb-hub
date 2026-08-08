@@ -18,11 +18,19 @@ add_compile_options(
 )
 
 # ---------------------------------------------------------------------------
-# protocol/ + core/  — platform-independent. No OS USB API, no sockets.
+# The layer graph. Each library depends only on the ones above it:
+#
+#   core        values and policy. No OS, no sockets, no crypto.
+#   crypto      vendored primitives, identity, SAS.          -> core
+#   protocol    wire format, validation, Noise handshake.    -> core, crypto
+#   transport   framing, scheduling, record cipher.          -> protocol
+#   session     preamble, trust gate, pin store.             -> transport
+#
+# core and protocol used to be one library, which made crypto depend on protocol
+# and protocol unable to call crypto — so the manifest hash had nowhere to live.
+# Splitting them is what makes the arrows point one way.
 # ---------------------------------------------------------------------------
-add_library(airusb_protocol STATIC
-    protocol/Codec.cpp
-    protocol/Validate.cpp
+add_library(airusb_core STATIC
     core/Status.cpp
     core/UsbTypes.cpp
     core/Watchdog.cpp
@@ -31,16 +39,7 @@ add_library(airusb_protocol STATIC
     core/RequestTable.cpp
     core/CreditController.cpp
 )
-
-add_library(airusb_transport STATIC
-    transport/RecordLayer.cpp
-    transport/FrameScheduler.cpp
-    transport/TcpTransport.cpp
-    transport/FaultTransport.cpp
-)
-target_include_directories(airusb_transport PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(airusb_transport PUBLIC airusb_protocol)
-target_include_directories(airusb_protocol PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(airusb_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
 # ---------------------------------------------------------------------------
 # third_party/ — vendored crypto. NOT our code; see third_party/PROVENANCE.md.
@@ -73,13 +72,40 @@ target_compile_options(airusb_thirdparty PRIVATE -w)
 add_library(airusb_crypto STATIC
     crypto/Primitives.cpp
     crypto/Identity.cpp
+)
+target_link_libraries(airusb_crypto PUBLIC airusb_core PRIVATE airusb_thirdparty)
+
+# ---------------------------------------------------------------------------
+# protocol/ — the wire format, and the handshake that protects it.
+# ---------------------------------------------------------------------------
+add_library(airusb_protocol STATIC
+    protocol/Codec.cpp
+    protocol/Validate.cpp
+    protocol/ManifestCodec.cpp
     protocol/Noise.cpp
+)
+target_link_libraries(airusb_protocol PUBLIC airusb_core airusb_crypto)
+
+# ---------------------------------------------------------------------------
+# transport/ — framing and the record cipher.
+# ---------------------------------------------------------------------------
+add_library(airusb_transport STATIC
+    transport/RecordLayer.cpp
+    transport/FrameScheduler.cpp
+    transport/TcpTransport.cpp
+    transport/FaultTransport.cpp
     transport/NoiseCipher.cpp
+)
+target_link_libraries(airusb_transport PUBLIC airusb_protocol)
+
+# ---------------------------------------------------------------------------
+# session/ — preamble, handshake drive, trust gate, pin store.
+# ---------------------------------------------------------------------------
+add_library(airusb_session STATIC
     session/PeerStore.cpp
     session/SecureSession.cpp
 )
-target_link_libraries(airusb_crypto PUBLIC airusb_protocol airusb_transport
-                                   PRIVATE airusb_thirdparty)
+target_link_libraries(airusb_session PUBLIC airusb_transport)
 
 # ---------------------------------------------------------------------------
 # diag/  — test instruments. Portable, and deliberately NOT on the data path:
@@ -89,7 +115,7 @@ target_link_libraries(airusb_crypto PUBLIC airusb_protocol airusb_transport
 add_library(airusb_diag STATIC
     diag/BotProbe.cpp
 )
-target_link_libraries(airusb_diag PUBLIC airusb_protocol)
+target_link_libraries(airusb_diag PUBLIC airusb_core)
 
 # ---------------------------------------------------------------------------
 # platform/macos IPC — the daemon<->agent codec and socket transport.
@@ -106,7 +132,7 @@ target_link_libraries(airusb_macos_ipc PUBLIC airusb_protocol)
 
 # The whole point of this layer is portability. Guard it: nothing here may pull in
 # an OS USB header. Enforced by tests/unit/test_layering.cpp as well.
-target_compile_definitions(airusb_protocol PRIVATE AIRUSB_PORTABLE_CORE=1)
+target_compile_definitions(airusb_core PRIVATE AIRUSB_PORTABLE_CORE=1)
 
 # ---------------------------------------------------------------------------
 # platform/macos — the real exporter. Objective-C++, IOKit, DiskArbitration.
