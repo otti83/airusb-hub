@@ -548,7 +548,11 @@ void testPeerStorePersistence()
         PeerStore s;
         CHECK(s.pin(a.publicIdentity(), "A", kDefaultGrants, 7) == Status::Ok);
 
-        const std::string path = "/tmp/airusb-peerstore-test.txt";
+        // Relative to the working directory, not /tmp. Windows has no /tmp, so
+        // the hardcoded path made fopen fail and save() return non-Ok — the test
+        // failed for a reason that had nothing to do with what it is testing.
+        // A bare name is also what the tool itself defaults to, on every platform.
+        const std::string path = "airusb-peerstore-test.txt";
         (void)std::remove(path.c_str());
         CHECK(s.save(path) == Status::Ok);
 
@@ -562,7 +566,7 @@ void testPeerStorePersistence()
 
     TEST_CASE("a missing file is a first run, not an error") {
         PeerStore t;
-        CHECK(t.load("/tmp/airusb-peerstore-does-not-exist") == Status::Ok);
+        CHECK(t.load("airusb-peerstore-does-not-exist") == Status::Ok);
         CHECK_EQ(t.size(), 0u);
     }
 

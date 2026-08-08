@@ -9,6 +9,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
+#include <time.h>
 #include <unistd.h>
 
 namespace airusb::macos::ipc {
@@ -25,6 +26,35 @@ std::uint64_t nowMonoMs() noexcept
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return static_cast<std::uint64_t>(ts.tv_sec) * 1000ull
          + static_cast<std::uint64_t>(ts.tv_nsec) / 1000000ull;
+}
+
+/// The uid on the other end of a unix socket.
+///
+/// There is no portable spelling of this. macOS and the BSDs have getpeereid(3);
+/// glibc has never had it and answers with SO_PEERCRED and a `struct ucred`.
+/// Compiling this file on Linux is what surfaced that — it had only ever been
+/// built on macOS, because the Linux reproduction in the handoff used a hand
+/// written g++ line that does not include this file.
+///
+/// It fails CLOSED. The caller uses the uid to refuse an agent that is not the
+/// console user, so "I could not tell" must not be reported as a uid that might
+/// be right.
+bool peerUidOf(int fd, std::uint32_t& out) noexcept
+{
+#if defined(__linux__)
+    struct ucred cr {};
+    socklen_t len = sizeof cr;
+    if (::getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cr, &len) != 0) return false;
+    if (len != sizeof cr) return false;
+    out = static_cast<std::uint32_t>(cr.uid);
+    return true;
+#else
+    uid_t uid = static_cast<uid_t>(-1);
+    gid_t gid = static_cast<gid_t>(-1);
+    if (::getpeereid(fd, &uid, &gid) != 0) return false;
+    out = static_cast<std::uint32_t>(uid);
+    return true;
+#endif
 }
 
 void setNoSigPipeOnSocket(int fd) noexcept
@@ -261,11 +291,8 @@ int acceptOne(int listenFd,
         setNoSigPipeOnSocket(fd);
 
         if (peerUid) {
-            uid_t uid = static_cast<uid_t>(-1);
-            gid_t gid = static_cast<gid_t>(-1);
-            *peerUid = (::getpeereid(fd, &uid, &gid) == 0)
-                         ? static_cast<std::uint32_t>(uid)
-                         : 0xFFFFFFFFu;
+            std::uint32_t uid = 0;
+            *peerUid = peerUidOf(fd, uid) ? uid : 0xFFFFFFFFu;
         }
         if (peerPid) {
             // LOCAL_PEERPID is macOS-specific and advisory: it is used for log
