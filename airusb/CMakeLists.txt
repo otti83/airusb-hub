@@ -154,6 +154,27 @@ add_library(airusb_diag STATIC
 target_link_libraries(airusb_diag PUBLIC airusb_core)
 
 # ---------------------------------------------------------------------------
+# platform/linux — the USB/IP byte layer.
+#
+# Built on EVERY platform, deliberately. UsbipCodec has no sockets, no sysfs and
+# no Linux headers; it is pure byte manipulation against a kernel ABI where a
+# misremembered field offset produces a device that enumerates and then corrupts
+# data. Compiling and fuzzing it on the development Mac is what makes that bug
+# cheap to find, instead of costing a VM reboot per iteration.
+# ---------------------------------------------------------------------------
+add_library(airusb_linux_usbip STATIC
+    platform/linux/UsbipCodec.cpp
+)
+target_link_libraries(airusb_linux_usbip PUBLIC airusb_core)
+
+# The L1 gate. Linux only, because it writes to vhci-hcd's sysfs and there is
+# nothing to point it at anywhere else.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_executable(vhci_probe platform/linux/vhci_probe_main.cpp)
+    target_link_libraries(vhci_probe PRIVATE airusb_linux_usbip)
+endif()
+
+# ---------------------------------------------------------------------------
 # platform/macos IPC — the daemon<->agent codec and socket transport.
 #
 # Built on EVERY platform, not just macOS, and with no IOKit dependency. It is a

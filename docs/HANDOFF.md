@@ -22,7 +22,7 @@ authenticated as `otti83`).
 | Receiving on Windows / Linux | driver half not written |
 
 ```
-15 test suites / 0 failures
+16 test suites / 0 failures
 3 fuzz targets / 0 crashes / 0 UB findings
 Zero warnings: macOS (Clang, full flag set), Linux (GCC 12, -Wall -Wextra),
                Windows (MinGW, full flag set — -Wpedantic -Wconversion
@@ -525,7 +525,7 @@ Expect MSVC to find things MinGW did not. Paste whatever it says.
    `bcdedit /set testsigning on` for development; EV certificate + Microsoft
    attestation for distribution — a paid process, not a discretionary approval.
    **Nothing about the Windows path waits on anyone's decision.**
-2. **Linux importer** — vhci-hcd shim. **Designed and proven feasible, not built.**
+2. **Linux importer** — vhci-hcd shim. **L0, L1 and L2 of the plan are DONE.**
    Full plan with staged evidence gates in
    [`LINUX_IMPORTER_PLAN.md`](LINUX_IMPORTER_PLAN.md). This is the only importer
    path that waits on nobody, and it is the one that would make this project do
@@ -555,7 +555,39 @@ Expect MSVC to find things MinGW did not. Paste whatever it says.
    `modinfo -n vhci_hcd` rather than encoding either as a rule.
 
    A working VM already exists on this Mac: Lima **`airusb`** (Ubuntu 24.04,
-   aarch64), vhci-hcd loaded, `nports=16` as 8 `hs` + 8 `ss`, lockdown `[none]`.
+   aarch64), vhci-hcd loaded, `nports=16` as 8 `hs` + 8 `ss`, lockdown `[none]`,
+   with `build-essential` and `cmake` installed.
+
+   **L1 PASSED on 2026-08-09, at both speeds.** `platform/linux/vhci_probe_main.cpp`
+   opens a socketpair, hands one end to vhci-hcd through sysfs `attach`, and reads
+   what the kernel says first. It says:
+
+   ```
+   0000  00 00 00 01 00 00 00 01 00 02 00 02 00 00 00 01
+   0010  00 00 00 00 00 00 02 00 00 00 00 40 00 00 00 00
+   0020  00 00 00 00 00 00 00 00 80 06 00 01 00 00 40 00
+   CMD_SUBMIT=yes ep0-IN=yes GET_DESCRIPTOR(DEVICE)=yes devid-echoed=yes
+   ```
+
+   That dump is the byte-order rule made visible, and worth keeping for whoever
+   doubts it: `transfer_buffer_length` = 64 appears at 0x18 as `00 00 00 40`
+   BIG-endian, and the same value 64 appears sixteen bytes later inside `setup`
+   as `40 00` LITTLE-endian. One PDU, both orders. A codec that byteswaps the
+   header wholesale corrupts enumeration itself.
+
+   High speed asks `wLength=64`, SuperSpeed asks `wLength=8` — the design
+   predicted both. SuperSpeed correctly took port 8, the first of the `ss` half;
+   `dmesg` confirms `new SuperSpeed USB device number 2 using vhci_hcd`. After
+   exit all 16 ports return to `sta 004` with no leak.
+
+   **L2 DONE:** `platform/linux/UsbipCodec` — 117 checks, built and tested on
+   macOS, Linux and Windows/MSVC in CI. It has no sockets, no sysfs and no Linux
+   headers on purpose: a kernel-ABI bug found on the development Mac costs a
+   rebuild, and the same bug found with a kernel in the loop costs a VM reboot per
+   iteration.
+
+   **Next: L3** — enumeration hosted over `MemoryPipe` with no kernel. Do not skip
+   to L4; the plan says why.
 3. **P2.9 `CiHostBackend`** — blocked on Apple only.
 4. ~~**The exporter's write path**~~ — **DONE, 2026-08-09.** It was going to be
    "tested for free" by a real importer mounting a filesystem, which is a bad way
