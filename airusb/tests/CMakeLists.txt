@@ -6,3 +6,4 @@ endfunction()
 
 airusb_test(test_codec)
 airusb_test(test_validate)
+airusb_test(test_core)

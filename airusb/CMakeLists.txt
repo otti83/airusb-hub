@@ -24,6 +24,12 @@ add_library(airusb_protocol STATIC
     protocol/Codec.cpp
     protocol/Validate.cpp
     core/Status.cpp
+    core/UsbTypes.cpp
+    core/Watchdog.cpp
+    core/DeviceManifest.cpp
+    core/Ep0Arbiter.cpp
+    core/RequestTable.cpp
+    core/CreditController.cpp
 )
 target_include_directories(airusb_protocol PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
