@@ -82,6 +82,7 @@ add_library(airusb_protocol STATIC
     protocol/Codec.cpp
     protocol/Validate.cpp
     protocol/ManifestCodec.cpp
+    protocol/Messages.cpp
     protocol/Noise.cpp
 )
 target_link_libraries(airusb_protocol PUBLIC airusb_core airusb_crypto)
@@ -104,6 +105,7 @@ target_link_libraries(airusb_transport PUBLIC airusb_protocol)
 add_library(airusb_session STATIC
     session/PeerStore.cpp
     session/SecureSession.cpp
+    session/ExporterSession.cpp
 )
 target_link_libraries(airusb_session PUBLIC airusb_transport)
 
