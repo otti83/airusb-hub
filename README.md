@@ -31,7 +31,7 @@ extension, no System Integrity Protection changes, no private APIs.
 |---|---|
 | Feasibility on macOS | done — [`docs/P0_MACOS_FEASIBILITY.md`](docs/P0_MACOS_FEASIBILITY.md) |
 | Protocol, transport, core | done, tested and fuzzed |
-| The sharing side (exporter) | written; final hardware check pending — [`docs/P2_8_EXPORTER.md`](docs/P2_8_EXPORTER.md) |
+| The sharing side (exporter) | working on real hardware — [`docs/P2_8_EXPORTER.md`](docs/P2_8_EXPORTER.md) |
 | The receiving side (importer) | not started; needs an entitlement Apple grants on request |
 | Encryption | not started |
 
@@ -100,7 +100,7 @@ While developing and testing, use a USB drive you do not care about.
 | [`docs/P0_MACOS_FEASIBILITY.md`](docs/P0_MACOS_FEASIBILITY.md) | Can this be built on macOS through supported APIs? Evidence and verdict. |
 | [`docs/P1_IMPLEMENTATION_PLAN.md`](docs/P1_IMPLEMENTATION_PLAN.md) | Architecture, wire protocol, concurrency model, timeout budget, test plan. |
 | [`docs/P1_CAPTURE_VERIFICATION.md`](docs/P1_CAPTURE_VERIFICATION.md) | What was measured on real hardware, and why the exporter is two processes. |
-| [`docs/P2_8_EXPORTER.md`](docs/P2_8_EXPORTER.md) | The macOS exporter: what was built, what is proven, and the one command left to run. |
+| [`docs/P2_8_EXPORTER.md`](docs/P2_8_EXPORTER.md) | The macOS exporter: how it works, and the hardware evidence that it does. |
 | [`docs/ENTITLEMENT_REQUEST.md`](docs/ENTITLEMENT_REQUEST.md) | How to request the one Apple-managed entitlement the importer needs. |
 
 ---

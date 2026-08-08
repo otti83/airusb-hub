@@ -1,8 +1,8 @@
 # P2.8 — the real macOS exporter
 
-**Status: implemented; software gate PASSED; hardware gate NOT YET RUN.**
-The hardware gate needs one `sudo` command, which the assistant cannot issue. It
-is in §6.
+**Status: PASS.** Software gate and hardware gate both passed on 2026-08-08
+against the real 058f:6387 SuperSpeed flash drive. OQ-1 answered: transfer
+boundaries INTACT. Full evidence in §4.
 
 ---
 
@@ -190,7 +190,144 @@ not take — the same fallback `poc/p1-capture-test/capture_test.m` used.
 
 ## 4. Evidence — hardware gate
 
-**NOT YET RUN.** See §6.
+**PASS.** `sudo ./platform/macos/scripts/p28_run.sh 058f:6387` on macOS 26.5.1,
+Apple M1, SIP enabled. Real 058f:6387 Generic Flash Disk, SuperSpeed 5 Gb/s,
+31.46 GB exFAT. Logs: `/tmp/airusb_p28_exportd.log`, `/tmp/airusb_p28_agent.log`.
+
+### 4.1 The split, in the production shape
+
+Both halves ran as real launchd jobs, neither from a terminal:
+
+```
+[exportd] airusb-exportd starting: pid=54696 euid=0   ppid=1 (launchd)   system session
+[agent]   airusb-agent   starting: pid=54326 euid=501 ppid=1 (launchd)   Aqua session
+[exportd] agent connected: uid=501 pid=54326          uid from getpeereid(2)
+```
+
+The daemon captured; the agent — unprivileged, in a different security session —
+opened the interface and got both pipes:
+
+```
+[agent] 1 interface nub(s) present
+[agent] interface 0 alt 0: class=08/06/50 endpoints=2
+[agent]   endpoint 0x81 type=2 maxPacket=1024 burst=2
+[agent]   endpoint 0x02 type=2 maxPacket=1024 burst=2
+[agent] pipe table generation 1: 2 endpoint(s) across 1 interface(s)
+```
+
+`maxPacket=1024` with a burst is SuperSpeed bulk. No USB 2.0 downgrade occurred.
+
+### 4.2 The gate itself — CBW → data → CSW across the split
+
+```
+CBW  tag=1 op=0x00 len=0    -> OK moved=31
+CSW  tag=1 -> OK got=13 [55 53 42 53 01 00 00 00 00 00 00 00 00]
+CBW  tag=2 op=0x12 len=36   -> OK moved=31
+DATA tag=2 offered=36   -> OK got=36
+CSW  tag=2 -> OK got=13 [55 53 42 53 02 00 00 00 00 00 00 00 00]
+CBW  tag=3 op=0x25 len=8    -> OK moved=31
+DATA tag=3 offered=8    -> OK got=8
+CBW  tag=4 op=0x28 len=512  -> OK moved=31
+DATA tag=4 offered=512  -> OK got=512
+CBW  tag=5 op=0x28 len=512  -> OK moved=31
+DATA tag=5 offered=1024 -> OK got=512      <- short read preserved
+CBW  tag=6 op=0x28 len=2048 -> OK moved=31
+DATA tag=6 offered=2048 -> OK got=2048     <- one transfer, not two packets
+CSW  tag=6 -> OK got=13 [55 53 42 53 06 00 00 00 00 00 00 00 00]
+```
+
+```
+verdict=PASS  cbw=6 data=5 csw=6 stallRecoveries=0 shortReads=0 boundariesIntact=yes
+  GET_MAX_LUN          ok   bMaxLUN=0
+  TEST_UNIT_READY      ok
+  INQUIRY              ok   'Generic' 'Flash Disk' rev '8.01' type=0x00 removable=yes
+  READ_CAPACITY_10     ok   lastLBA=61439999 blockSize=512 -> 61440000 blocks, 31.46 GB
+  READ_10_LBA0         ok   512 bytes, residue=0, bootsig=55AA
+  SHORT_READ_FIDELITY  ok   offered 1024, device sent 512 — short read preserved
+  READ_10_MULTIBLOCK   ok   2048 bytes in one transfer, residue=0
+```
+
+Sector 0, read through the whole split path:
+
+```
+fa b8 00 00 8e d0 bc 00 7c 8b f4 50 07 50 1f fb fc bf 00 06 b9 00 01 f3 a5 ea 1e 06 00 00 be be
+boot signature 55AA: present
+```
+
+That is a real x86 MBR boot sector (`cli; mov ax,0; mov ss,ax; mov sp,0x7c00; ...`),
+not a plausible-looking buffer. `READ_CAPACITY_10` reported 61,439,999 as the
+**last LBA**, giving 61,440,000 blocks — 31.46 GB, matching the 31.5 GB drive.
+
+### 4.3 OQ-1 — ANSWERED
+
+```
+OQ-1: transfer boundaries INTACT — one NormalTransfer is one logical URB on this path
+```
+
+Three independent measurements support it, and the instrument that made them is
+required by CI to fail on transports that break each one:
+
+| measurement | result | what it rules out |
+|---|---|---|
+| every CBW `moved=31` | 6/6 | the layer beneath splitting an OUT transfer |
+| offered 1024, got 512, residue 0 | ✅ | padding a short read up to the offered length |
+| 2048 bytes in one data phase, residue 0 | ✅ | fragmenting at the 1024-byte packet boundary |
+
+`stallRecoveries=0` and every CSW signature/tag correct means the phase machine
+never desynchronised.
+
+**One `NormalTransfer` is one logical URB on this path.** OQ-1 is closed for the
+macOS exporter. It remains open for the *importer* side, where the TD chain is
+assembled by the kernel rather than by us — that is P2.9's problem, not this one.
+
+### 4.4 Restore
+
+```
+[exportd] destroying the captured device (reset + driver rematch)
+[exportd] releasing 1 disk claim(s)
+[exportd] RESULT=RESTORED lease held 0.1 s
+...
+restore: drive back on this Mac = yes
+mount table matches the 'before' state exactly
+```
+
+`/dev/disk22s1 on /Volumes/Memory 32GB` was present before and after, byte-identical
+mount table. Plain `destroy` → reset → driver re-match → automount worked as
+designed, and the deny-automount approval callback correctly stopped denying once
+unregistered.
+
+### 4.5 A NEW finding: the Apple exception is not confined to the open path
+
+```
+[exportd] descriptorWithType:6 raised NSInvalidArgumentException:
+          *** -[__NSPlaceholderDictionary initWithObjects:forKeys:count:]:
+          attempt to insert nil object from objects[0]
+```
+
+`P1_CAPTURE_VERIFICATION.md` diagnosed this defect on
+`-[IOUSBHostObject openWithOptions:error:]`. It is the same fault in
+`-[IOUSBHostObject descriptorWithType:length:index:languageID:error:]`: when the
+device STALLs, the framework builds an `NSError` userInfo from three
+`-[NSBundle localizedStringForKey:]` results and raises because the first is nil.
+
+**This is the `@try`/`@catch` rule earning its keep on the production path.**
+Without it, a root daemon would have died at that line while holding a captured,
+unmounted drive — the user's disk left claimed and unmountable until reboot. The
+exception was caught, the manifest completed, and the gate passed.
+
+Two changes followed:
+
+1. The catch block now names the defect and cites this run, so the next person to
+   see `objects[0]` in a log does not re-derive it.
+2. **The request is no longer made at all on SuperSpeed.** DEVICE_QUALIFIER is
+   defined by USB 2.0 §9.6.2 only for high-speed-capable devices and is not
+   defined for SuperSpeed, so the STALL was correct device behaviour. There is no
+   reason to provoke a known-buggy Apple path to ask a question the specification
+   has already answered. `Full`/`High` still ask; everything else does not.
+
+The wrapping stays everywhere regardless — the lesson of this finding is that the
+defect appears in places it had not been observed in before, so the defence
+cannot be narrowed to the sites where it has been seen.
 
 ---
 
@@ -236,13 +373,12 @@ Logs are kept at `/tmp/airusb_p28_exportd.log` and `/tmp/airusb_p28_agent.log`.
 
 ## 7. Known issues and deliberate limits
 
-- **The hardware gate has not been run.** Everything above the hardware line is
-  verified; the last step is one command.
-- **`OQ-1` is instrumented but not yet answered.** The prober measures whether one
-  logical transfer survives as one logical transfer — a 31-byte CBW accepted whole,
-  a multi-block read returned in one transfer, a short read staying short — and the
-  daemon prints `OQ-1: transfer boundaries INTACT|VIOLATED`. The answer arrives
-  with the hardware run.
+- **The gate proves the path, not the throughput.** Six commands and 3 KB moved.
+  Sustained multi-gigabyte transfer, and the write path, are P2.10's job. Nothing
+  here has been measured under load.
+- **The write path is untested by construction.** The probe is read-only, so
+  `bulkOut` is exercised only by 31-byte CBWs. A defect that only shows up on a
+  large OUT transfer would not have been caught.
 - **One request in flight per socket.** Deliberate: USB already serialises per
   endpoint, and a pipelined local IPC would add a reordering hazard between a
   transfer and the `CLEAR_HALT` that recovers it. Throughput work belongs after
@@ -261,7 +397,6 @@ Logs are kept at `/tmp/airusb_p28_exportd.log` and `/tmp/airusb_p28_agent.log`.
 
 ## 8. Next
 
-- Run §6 and paste the output. That closes the gate and answers OQ-1.
 - **P2.4** security: Noise_XX + Noise_IK. `IRecordCipher` is the slot; `NullCipher`
   is the current stand-in.
 - **P2.9** `CiHostBackend` — the entitled half. Blocked on OQ-5 (the entitlement)

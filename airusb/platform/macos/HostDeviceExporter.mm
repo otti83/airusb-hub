@@ -175,7 +175,25 @@ Status HostDeviceExporter::fetchDescriptor(std::uint8_t type, std::uint8_t index
                              languageID:langId
                                   error:&err];
     } @catch (NSException* ex) {
-        logLine("ERROR", @"descriptorWithType:%u raised %@: %@", type, ex.name, ex.reason);
+        // MEASURED ON REAL HARDWARE, 2026-08-08, during the P2.8 gate run:
+        //
+        //   descriptorWithType:6 raised NSInvalidArgumentException:
+        //   -[__NSPlaceholderDictionary initWithObjects:forKeys:count:]:
+        //   attempt to insert nil object from objects[0]
+        //
+        // This is the SAME Apple defect P1_CAPTURE_VERIFICATION.md diagnosed on
+        // -[IOUSBHostObject openWithOptions:error:], and it is therefore not
+        // specific to the open path: when the device STALLs a descriptor request,
+        // the framework builds an NSError userInfo from -[NSBundle
+        // localizedStringForKey:] results and raises because the first is nil.
+        //
+        // Without this @catch a root daemon would die here holding a captured,
+        // unmounted drive. That is why every call into IOUSBHost is wrapped, and
+        // this log line is the evidence that the rule earns its keep.
+        logLine("ERROR", @"descriptorWithType:%u raised %@: %@ — Apple's error path "
+                          "raised instead of returning NSError (the same defect as "
+                          "openWithOptions:). Caught; the daemon continues.",
+                type, ex.name, ex.reason);
         return Status::Internal;
     }
     if (!d) return fromIOReturn(static_cast<std::uint32_t>(err ? err.code : kIORetError), false);
@@ -262,9 +280,26 @@ Status HostDeviceExporter::buildManifest(std::string* whyNot)
         logLine("ENUM", @"no BOS descriptor (expected on USB 2 devices)");
     }
 
-    // ---- device qualifier: high-speed-capable devices only ------------------
-    if (fetchDescriptor(kIOUSBDescriptorTypeDeviceQualifier, 0, 0, 10, blob) == Status::Ok)
-        _manifest.setDeviceQualifier(blob);
+    // ---- device qualifier: high-speed-capable USB 2.0 devices only ----------
+    //
+    // USB 2.0 §9.6.2 defines this descriptor only for devices capable of
+    // high-speed operation, and USB 3.2 does not define it for SuperSpeed at all.
+    // Asking a SuperSpeed device for it earns a STALL — and on macOS 26.5.1 that
+    // STALL makes descriptorWithType: RAISE rather than return an error (see
+    // fetchDescriptor). The exception is caught, but there is no reason to
+    // provoke a known-buggy Apple path to ask a question the specification has
+    // already answered.
+    const Speed sp = _manifest.speed();
+    if (sp == Speed::Full || sp == Speed::High) {
+        if (fetchDescriptor(kIOUSBDescriptorTypeDeviceQualifier, 0, 0, 10, blob) == Status::Ok)
+            _manifest.setDeviceQualifier(blob);
+        else
+            logLine("ENUM", @"no device qualifier descriptor (the device does not "
+                             "publish one)");
+    } else {
+        logLine("ENUM", @"device qualifier not requested: undefined at %s",
+                speedName(sp));
+    }
 
     // ---- strings ------------------------------------------------------------
     //

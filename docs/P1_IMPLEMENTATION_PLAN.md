@@ -948,9 +948,12 @@ Verified: with the daemon holding the capture, a separate non-root console-sessi
 
 **Still unproven, and it is P2.8's first job:** actual bulk transfers through pipes obtained that way while the daemon holds the device. The gate is passed; the plumbing behind it is untested.
 
-> **P2.8 update.** The plumbing is now *built* and instrumented: `platform/macos/` implements both halves, and `diag/BotProbe` performs a real CBW → data → CSW exchange across the split and reports whether the transfer boundaries survived. Everything testable without root passes. The measurement itself is still outstanding — it needs `sudo ./platform/macos/scripts/p28_run.sh <VID:PID>`. See `P2_8_EXPORTER.md`.
+> **P2.8 update — PROVEN, 2026-08-08.** Measured on the real 058f:6387 at SuperSpeed with both halves running as real launchd jobs: `cbw=6 data=5 csw=6 stallRecoveries=0 boundariesIntact=yes`, sector 0 read back as a genuine MBR, drive restored with the mount table byte-identical. **OQ-1 is answered for the exporter: one `NormalTransfer` is one logical URB on this path.** See `P2_8_EXPORTER.md` §4.
 >
-> One finding already: the framework's `IOUSBHostInterface` init can fail with `0xE00002C9` — the FB16524420 signature — while a raw `IOServiceOpen` on the same service *succeeds*. Without a capture in effect this simply means a driver still owns the interface, which is not the same failure at all. The agent now probes the service directly and says which of the two it hit, and falls back to `IOUSBHostObjectInitOptionsDeviceCapture` on the interface if the plain open does not take.
+> Two findings worth carrying forward:
+>
+> 1. `0xE00002C9` is ambiguous. The framework's `IOUSBHostInterface` init returns it both when FB16524420 bites and when a driver simply still owns the interface — while a raw `IOServiceOpen` on the same service *succeeds*. The agent now probes directly and reports which of the two it hit, and falls back to `IOUSBHostObjectInitOptionsDeviceCapture` if the plain open does not take.
+> 2. **The `NSInvalidArgumentException` is not confined to `openWithOptions:`.** `descriptorWithType:length:index:languageID:error:` raised the identical `objects[0]` exception when a SuperSpeed device STALLed a DEVICE_QUALIFIER request. The `@try`/`@catch` rule therefore applies to every call into IOUSBHost, not only to the inits, and must not be narrowed to the sites where the fault has been observed.
 
 **Consequences elsewhere in this plan:**
 

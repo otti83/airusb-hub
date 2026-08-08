@@ -9,21 +9,13 @@ conversation. Everything load-bearing is here or in the documents it points to.
 
 ## 0. Read this first — where the work actually is
 
-**P2.8 is written.** `platform/macos/` exists: both halves of the exporter, the
-IPC between them, the disk guard, the BOT prober, two new test suites, a new fuzz
-target, and the launchd scripts. It builds with zero warnings and 7/7 suites pass.
-Details in `docs/P2_8_EXPORTER.md`.
+**P2.8 is done and its gate PASSED on real hardware** (2026-08-08, 058f:6387
+SuperSpeed). Bulk I/O works through pipes the *agent* obtains while the *daemon*
+holds the capture. The split exporter is proven end to end, the drive was restored
+with the mount table byte-identical, and **OQ-1 is answered: transfer boundaries
+INTACT**. Full evidence in `docs/P2_8_EXPORTER.md` §4.
 
-**One thing is outstanding and it needs the user, not the assistant:**
-
-```bash
-cd "/Users/mba/Desktop/AirUSB Hub/airusb"
-sudo ./platform/macos/scripts/p28_run.sh 058f:6387
-```
-
-`sudo` is blocked for the assistant in this harness, and the P2.8 gate is by
-definition a root-plus-hardware test. Everything that can be verified without root
-has been. Run that command, paste the output, and the gate is closed.
+The next task is **P2.4 (Noise security)** — see §9.
 
 ### The process failure this section used to describe
 
@@ -146,6 +138,23 @@ explicitly accepted, tracked in §0.
 
 `docs/P1_CAPTURE_VERIFICATION.md`. See §4 — this is the most important finding.
 
+### Gate P2.8 — the real exporter, on real hardware: **PASS**
+
+`docs/P2_8_EXPORTER.md`. Run 2026-08-08 against 058f:6387 at SuperSpeed, with both
+halves as real launchd jobs (root LaunchDaemon in the system session, unprivileged
+LaunchAgent in the Aqua session).
+
+```
+verdict=PASS  cbw=6 data=5 csw=6 stallRecoveries=0 shortReads=0 boundariesIntact=yes
+  READ_10_LBA0         512 bytes, residue=0, bootsig=55AA
+  SHORT_READ_FIDELITY  offered 1024, device sent 512 — short read preserved
+  READ_10_MULTIBLOCK   2048 bytes in one transfer, residue=0
+restore: drive back on this Mac = yes; mount table matches 'before' exactly
+```
+
+Bulk I/O works through pipes the agent obtains while the daemon holds the capture.
+The last unproven step of the split architecture is now proven.
+
 ---
 
 ## 4. THE key architectural finding: the exporter is two processes
@@ -220,14 +229,49 @@ through to build an `NSError` userInfo from three
 because one is nil. `objects[0]` is the *first* value, so `+[NSBundle mainBundle]`
 itself returned nil.
 
-Two consequences for the real exporter:
+**P2.8 update — it is not confined to the open path.** The same exception was
+raised by `-[IOUSBHostObject descriptorWithType:length:index:languageID:error:]`
+during the P2.8 gate run, when a SuperSpeed device STALLed a DEVICE_QUALIFIER
+request:
 
-1. **Wrap every `IOUSBHostObject` init in `@try`/`@catch`.** Apple's error path can
-   raise instead of returning an `NSError`. A root daemon that dies from an
-   uncaught exception takes the captured device with it and leaves the user's drive
-   unmounted.
+```
+descriptorWithType:6 raised NSInvalidArgumentException:
+  -[__NSPlaceholderDictionary initWithObjects:forKeys:count:]:
+  attempt to insert nil object from objects[0]
+```
+
+So this is a general property of the framework's error-construction path, not a
+quirk of one selector. **Do not narrow the wrapping to the sites where it has been
+observed.** The `@try`/`@catch` in `HostDeviceExporter::fetchDescriptor` is the
+only reason the daemon survived that line holding a captured, unmounted drive.
+
+Three consequences for the real exporter:
+
+1. **Wrap every call into `IOUSBHost` in `@try`/`@catch`** — inits and ordinary
+   methods alike. Apple's error path can raise instead of returning an `NSError`.
+   A root daemon that dies from an uncaught exception takes the captured device
+   with it and leaves the user's drive unmounted.
 2. **Never rely on the `NSError`.** Call `IOServiceOpen` directly when the real
    `IOReturn` matters; the framework destroys it on this path.
+3. **Do not provoke it needlessly.** DEVICE_QUALIFIER is undefined for SuperSpeed
+   (USB 2.0 §9.6.2), so the request is no longer made at those speeds. The STALL
+   was correct device behaviour; asking was our mistake.
+
+### A third code that looks like the second and is not
+
+`0xE00002C9 kIOReturnInternalError` is the FB16524420 signature — and it is also
+what the framework returns when a driver simply still owns the interface because
+nothing has captured the device. Those look identical and mean opposite things.
+`AgentUsbIo` now probes the service with a direct `IOServiceOpen` on failure and
+states which of the two it hit:
+
+```
+interface 0 open failed: 0xE00002C9 kIOReturnInternalError
+  ^ the security session is FINE (a raw open of this service returns
+    0x00000000 kIOReturnSuccess). The framework's open is what failed — the
+    usual cause is that a driver still holds the interface because no capture
+    is in effect.
+```
 
 ---
 
@@ -366,19 +410,22 @@ python3 platform/macos/scripts/agent_smoke.py build/airusb-agent 0x01200000 1
 
 | # | Question | Blocks | State |
 |---|---|---|---|
-| **OQ-1** | Is one `NormalTransfer` really one logical URB on a non-control endpoint? | P2.9 correctness | Unresolved. Splitting injects a spurious short packet and desynchronises BOT; coalescing destroys the CBW boundary. Both are silent corruption. `ScriptedDevice` is built to fail loudly if violated. Settle with a runtime assertion + TD-chain trace on real hardware. |
+| **OQ-1** | Is one `NormalTransfer` really one logical URB on a non-control endpoint? | P2.9 correctness | **ANSWERED for the exporter: yes.** Measured on hardware, three ways — 6/6 CBWs accepted as exactly 31 bytes, a 2048-byte read returned in one data phase with residue 0, and a 1024-byte offer answered with 512 and no padding. Still open for the *importer*, where the TD chain is assembled by the kernel rather than by us; that is P2.9's problem. |
 | **OQ-2** | FB16524420 | — | **CLOSED.** See §4. |
 | **OQ-5** | Will Apple grant the entitlement to this team? | P2.9, P2.10 only | **Not yet filed.** See §8. |
 | **OQ-6** | Are `interruptRateHz = 1000`, 16 KiB segments, depth-4 pipeline, 64 urb / 4 MiB credit in the safe direction? | P2.9 | Instrument with counters. `InterruptOverflow` and `DoorbellOverflow` are **fatal**, not merely slow. |
 | **OQ-7** | No `API_AVAILABLE` on any IOUSBHostCI header, so the message ABI could shift silently across macOS releases | release | Pin a tested range; treat any `IOUSBHostCIExceptionType` at init as a hard refusal, not a retry. |
-| **OQ-8** | Does bulk I/O actually work through pipes the agent obtains while the daemon holds the capture? | P2.8 gate | **Instrumented, not yet answered.** The code is written and everything testable without root passes. Answered by `sudo ./platform/macos/scripts/p28_run.sh 058f:6387`. |
+| **OQ-8** | Does bulk I/O actually work through pipes the agent obtains while the daemon holds the capture? | P2.8 gate | **CLOSED — yes.** Real CBW → data → CSW completed across the split on 2026-08-08. See §3 and `docs/P2_8_EXPORTER.md` §4. |
+| new | Does the exporter's **write** path work, and does it hold up under sustained load? | P2.10 | **Untested.** P2.8's probe is read-only by design, so `bulkOut` has only ever carried 31-byte CBWs and only ~3 KB has moved in total. A defect that appears only on a large OUT transfer would not have been caught. |
 
-**On OQ-1 specifically:** `diag/BotProbe` now measures it rather than reasoning
-about it — a 31-byte CBW must be accepted whole, a four-block read must return in
-one transfer, and a short read must stay short. The daemon prints
-`OQ-1: transfer boundaries INTACT|VIOLATED`. The measurement is validated in CI
-against three deliberately broken transports, so a hardware VIOLATED means the
-hardware path is wrong rather than the instrument.
+**How OQ-1 was measured, since the method matters more than the answer:**
+`diag/BotProbe` drives an abstract `IUsbDevicePort`, so the identical code runs
+against `ScriptedDevice`'s RAM disk in CI and against the captured drive on
+hardware. CI additionally points it at three deliberately broken transports — one
+that splits OUT transfers, one that pads IN transfers up to the offered length,
+one that fragments at the packet boundary — and requires it to catch each. That is
+what makes the hardware `INTACT` worth believing: a broken instrument would have
+failed in CI first.
 
 ---
 
@@ -404,54 +451,28 @@ has no Xcode project yet.
 
 ---
 
-## 9. Next task: run the P2.8 hardware gate, then P2.4
+## 9. Next task: P2.4 — Noise security
 
-### 9.1 The one outstanding command
+P2.8 is closed. `docs/P2_8_EXPORTER.md` has the gate evidence; the short version
+is in §0 and §4a below.
 
-```bash
-cd "/Users/mba/Desktop/AirUSB Hub/airusb"
-cmake -S . -B build && cmake --build build
-sudo ./platform/macos/scripts/p28_run.sh 058f:6387
-```
+### 9.1 P2.4 — the record cipher
 
-It installs both halves as real launchd jobs — a root LaunchDaemon in the system
-session and a LaunchAgent in the console user's Aqua session — because launch
-context is load-bearing and a terminal-launched process would pass a test the
-shipping configuration fails.
+Noise_XX (first contact, with a 6-digit SAS to confirm) and Noise_IK (paired
+peers, 1-RTT). `IRecordCipher` is already the slot in `transport/RecordLayer`;
+`NullCipher` is the current stand-in and is named so its presence in a shipping
+config is obvious.
 
-The probe is **read-only**: `GET_MAX_LUN`, `TEST UNIT READY`, `INQUIRY`,
-`READ CAPACITY(10)`, `READ(10)`. Nothing is written to the medium. The drive is
-unmounted before capture and handed back after, the run aborts before capture if
-any unmount is refused, and the boot disk is refused outright. Still, use a drive
-you do not care about.
+Note the binding that already exists and must not be broken: HELLO carries
+`session_id[16]` at offset 40, and that field is load-bearing for the Noise
+prologue. The 56-byte HELLO size is pinned by a test for exactly this reason.
 
-Reading the verdict:
+### 9.2 Then, in order
 
-| verdict | what it means |
-|---|---|
-| `P2.8 GATE: PASS` | The split exporter is proven end to end. OQ-1 is answered on the same line. |
-| `P2.8 GATE: FAIL` | The exchange was reached but did not survive. The prober names the failing step; the instrument is CI-validated, so believe it. |
-| `P2.8 GATE: BLOCKED` | Never captured. If the agent log says `System Policy denied`, the split architecture itself needs re-examining — that would be new information contradicting P1. |
-
-Full detail, including what was built and why, is in `docs/P2_8_EXPORTER.md`.
-
-### 9.2 What was implemented (all four items from the old plan, done)
-
-1. `HostDeviceExporter.mm` — DiskGuard, capture, `matchInterfaces:NO`, manifest,
-   plain `destroy` on release, agent-death handling. ✅
-2. `AgentUsbIo.mm` — interfaces, `copyPipeWithAddress:`, bulk I/O,
-   `rebuildPipeTable()` with a generation counter, every init in `@try`/`@catch`. ✅
-3. Daemon↔agent IPC over a unix socket, fuzzed, with mutual death handling. ✅
-4. `IUsbDevicePort` — the `ScriptedDevice`-shaped interface, implemented by both
-   the fake and the real device, with `diag/BotProbe` driving either. ✅
-
-### 9.3 Then, in order
-
-- **P2.4** security: Noise_XX + Noise_IK. `IRecordCipher` is the slot; `NullCipher`
-  is the current stand-in and is named so its presence in a shipping config is
-  obvious.
 - **P2.9** `CiHostBackend` — the entitled half. Blocked on OQ-5 only.
-- **P2.10** real ↔ real over 127.0.0.1 on one Mac.
+- **P2.10** real ↔ real over 127.0.0.1 on one Mac. **This is where the write path
+  and sustained throughput first get tested** — P2.8's probe is read-only by
+  design, so `bulkOut` has so far only ever carried 31-byte CBWs.
 - **P2.11** two Macs, wired → Wi-Fi → roam/sleep matrix.
 
 Explicitly out of Phase 2: isochronous, USB3 streams, external hubs, multi-link,
