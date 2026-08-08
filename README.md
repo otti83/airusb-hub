@@ -21,15 +21,19 @@ itself is forwarded.
 
 ## Status
 
-**Early development.** Phase 0 (technical feasibility) is complete.
+**Early development.** Feasibility is settled and the sharing half is written.
 
 macOS turns out to ship a public API for exactly this — `IOUSBHostControllerInterface`
 in `IOUSBHost.framework` — and Apple's own kernel driver does the hard part. No kernel
 extension, no System Integrity Protection changes, no private APIs.
 
-See [`docs/P0_MACOS_FEASIBILITY.md`](docs/P0_MACOS_FEASIBILITY.md) for the full
-investigation, the evidence behind it, and the one open item: the importing side needs
-an entitlement that Apple grants on request.
+| | |
+|---|---|
+| Feasibility on macOS | done — [`docs/P0_MACOS_FEASIBILITY.md`](docs/P0_MACOS_FEASIBILITY.md) |
+| Protocol, transport, core | done, tested and fuzzed |
+| The sharing side (exporter) | written; final hardware check pending — [`docs/P2_8_EXPORTER.md`](docs/P2_8_EXPORTER.md) |
+| The receiving side (importer) | not started; needs an entitlement Apple grants on request |
+| Encryption | not started |
 
 Nothing is usable yet. Follow along rather than depending on it.
 
@@ -96,6 +100,7 @@ While developing and testing, use a USB drive you do not care about.
 | [`docs/P0_MACOS_FEASIBILITY.md`](docs/P0_MACOS_FEASIBILITY.md) | Can this be built on macOS through supported APIs? Evidence and verdict. |
 | [`docs/P1_IMPLEMENTATION_PLAN.md`](docs/P1_IMPLEMENTATION_PLAN.md) | Architecture, wire protocol, concurrency model, timeout budget, test plan. |
 | [`docs/P1_CAPTURE_VERIFICATION.md`](docs/P1_CAPTURE_VERIFICATION.md) | What was measured on real hardware, and why the exporter is two processes. |
+| [`docs/P2_8_EXPORTER.md`](docs/P2_8_EXPORTER.md) | The macOS exporter: what was built, what is proven, and the one command left to run. |
 | [`docs/ENTITLEMENT_REQUEST.md`](docs/ENTITLEMENT_REQUEST.md) | How to request the one Apple-managed entitlement the importer needs. |
 
 ---

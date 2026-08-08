@@ -44,3 +44,25 @@ clang++ -std=c++20 -g -O1 -fsanitize="$SAN" \
 
 echo "running ${RUNS} executions over ${CORPUS} (sanitizers: ${SAN})"
 ./build/fuzz_decode -max_len=4096 -runs="${RUNS}" -print_final_stats=1 "$CORPUS"
+
+# ---------------------------------------------------------------------------
+# The daemon <-> agent IPC parser (P2.8).
+#
+# The LAN protocol is not the only parser in this system that reads bytes from a
+# process we do not control. airusb-exportd runs as root and parses frames written
+# by the unprivileged airusb-agent, so the same contract and the same fuzzing
+# apply -- a length-confusion bug there is a local privilege escalation rather
+# than a remote crash.
+# ---------------------------------------------------------------------------
+IPC_CORPUS="${3:-tests/vectors/corpus_ipc}"
+mkdir -p "$IPC_CORPUS"
+
+clang++ -std=c++20 -g -O1 -fsanitize="$SAN" \
+    -fno-sanitize-recover=undefined \
+    tests/fuzz/fuzz_agentipc.cpp \
+    platform/macos/AgentProtocol.cpp protocol/Codec.cpp core/Status.cpp \
+    -o build/fuzz_agentipc
+
+echo
+echo "running ${RUNS} executions over ${IPC_CORPUS} (sanitizers: ${SAN})"
+./build/fuzz_agentipc -max_len=4096 -runs="${RUNS}" -print_final_stats=1 "$IPC_CORPUS"

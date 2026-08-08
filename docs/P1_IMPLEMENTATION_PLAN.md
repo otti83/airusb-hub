@@ -948,6 +948,10 @@ Verified: with the daemon holding the capture, a separate non-root console-sessi
 
 **Still unproven, and it is P2.8's first job:** actual bulk transfers through pipes obtained that way while the daemon holds the device. The gate is passed; the plumbing behind it is untested.
 
+> **P2.8 update.** The plumbing is now *built* and instrumented: `platform/macos/` implements both halves, and `diag/BotProbe` performs a real CBW → data → CSW exchange across the split and reports whether the transfer boundaries survived. Everything testable without root passes. The measurement itself is still outstanding — it needs `sudo ./platform/macos/scripts/p28_run.sh <VID:PID>`. See `P2_8_EXPORTER.md`.
+>
+> One finding already: the framework's `IOUSBHostInterface` init can fail with `0xE00002C9` — the FB16524420 signature — while a raw `IOServiceOpen` on the same service *succeeds*. Without a capture in effect this simply means a driver still owns the interface, which is not the same failure at all. The agent now probes the service directly and says which of the two it hit, and falls back to `IOUSBHostObjectInitOptionsDeviceCapture` on the interface if the plain open does not take.
+
 **Consequences elsewhere in this plan:**
 
 - §7.1's single-mount safety theorem must be restated over two processes. The **daemon** remains the single source of exclusivity truth; the agent never unmounts, never claims, and never captures.

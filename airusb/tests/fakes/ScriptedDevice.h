@@ -17,6 +17,7 @@
 #define AIRUSB_TESTS_FAKES_SCRIPTEDDEVICE_H
 
 #include "../../core/DeviceManifest.h"
+#include "../../core/IUsbDevicePort.h"
 #include "../../core/Status.h"
 #include "../../core/UsbTypes.h"
 
@@ -43,20 +44,26 @@ struct ScriptedFault {
     std::uint32_t shortReadOnCommand = 0;
 };
 
-class ScriptedDevice {
+/// The endpoint addresses this device publishes, matching the manifest built in
+/// the constructor. Named so the address-taking IUsbDevicePort methods can reject
+/// a wrong address loudly instead of silently servicing the only pipe there is.
+inline constexpr std::uint8_t kScriptedBulkIn  = 0x81;
+inline constexpr std::uint8_t kScriptedBulkOut = 0x02;
+
+class ScriptedDevice final : public IUsbDevicePort {
 public:
     ScriptedDevice(std::uint32_t blockCount = 2048, std::uint32_t blockSize = 512);
 
     /// The manifest this device would publish. Matches the real 058f:6387 shape:
     /// SuperSpeed, one configuration, one BOT interface, bulk IN + bulk OUT.
-    const DeviceManifest& manifest() const noexcept { return _manifest; }
+    const DeviceManifest& manifest() const noexcept override { return _manifest; }
 
     // --- control endpoint ---------------------------------------------------
 
     /// Handles a control transfer. Returns the status and fills `out` for IN.
     Status controlTransfer(const SetupPacket& setup,
                            std::span<const std::uint8_t> dataOut,
-                           std::vector<std::uint8_t>& dataIn);
+                           std::vector<std::uint8_t>& dataIn) override;
 
     // --- bulk endpoints -----------------------------------------------------
 
@@ -67,12 +74,24 @@ public:
     /// Bulk IN. `maxLen` is what the host offered; `out` is what the device sent.
     Status bulkIn(std::uint32_t maxLen, std::vector<std::uint8_t>& out);
 
+    // --- IUsbDevicePort, addressed by endpoint ------------------------------
+    //
+    // The same two transfers, reached through the address the caller believes it
+    // is talking to. A caller that has the direction backwards gets an error
+    // rather than a working transfer on the other pipe, which is what makes this
+    // fake usable as the reference implementation for diag/BotProbe.
+
+    Status bulkOut(std::uint8_t epAddr, std::span<const std::uint8_t> data,
+                   std::uint32_t* actualLen) override;
+    Status bulkIn(std::uint8_t epAddr, std::uint32_t maxLen,
+                  std::vector<std::uint8_t>& out) override;
+
     // --- state --------------------------------------------------------------
 
     BotPhase phase() const noexcept { return _phase; }
     bool inHalted() const noexcept { return _inHalted; }
     bool outHalted() const noexcept { return _outHalted; }
-    void clearHalt(std::uint8_t epAddr) noexcept;
+    Status clearHalt(std::uint8_t epAddr) noexcept override;
     void reset() noexcept;             ///< Bulk-Only Mass Storage Reset
 
     std::uint32_t commandCount() const noexcept { return _commands; }

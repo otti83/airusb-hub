@@ -4,7 +4,7 @@ target_include_directories(airusb_fakes PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
 function(airusb_test name)
     add_executable(${name} unit/${name}.cpp)
-    target_link_libraries(${name} PRIVATE airusb_fakes)
+    target_link_libraries(${name} PRIVATE airusb_fakes ${ARGN})
     add_test(NAME ${name} COMMAND ${name})
 endfunction()
 
@@ -13,3 +13,8 @@ airusb_test(test_validate)
 airusb_test(test_core)
 airusb_test(test_transport)
 airusb_test(test_loopback)
+airusb_test(test_botprobe airusb_diag)
+airusb_test(test_macipc   airusb_macos_ipc)
+
+find_package(Threads REQUIRED)
+target_link_libraries(test_macipc PRIVATE Threads::Threads)

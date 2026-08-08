@@ -7,23 +7,31 @@ conversation. Everything load-bearing is here or in the documents it points to.
 
 ---
 
-## 0. Read this first — process failure in the previous session
+## 0. Read this first — where the work actually is
 
-The previous session repeatedly announced "proceeding to the next phase" and then
-stopped without writing code. This happened at least three times across consecutive
-turns before any of `core/` existed. The user had to intervene twice, the second
-time to say the session was wasted.
+**P2.8 is written.** `platform/macos/` exists: both halves of the exporter, the
+IPC between them, the disk guard, the BOT prober, two new test suites, a new fuzz
+target, and the launchd scripts. It builds with zero warnings and 7/7 suites pass.
+Details in `docs/P2_8_EXPORTER.md`.
 
-**The concrete failure mode:** treating a long explanatory message as if it were
-delivery. Investigation results and doc updates are not the same thing as the
-implementation that was promised in the same breath.
+**One thing is outstanding and it needs the user, not the assistant:**
 
-**For the next session:** when this document says the next task is P2.8, open an
-editor and write P2.8. Report after it builds and its tests pass, not before. Do
-not restate the plan. The plan is written down; it does not need to be said again.
+```bash
+cd "/Users/mba/Desktop/AirUSB Hub/airusb"
+sudo ./platform/macos/scripts/p28_run.sh 058f:6387
+```
 
-The technical work below is sound and independently verified — the failure was one
-of follow-through, not of correctness. Do not redo it.
+`sudo` is blocked for the assistant in this harness, and the P2.8 gate is by
+definition a root-plus-hardware test. Everything that can be verified without root
+has been. Run that command, paste the output, and the gate is closed.
+
+### The process failure this section used to describe
+
+An earlier session repeatedly announced "proceeding to the next phase" and then
+stopped without writing code — three times across consecutive turns. The failure
+mode was treating a long explanatory message as if it were delivery. It is
+recorded here because the fix generalises: **report after it builds and its tests
+pass, not before, and do not restate a plan that is already written down.**
 
 ---
 
@@ -263,29 +271,46 @@ exist, but it is not the product path.
 ## 6. Code state
 
 ```
-1855 checks / 5 suites / 0 failures
-300,000 fuzz executions / 0 crashes / 0 UB findings / 157-input seed corpus, 169 edges
-Zero warnings under -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow
-~8,600 lines tracked
+7 suites / 0 failures
+2 fuzz targets, 150,000 executions each / 0 crashes / 0 UB findings
+Zero warnings under -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion
+  -Wshadow — Objective-C++ included
 ```
 
 ```
 airusb/
-  CMakeLists.txt              C++20, warnings-as-listed, ctest
+  CMakeLists.txt              C++20 + Objective-C++, warnings-as-listed, ctest
   core/       Status, UsbTypes, Clock, Watchdog, DeviceManifest,
-              Ep0Arbiter, RequestTable, CreditController
+              Ep0Arbiter, RequestTable, CreditController, IUsbDevicePort
   protocol/   Wire.h (every offset a named constant + static_assert),
               Codec, Validate (R1–R12)
   transport/  IAirUsbTransport, RecordLayer, FrameScheduler,
               TcpTransport (+ MemoryPipe), FaultTransport
-  tests/      TestHarness.h, unit/{codec,validate,core,transport,loopback},
-              fakes/ScriptedDevice, fuzz/, vectors/corpus/
+  diag/       BotProbe — read-only Bulk-Only Transport prober. A test
+              instrument, not the data path; nothing in core/protocol/
+              transport includes it.
+  platform/macos/
+              StatusMapMacos  IOReturn -> Status, pure C++, cross-checked
+                              against the SDK by static_assert in the .mm
+              AgentProtocol   daemon<->agent IPC codec, pure C++, fuzzed
+              AgentLink       framed unix socket, plain POSIX
+              MacUsbCommon    IORegistry helpers, safe IOUSBHostObject init
+              DiskGuard       claim / unmount / deny-automount / unclaim
+              AgentUsbIo      IOUSBHostInterface, pipes, transfers
+              HostDeviceExporter  capture, manifest, lease, release order
+              airusb_exportd_main.mm / airusb_agent_main.mm
+              scripts/p28_run.sh      the hardware gate, production shape
+              scripts/agent_smoke.py  drives the real agent, no root needed
+  tests/      TestHarness.h,
+              unit/{codec,validate,core,transport,loopback,botprobe,macipc},
+              fakes/ScriptedDevice, fuzz/{decode,agentipc}, vectors/corpus*/
 poc/
   p0-probe/           entitlement authorization matrix
   p1-capture-test/    capture_test.m + 5 runner scripts
 docs/
   P0_MACOS_FEASIBILITY.md  P1_IMPLEMENTATION_PLAN.md
-  P1_CAPTURE_VERIFICATION.md  ENTITLEMENT_REQUEST.md  HANDOFF.md
+  P1_CAPTURE_VERIFICATION.md  P2_8_EXPORTER.md
+  ENTITLEMENT_REQUEST.md  HANDOFF.md
 ```
 
 Build and test:
@@ -294,6 +319,9 @@ Build and test:
 cd "/Users/mba/Desktop/AirUSB Hub/airusb"
 cmake -S . -B build && cmake --build build && (cd build && ctest --output-on-failure)
 ./tests/fuzz/build_and_run.sh 300000
+
+# no root, no hardware capture — drives the real agent binary
+python3 platform/macos/scripts/agent_smoke.py build/airusb-agent 0x01200000 1
 ```
 
 ### Design decisions worth not re-litigating
@@ -343,7 +371,14 @@ cmake -S . -B build && cmake --build build && (cd build && ctest --output-on-fai
 | **OQ-5** | Will Apple grant the entitlement to this team? | P2.9, P2.10 only | **Not yet filed.** See §8. |
 | **OQ-6** | Are `interruptRateHz = 1000`, 16 KiB segments, depth-4 pipeline, 64 urb / 4 MiB credit in the safe direction? | P2.9 | Instrument with counters. `InterruptOverflow` and `DoorbellOverflow` are **fatal**, not merely slow. |
 | **OQ-7** | No `API_AVAILABLE` on any IOUSBHostCI header, so the message ABI could shift silently across macOS releases | release | Pin a tested range; treat any `IOUSBHostCIExceptionType` at init as a hard refusal, not a retry. |
-| new | Does bulk I/O actually work through pipes the agent obtains while the daemon holds the capture? | P2.8 | **The gate is passed; the plumbing behind it is untested.** First job of P2.8. |
+| **OQ-8** | Does bulk I/O actually work through pipes the agent obtains while the daemon holds the capture? | P2.8 gate | **Instrumented, not yet answered.** The code is written and everything testable without root passes. Answered by `sudo ./platform/macos/scripts/p28_run.sh 058f:6387`. |
+
+**On OQ-1 specifically:** `diag/BotProbe` now measures it rather than reasoning
+about it — a 31-byte CBW must be accepted whole, a four-block read must return in
+one transfer, and a short read must stay short. The daemon prints
+`OQ-1: transfer boundaries INTACT|VIOLATED`. The measurement is validated in CI
+against three deliberately broken transports, so a hardware VIOLATED means the
+hardware path is wrong rather than the instrument.
 
 ---
 
@@ -369,40 +404,48 @@ has no Xcode project yet.
 
 ---
 
-## 9. Next task: P2.8 — the real exporter
+## 9. Next task: run the P2.8 hardware gate, then P2.4
 
-**Do this first, and do not report until it builds and runs.**
+### 9.1 The one outstanding command
 
-Implement `platform/macos/` per the split architecture in §4:
+```bash
+cd "/Users/mba/Desktop/AirUSB Hub/airusb"
+cmake -S . -B build && cmake --build build
+sudo ./platform/macos/scripts/p28_run.sh 058f:6387
+```
 
-1. `HostDeviceExporter.mm` — root daemon half:
-   - `DiskGuard` (DiskArbitration claim / unmount / unclaim)
-   - `IOUSBHostDevice` + `IOUSBHostObjectInitOptionsDeviceCapture`
-   - `configureWithValue:matchInterfaces:NO` — **required**; stops
-     `IOUSBMassStorageDriver` re-attaching and remounting a leased drive
-   - plain `destroy` on release (**not** `DeviceSurrender`, which suppresses the
-     reset and re-match)
-   - lease ownership and the `T_lease_exporter` watchdog
-2. `AgentUsbIo.mm` — console-session agent half:
-   - `IOUSBHostInterface` open, `copyPipeWithAddress:`, bulk/interrupt I/O
-   - `rebuildPipeTable()` after every `SET_CONFIGURATION` / `SET_INTERFACE` /
-     logical reset, with a generation counter
-   - **every init wrapped in `@try`/`@catch`** (§4)
-3. Daemon↔agent IPC over a unix socket, with mutual death handling: agent dies →
-   daemon releases the capture and restores the drive; daemon dies → agent's pipes
-   fail → `DEVICE_GONE`.
-4. Wire the existing `ScriptedDevice`-shaped exporter interface to the real device
-   so the loopback gate's assertions run against real hardware.
+It installs both halves as real launchd jobs — a root LaunchDaemon in the system
+session and a LaunchAgent in the console user's Aqua session — because launch
+context is load-bearing and a terminal-launched process would pass a test the
+shipping configuration fails.
 
-**The first thing P2.8 must prove:** a real CBW → data → CSW exchange through pipes
-the agent obtained while the daemon holds the capture. That settles the last
-unproven step and OQ-1 with it.
+The probe is **read-only**: `GET_MAX_LUN`, `TEST UNIT READY`, `INQUIRY`,
+`READ CAPACITY(10)`, `READ(10)`. Nothing is written to the medium. The drive is
+unmounted before capture and handed back after, the run aborts before capture if
+any unmount is refused, and the boot disk is refused outright. Still, use a drive
+you do not care about.
 
-Root experiments must be handed to the user as copy-pasteable commands. Use a
-**dedicated test USB drive**; the tool already refuses the boot disk and aborts
-before capture if the unmount is refused.
+Reading the verdict:
 
-### Then, in order
+| verdict | what it means |
+|---|---|
+| `P2.8 GATE: PASS` | The split exporter is proven end to end. OQ-1 is answered on the same line. |
+| `P2.8 GATE: FAIL` | The exchange was reached but did not survive. The prober names the failing step; the instrument is CI-validated, so believe it. |
+| `P2.8 GATE: BLOCKED` | Never captured. If the agent log says `System Policy denied`, the split architecture itself needs re-examining — that would be new information contradicting P1. |
+
+Full detail, including what was built and why, is in `docs/P2_8_EXPORTER.md`.
+
+### 9.2 What was implemented (all four items from the old plan, done)
+
+1. `HostDeviceExporter.mm` — DiskGuard, capture, `matchInterfaces:NO`, manifest,
+   plain `destroy` on release, agent-death handling. ✅
+2. `AgentUsbIo.mm` — interfaces, `copyPipeWithAddress:`, bulk I/O,
+   `rebuildPipeTable()` with a generation counter, every init in `@try`/`@catch`. ✅
+3. Daemon↔agent IPC over a unix socket, fuzzed, with mutual death handling. ✅
+4. `IUsbDevicePort` — the `ScriptedDevice`-shaped interface, implemented by both
+   the fake and the real device, with `diag/BotProbe` driving either. ✅
+
+### 9.3 Then, in order
 
 - **P2.4** security: Noise_XX + Noise_IK. `IRecordCipher` is the slot; `NullCipher`
   is the current stand-in and is named so its presence in a shipping config is
@@ -439,6 +482,20 @@ sudo ./capture_test --capture 058f:6387     # full lifecycle
 sudo ./run_as_daemon.sh 058f:6387           # LaunchDaemon
 sudo ./run_matrix.sh 058f:6387              # five execution contexts
 sudo ./run_split_test.sh 058f:6387          # the split-architecture test
+```
+
+### P2.8 — the real exporter
+
+```bash
+cd "/Users/mba/Desktop/AirUSB Hub/airusb"
+cmake -S . -B build && cmake --build build
+
+./build/airusb-exportd --list                          # read-only, no root
+python3 platform/macos/scripts/agent_smoke.py \
+        build/airusb-agent 0x01200000 1                # real agent, no root
+
+# THE GATE — needs the user:
+sudo ./platform/macos/scripts/p28_run.sh 058f:6387
 ```
 
 `--probe-interface` performs no unmount and no capture and is safe anywhere.

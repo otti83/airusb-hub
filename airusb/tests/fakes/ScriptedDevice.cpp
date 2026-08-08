@@ -108,9 +108,31 @@ std::uint64_t ScriptedDevice::checksum() const noexcept
     return h;
 }
 
-void ScriptedDevice::clearHalt(std::uint8_t epAddr) noexcept
+Status ScriptedDevice::clearHalt(std::uint8_t epAddr) noexcept
 {
+    // Endpoint 0 never halts persistently: a control STALL is per-transfer, so
+    // clearing it is a no-op that must still succeed. Refusing here would make
+    // every stalled GET_MAX_LUN look like a transport failure.
+    if ((epAddr & 0x7Fu) == 0) return Status::Ok;
+    if (epAddr != kScriptedBulkIn && epAddr != kScriptedBulkOut) return Status::NotFound;
     if (epAddr & 0x80u) _inHalted = false; else _outHalted = false;
+    return Status::Ok;
+}
+
+Status ScriptedDevice::bulkOut(std::uint8_t epAddr,
+                               std::span<const std::uint8_t> data,
+                               std::uint32_t* actualLen)
+{
+    if (epAddr != kScriptedBulkOut) return Status::NotFound;
+    return bulkOut(data, actualLen);
+}
+
+Status ScriptedDevice::bulkIn(std::uint8_t epAddr,
+                              std::uint32_t maxLen,
+                              std::vector<std::uint8_t>& out)
+{
+    if (epAddr != kScriptedBulkIn) return Status::NotFound;
+    return bulkIn(maxLen, out);
 }
 
 void ScriptedDevice::reset() noexcept
