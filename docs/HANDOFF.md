@@ -22,7 +22,7 @@ authenticated as `otti83`).
 | Receiving on Windows / Linux | driver half not written |
 
 ```
-16 test suites / 0 failures
+18 test suites / 0 failures
 3 fuzz targets / 0 crashes / 0 UB findings
 Zero warnings: macOS (Clang, full flag set), Linux (GCC 12, -Wall -Wextra),
                Windows (MinGW, full flag set — -Wpedantic -Wconversion
@@ -586,8 +586,18 @@ Expect MSVC to find things MinGW did not. Paste whatever it says.
    rebuild, and the same bug found with a kernel in the loop costs a VM reboot per
    iteration.
 
-   **Next: L3** — enumeration hosted over `MemoryPipe` with no kernel. Do not skip
-   to L4; the plan says why.
+   **L3 DONE:** `platform/linux/VhciBridge` translates USB/IP into transfers on an
+   `IUsbDevicePort`, and enumeration is proven byte-for-byte with no kernel in the
+   loop — 72 checks, plus `LinuxUsb` (128 checks) for the speed and errno tables.
+   The device descriptor the bridge returns is `memcmp`-identical to the
+   manifest's, which is the verbatim rule asserted rather than asserted about.
+
+   **R3 is closed.** `toKernelSpeed()` is a written-out table with a test that
+   asserts the DISAGREEMENT: `Full→LOW`, `Low→FULL`, `Super→WIRELESS` are what a
+   cast would have produced, and the test fails if anyone ever "simplifies" it
+   back into one.
+
+   **Next: L4** — the same bridge, against a real kernel, in the `airusb` VM.
 3. **P2.9 `CiHostBackend`** — blocked on Apple only.
 4. ~~**The exporter's write path**~~ — **DONE, 2026-08-09.** It was going to be
    "tested for free" by a real importer mounting a filesystem, which is a bad way

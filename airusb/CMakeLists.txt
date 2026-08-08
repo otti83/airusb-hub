@@ -164,8 +164,10 @@ target_link_libraries(airusb_diag PUBLIC airusb_core)
 # ---------------------------------------------------------------------------
 add_library(airusb_linux_usbip STATIC
     platform/linux/UsbipCodec.cpp
+    platform/linux/LinuxUsb.cpp
+    platform/linux/VhciBridge.cpp
 )
-target_link_libraries(airusb_linux_usbip PUBLIC airusb_core)
+target_link_libraries(airusb_linux_usbip PUBLIC airusb_core airusb_transport)
 
 # The L1 gate. Linux only, because it writes to vhci-hcd's sysfs and there is
 # nothing to point it at anywhere else.
