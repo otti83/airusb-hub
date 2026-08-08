@@ -111,10 +111,39 @@ echo "=== D: launchctl asuser ${CONSOLE_UID} — root inside the console user's 
 D_LOG=/tmp/airusb_matrix_D.log
 launchctl asuser "$CONSOLE_UID" "$BIN" --capture "$VIDPID" > "$D_LOG" 2>&1
 digest "$D_LOG"
+sleep 3
+
+# ---------------------------------------------------------------------------
+# E is the most promising one. Apple DTS attributes FB16524420 to "additional
+# hardening in macOS 15.3 around mass storage access", and another reporter
+# captured the kernel gate as:
+#     System Policy: <helper>(pid) deny(1) iokit-open-service IOUSBHostInterface
+# That is a TCC denial. This binary normally lives under ~/Desktop, which is
+# TCC-protected — a root LaunchDaemon without Full Disk Access cannot even read
+# its own directory, which is also why +[NSBundle mainBundle] came back nil and
+# turned the error path into a crash. Running from a non-TCC location tests
+# whether the whole failure is really a TCC-attribution problem.
+# ---------------------------------------------------------------------------
+echo
+echo "=== E: LaunchDaemon, binary staged OUTSIDE any TCC-protected path ==="
+STAGE=/usr/local/libexec/airusb
+mkdir -p "$STAGE"
+cp "$BIN" "$STAGE/capture_test"
+chown -R root:wheel "$STAGE"; chmod 755 "$STAGE/capture_test"
+echo "      staged at $STAGE/capture_test"
+BIN_SAVED="$BIN"; BIN="$STAGE/capture_test"
+run_daemon E ""
+BIN="$BIN_SAVED"
+
+echo
+echo "=== kernel System Policy denials during this run ==="
+log show --last 5m --style compact --predicate 'eventMessage CONTAINS "iokit-open-service" OR eventMessage CONTAINS "IOUSBHostInterface"' 2>/dev/null \
+    | grep -iE "deny|IOUSBHostInterface" | tail -12 | sed 's/^/      /' \
+    || echo "      (none found)"
 
 echo
 echo "==================== SUMMARY ===================="
-for ctx in A B C D; do
+for ctx in A B C D E; do
     L=/tmp/airusb_matrix_${ctx}.log
     if [[ -f "$L" ]]; then
         V=$(grep -oE "VERDICT=[A-Z_]+" "$L" | tail -1)
@@ -124,6 +153,15 @@ for ctx in A B C D; do
 done
 echo "================================================"
 echo
-echo "Reading it: any context with VERDICT=PASS is a viable exporter shape."
-echo "If only A and D pass, the exporter must run inside the console user's"
-echo "session, and a plain LaunchDaemon is ruled out."
+echo "Reading it:"
+echo "  E passes  -> the whole failure was TCC attribution. Ship the exporter"
+echo "               from /usr/local/libexec (or inside the app bundle) and a"
+echo "               plain LaunchDaemon works. Best possible outcome."
+echo "  only A,D  -> the exporter must run inside the console user's session;"
+echo "               a plain system LaunchDaemon is ruled out."
+echo "  only A    -> no launchd shape works; the exporter has to be hosted by"
+echo "               the GUI-session agent, or move to a DriverKit dext."
+echo
+echo "Also check whether E still crashes with NSInvalidArgumentException. If it"
+echo "instead reports a clean NSError, that confirms +[NSBundle mainBundle] was"
+echo "nil only because ~/Desktop is unreadable to the daemon."

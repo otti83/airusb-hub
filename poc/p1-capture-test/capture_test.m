@@ -473,14 +473,24 @@ static int captureTest(uint16_t vid, uint16_t pid)
                 // Get the REAL error code, bypassing Apple's broken error path.
                 //
                 // Disassembly of -[IOUSBHostObject openWithOptions:error:] shows the
-                // throw happens on the FAILURE branch: IOServiceOpen returns non-zero,
-                // and the framework then builds the NSError userInfo with
-                //   -[NSBundle localizedStringForKey:nil value:@"" table:nil]
-                // (x2 = 0 at +376), which returns nil, and NSDictionary raises on the
-                // nil value at +428. So the exception hides the actual IOReturn.
+                // throw happens on the FAILURE branch: IOServiceOpen returns non-zero
+                // (+168/+172), and the framework then builds an NSError userInfo from
+                // three -[NSBundle localizedStringForKey:...] results (+208..+404) and
+                // raises at +428 because one is nil.
                 //
-                // The framework calls IOServiceOpen(ioService, mach_task_self_, 0, &c)
-                // (+144..+168). Doing exactly that ourselves surfaces the real code.
+                // The nil is objects[0] — the FIRST value, from the key
+                // @"Unable to open io_service_t object and create user client." A
+                // message to a nil receiver returns nil, so this means
+                // +[NSBundle mainBundle] itself is nil, which happens when a process
+                // cannot enumerate the directory containing its own executable. This
+                // binary normally lives under ~/Desktop, which is TCC-protected: a root
+                // LaunchDaemon without Full Disk Access cannot read it, while Terminal
+                // can. Running from a non-TCC path should restore mainBundle and turn
+                // the crash into a legible NSError.
+                //
+                // Either way the exception is SECONDARY. The primary failure is
+                // IOServiceOpen(ioService, mach_task_self_, 0, &c) (+144..+168), so
+                // doing exactly that call ourselves surfaces the real IOReturn.
                 {
                     // IOKitLib.h:614-619 — IOServiceAuthorize returns exactly
                     // kIOReturnNotPermitted when the service "is not authorized",
