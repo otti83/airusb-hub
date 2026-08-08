@@ -31,6 +31,11 @@ airusb/build/
 compile_commands.json
 .cache/
 
-# Xcode
-apple/AirUSBHub.xcodeproj/     # generated from apple/project.yml by xcodegen
+# Xcode.
+#
+# .gitignore has no trailing comments — "path/  # note" makes the pattern
+# literally include the spaces and the note, and silently matches nothing.
+# Both of these are generated from apple/project.yml by xcodegen.
+apple/AirUSBHub.xcodeproj/
+apple/Sources/Info.plist
 apple/build/

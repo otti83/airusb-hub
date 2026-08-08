@@ -9,9 +9,36 @@ cd apple && xcodegen generate
 The `.xcodeproj` is **not** committed. It is a generated artefact, and a
 `project.pbxproj` diff is unreadable — the spec is the source of truth.
 
-## What this target is for
+## What this is
 
-Two things, neither of which a bare `clang` binary can do:
+A SwiftUI app for the things a GUI is actually for — seeing what is attached,
+what is mounted, and ejecting it — plus the two signing jobs a bare `clang`
+binary cannot do.
+
+### The window
+
+- **Device list**, live. Driven by IOKit hotplug notifications, not polling.
+- **Detail**: negotiated speed, measured link rate, VID:PID, port, BSD devices,
+  and every mounted volume with its path.
+- **Eject**, through DiskArbitration, exactly as Finder's eject does. Whole disks
+  only — `kDADiskUnmountOptionWhole` takes the slices with it, and unmounting
+  slices individually races the whole-disk unmount. If a volume is busy,
+  DiskArbitration usually names the process holding it and the app shows that,
+  because it is the only part the user can act on.
+- **Startup disk is refused**, by name and by checking what `/` is mounted from,
+  and the window says so rather than silently disabling a button.
+- **A link-speed disagreement is surfaced.** The IORegistry publishes two speed
+  properties with different enumerations in which the same integer 3 means High in
+  one and Super in the other; when the negotiated speed and the measured link rate
+  disagree, the app says so instead of picking one.
+- **Receiving devices** status bar, which runs the entitlement probe on demand.
+
+**Sharing is deliberately a disabled button with an explanation.** The sharing
+engine works and is verified against real hardware, but it is driven from the
+command line and this app does not install the root helper yet. A button that
+looked like it worked would be worse than an honest one that does not.
+
+### And the two signing jobs
 
 1. **Get a provisioning profile.** A restricted entitlement is authorised by an
    Apple-issued provisioning profile embedded in the bundle. `codesign` on a loose

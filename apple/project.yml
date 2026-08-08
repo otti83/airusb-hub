@@ -33,12 +33,16 @@ targets:
       properties:
         CFBundleName: AirUSB Hub
         CFBundleDisplayName: AirUSB Hub
-        LSUIElement: true          # no Dock icon; this is a probe, not an app yet
+        LSUIElement: false
         NSHumanReadableCopyright: ""
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.otti83.airusbhub
         CODE_SIGN_ENTITLEMENTS: Sources/AirUSBHub.entitlements
+        SWIFT_OBJC_BRIDGING_HEADER: Sources/AirUSBHub-Bridging-Header.h
+        SWIFT_VERSION: "5.0"
+        # The Objective-C core owns every IOKit call; Swift sees plain objects.
+        CLANG_ENABLE_OBJC_ARC: YES
         # NOTE: com.apple.developer.usb.host-controller-interface is deliberately
         # NOT in that file yet. It is Apple-managed; claiming it before the grant
         # makes automatic signing fail, which would stop the App ID being
