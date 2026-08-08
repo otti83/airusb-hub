@@ -22,7 +22,7 @@ authenticated as `otti83`).
 | Receiving on Windows / Linux | driver half not written |
 
 ```
-14 test suites / 0 failures
+15 test suites / 0 failures
 3 fuzz targets / 0 crashes / 0 UB findings
 Zero warnings: macOS (Clang, full flag set), Linux (GCC 12, -Wall -Wextra),
                Windows (MinGW, full flag set — -Wpedantic -Wconversion
@@ -545,8 +545,21 @@ Expect MSVC to find things MinGW did not. Paste whatever it says.
    which is the kind a tired person misreads with a drive attached. The write
    instrument is a different type, and the only entry point is named
    `runDestructiveWriteTest`.
-5. **`PAIR_*` messages and the pairing rate limiter.** The SAS's one-in-a-million
-   bound assumes attempts cannot be retried; nothing enforces that yet.
+5. **`PAIR_*` messages** — the opcodes are reserved in `Wire.h` (0x10/0x11/0x12)
+   and the trust gate already refuses everything else to an Unpaired peer, but no
+   handler exists. **The rate limiter half is now DONE**: `session/PairingGate`,
+   40 checks.
+
+   Two design points worth not re-deriving. **The counter is global, not
+   per-peer** — a peer identity is an Ed25519 key the peer generates for itself,
+   so an attacker mints a fresh one per attempt and per-peer counting sees a first
+   offence every time. It would look like protection and be none. **And it runs on
+   the continuous clock**, so closing a laptop lid does not clear a lockout; a
+   clock that appears to move backwards fails closed for the same reason.
+
+   `serialize`/`deserialize` exist so a daemon can persist it beside the pin
+   store. A gate held only in memory is reset by anything that can restart the
+   daemon, and that is the reset an attacker would look for.
 6. **Manifest segmentation.** A manifest larger than one record needs it; the
    control plane has none. An 8-configuration device with a full string table could
    reach it. The attach currently fails with a clear status rather than truncating.

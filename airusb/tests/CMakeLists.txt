@@ -20,6 +20,7 @@ airusb_test(test_crypto)
 airusb_test(test_noise)
 airusb_test(test_identity)
 airusb_test(test_session)
+airusb_test(test_pairinggate)
 airusb_test(test_manifest)
 airusb_test(test_exporter airusb_diag)
 

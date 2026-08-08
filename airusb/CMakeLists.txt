@@ -129,6 +129,7 @@ target_link_libraries(airusb_transport PUBLIC airusb_protocol)
 # session/ — preamble, handshake drive, trust gate, pin store.
 # ---------------------------------------------------------------------------
 add_library(airusb_session STATIC
+    session/PairingGate.cpp
     session/PeerStore.cpp
     session/SecureSession.cpp
     session/ExporterSession.cpp
