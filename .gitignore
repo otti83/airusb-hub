@@ -30,3 +30,7 @@ poc/p1-capture-test/capture_test
 airusb/build/
 compile_commands.json
 .cache/
+
+# Xcode
+apple/AirUSBHub.xcodeproj/     # generated from apple/project.yml by xcodegen
+apple/build/

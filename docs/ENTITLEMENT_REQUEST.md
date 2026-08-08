@@ -1,5 +1,29 @@
 # Requesting `com.apple.developer.usb.host-controller-interface`
 
+> ## READ THIS BEFORE OPENING THE PORTAL
+>
+> **You will not find it. There is nothing to find.**
+>
+> This entitlement is not a checkbox anywhere — not in the App ID Capabilities
+> editor, not in Capability Requests, not in Xcode's Signing & Capabilities.
+> Measured on this machine, 2026-08-08:
+>
+> ```
+> $ python3 -c '...' DVTPortalCachedPortalCapabilities.json
+> total capabilities Xcode knows: 196
+> USB-related entries: 2
+>     DRIVERKIT_TRANSPORT_USB_VENDORID
+>     DRIVERKIT_USBTRANSPORT_PUB
+> host-controller-interface present anywhere: False
+> ```
+>
+> That file is the portal's own capability list, cached by Xcode. 196 entries,
+> two of them USB, and neither is this one. Searching the portal for it is
+> guaranteed to fail — **that is the expected state, not a mistake you made.**
+>
+> **The only way to get it is to ask Apple directly: §2 Route B.** Everything in
+> Route A is preparation for after the grant, not a way to obtain it.
+
 **Blocks:** P2.9 / P2.10 only (the importer's `CiHostBackend`).
 **Does not block:** P2.0–P2.8 — protocol, core, security, transport, fakes, the
 loopback gate, and the entire real-hardware exporter.
@@ -108,17 +132,30 @@ to route requests to the right reviewers.
 
 ---
 
-## 3. Which Team ID to use
+## 3. Which Team ID — SETTLED: `GZUV3UMV3B`
 
-This machine holds two signing identities on **different teams**:
+This was an open decision. It is not any more, because the machine answers it.
 
-| Identity | Team ID |
-|---|---|
-| Apple Development: Hiroya Ochiai | `WT36SR3Q23` |
-| Apple Distribution: Hiroya Ochiai | `GZUV3UMV3B` |
+Xcode has exactly **one** team signed in:
 
-Decide which team will ship AirUSB Hub **before** filing, and request against that
-one. The grant lands on a team, and moving it later means filing again.
+```
+$ defaults read com.apple.dt.Xcode IDEProvisioningTeamByIdentifier
+    isFreeProvisioningTeam = 0;
+    teamID   = GZUV3UMV3B;
+    teamName = "Hiroya Ochiai";
+    teamType = Individual;
+```
+
+`WT36SR3Q23` exists only as a local *signing identity* in the keychain, not as a
+team Xcode can provision against. The provisioning profile Xcode generated for
+this project is issued to `GZUV3UMV3B`. So:
+
+**File against `GZUV3UMV3B`.**
+
+`teamType = Individual` is also the honest statement of the risk in §5: every
+confirmed holder of this entitlement is an Organization. That does not make the
+request pointless, but it is the thing most likely to get it declined, and it is
+worth knowing before spending effort on the wording rather than after.
 
 ---
 
@@ -128,7 +165,7 @@ Fill in the two bracketed items and paste into *Describe the Issue*. Written to
 answer the question DTS says is the deciding one.
 
 ```
-Team ID: [WT36SR3Q23 or GZUV3UMV3B — pick the team that will ship the product]
+Team ID: GZUV3UMV3B
 
 I am requesting the com.apple.developer.usb.host-controller-interface entitlement
 for an open-source macOS application called AirUSB Hub.
@@ -182,10 +219,33 @@ full source published under an open-source license.
 
 PROJECT / MATERIAL
 
-[Link to the repository, project page, or any marketing material. If none exists
-yet, say so and describe the current state of the project — a feasibility report
-and a working exporter prototype exist.]
+The project is not yet published. Its current state:
+
+- A feasibility report establishing that IOUSBHostControllerInterface is the only
+  supported route on macOS, with the alternatives evaluated and rejected.
+- A working exporter, verified against real hardware: a root LaunchDaemon captures
+  a USB device with IOUSBHostObjectInitOptionsDeviceCapture and an unprivileged
+  console-session agent performs bulk transfers on it. A complete USB Mass Storage
+  Bulk-Only Transport exchange (CBW, data, CSW) has been demonstrated end to end
+  against a SuperSpeed flash drive, and the drive is restored to the host cleanly
+  afterwards.
+- A full session layer: Noise_XX / Noise_IK (X25519, ChaCha20-Poly1305, BLAKE2s)
+  verified byte for byte against the official Noise cross-implementation test
+  vectors, mutual authentication with pinned peer identities, and a numeric
+  comparison code for pairing.
+- The importing half is the only part not built, because it is the only part that
+  needs this entitlement.
+
+I am happy to provide the source, the hardware verification logs, or a build to
+anyone at Apple who would like to see them.
 ```
+
+> **Before sending, consider publishing the repository.** Apple's stated criterion
+> is "marketing material for your product(s) and/or company", and the request above
+> currently answers that with a description rather than a link. A public repository
+> with the README, the feasibility report and the hardware evidence is the cheapest
+> thing that turns "I intend to build" into "here is what I built", and it is the
+> single change most likely to affect the outcome for an Individual account.
 
 ---
 

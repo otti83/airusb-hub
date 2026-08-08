@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	  An App Group, for a real reason and a useful side effect.
+
+	  The real reason: the exporter is two processes (a root LaunchDaemon and an
+	  unprivileged LaunchAgent — see P1_CAPTURE_VERIFICATION.md) and they have to
+	  share the pin store and the identity seed. A group container is the macOS
+	  way to do that without inventing a path convention.
+
+	  The side effect that matters right now: App Groups is a capability that
+	  REQUIRES a provisioning profile. macOS development signing otherwise needs
+	  no profile at all, so Xcode never contacts the Developer portal and never
+	  registers an App ID — which is why the first build here signed cleanly and
+	  created nothing. With this present, automatic signing has to go and ask,
+	  and the App ID appears.
+
+	  That App ID is the prerequisite for the Capability Requests tab, which does
+	  not exist until an App ID does.
+	-->
+	<key>com.apple.security.application-groups</key>
+	<array>
+		<string>group.com.otti83.airusbhub</string>
+	</array>
+</dict>
+</plist>
