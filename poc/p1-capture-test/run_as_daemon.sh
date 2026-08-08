@@ -38,8 +38,12 @@ if [[ $EUID -ne 0 ]]; then
 fi
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
-BIN="$HERE/capture_test"
+# AIRUSB_BIN lets us point at a copy that has been granted Full Disk Access in
+# System Settings — TCC grants follow the binary's path, so the granted copy must
+# be the one launchd executes.
+BIN="${AIRUSB_BIN:-$HERE/capture_test}"
 [[ -x "$BIN" ]] || { echo "error: $BIN not built. Run: ./build.sh" >&2; exit 1; }
+echo "using binary: $BIN"
 
 LABEL="com.airusb.capture-test-oneshot"
 PLIST="/Library/LaunchDaemons/${LABEL}.plist"

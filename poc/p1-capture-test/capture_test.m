@@ -268,6 +268,61 @@ static BOOL unmountVolumes(NSSet<NSString *> *bsdNames)
     return ctx.ok;
 }
 
+#pragma mark - non-destructive interface-open probe
+
+/// Ask the one question that decides the exporter architecture, with no side
+/// effects: can THIS process, in THIS security context, open an
+/// IOUSBHostInterface user client?
+///
+/// Nothing is unmounted and nothing is captured, so this is safe to run as any
+/// user, from any context, at any time. The kernel's System Policy check runs
+/// before any exclusivity check, so the returned code cleanly separates
+///   0xE00002E2 kIOReturnNotPermitted    -> sandbox/System Policy refused us
+///   0xE00002C5 kIOReturnExclusiveAccess -> policy allowed it; a driver holds it
+///   KERN_SUCCESS                        -> this context can open interfaces
+static int probeInterfaceOpen(uint16_t vid, uint16_t pid)
+{
+    io_service_t dev = findDevice(vid, pid);
+    if (!dev) { alog("ERROR", @"device %04x:%04x not found", vid, pid); return 1; }
+
+    alog("ATTACH", @"probe: euid=%d ppid=%d  %s", geteuid(), getppid(),
+         getppid() == 1 ? "launchd" : (isatty(STDIN_FILENO) ? "tty" : "no-tty"));
+
+    int opened = 0, present = 0;
+    io_iterator_t it = IO_OBJECT_NULL;
+    if (IORegistryEntryGetChildIterator(dev, kIOServicePlane, &it) == KERN_SUCCESS) {
+        io_service_t child;
+        while ((child = IOIteratorNext(it))) {
+            if (IOObjectConformsTo(child, (char *)kIOUSBHostInterfaceClassName)) {
+                present++;
+                NSNumber *num = propNum(child, CFSTR("bInterfaceNumber"));
+                io_connect_t c = IO_OBJECT_NULL;
+                kern_return_t kr = IOServiceOpen(child, mach_task_self(), 0, &c);
+                alog("ATTACH", @"raw IOServiceOpen(interface %@, type=0) -> 0x%08X %s",
+                     num ?: @"?", kr,
+                     kr == KERN_SUCCESS ? "(SUCCESS)" : mach_error_string(kr));
+                if (kr == KERN_SUCCESS) { opened++; IOServiceClose(c); }
+                else if (kr == kIOReturnNotPermitted)
+                    alog("ERROR", @"  ^ System Policy denied iokit-open-service IOUSBHostInterface");
+                else if (kr == kIOReturnExclusiveAccess)
+                    alog("ATTACH", @"  ^ policy ALLOWED it; a driver currently holds the interface");
+            }
+            IOObjectRelease(child);
+        }
+        IOObjectRelease(it);
+    }
+    IOObjectRelease(dev);
+
+    if (present == 0) { alog("ERROR", @"VERDICT=INCONCLUSIVE (no interface nubs)"); return 3; }
+    if (opened == present) {
+        alog("ATTACH", @"VERDICT=PASS — this context may open USB interfaces");
+        return 0;
+    }
+    alog("ERROR", @"VERDICT=FAIL — this context may not open USB interfaces (%d/%d)",
+         opened, present);
+    return 4;
+}
+
 #pragma mark - authorization (run from a GUI session)
 
 /// Ask the console user to authorize this device and its interfaces, so that a
@@ -319,14 +374,22 @@ static int authorizeDevice(uint16_t vid, uint16_t pid)
 
 #pragma mark - the actual test
 
-static int captureTest(uint16_t vid, uint16_t pid)
+/// holdSeconds > 0 turns this into the "hold" half of the split-architecture test:
+/// capture the device, republish the interfaces, then keep the capture alive for a
+/// while so that a SEPARATE console-session process can try to open an interface on
+/// a device this process owns. That is the one question that decides whether the
+/// exporter can be split into a root daemon plus a session agent.
+static int captureTest(uint16_t vid, uint16_t pid, double holdSeconds)
 {
-    if (geteuid() != 0) {
-        alog("ERROR", @"must run as root (IOUSBHostObjectInitOptionsDeviceCapture requires root "
-                       "or com.apple.vm.device-access). Try: sudo %s --capture %04x:%04x",
-             "capture_test", vid, pid);
-        return 1;
-    }
+    // Do not pre-judge the root requirement — measure it. IOUSBHostDefinitions.h
+    // says DeviceCapture needs root OR com.apple.vm.device-access plus
+    // IOServiceAuthorize, but the context matrix showed the interface gate is about
+    // the security SESSION rather than uid, so it is worth finding out empirically
+    // whether a console-session non-root process can capture too. If it cannot, the
+    // exact IOReturn tells us more than an early exit would.
+    if (geteuid() != 0)
+        alog("ATTACH", @"note: running WITHOUT root — testing whether a console-session "
+                        "process can capture on its own");
 
     io_service_t devService = findDevice(vid, pid);
     if (!devService) { alog("ERROR", @"device %04x:%04x not found", vid, pid); return 1; }
@@ -461,6 +524,21 @@ static int captureTest(uint16_t vid, uint16_t pid)
     } while ([deadline timeIntervalSinceNow] > 0);
 
     alog("ATTACH", @"interface nubs republished: %lu", (unsigned long)present);
+
+    if (holdSeconds > 0) {
+        alog("ATTACH", @"HOLDING capture for %.0fs — another process may probe now",
+             holdSeconds);
+        fflush(stdout);
+        NSDate *until = [NSDate dateWithTimeIntervalSinceNow:holdSeconds];
+        while ([until timeIntervalSinceNow] > 0)
+            CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.25, true);
+        alog("ATTACH", @"hold elapsed; releasing");
+        for (IOUSBHostInterface *i in interfaces) { [i destroy]; }
+        [device destroy];
+        IOObjectRelease(devService);
+        alog("DETACH", @"RESULT=RESTORED (hold mode)");
+        return 0;
+    }
 
     if (IORegistryEntryGetChildIterator(devService, kIOServicePlane, &it) == KERN_SUCCESS) {
         io_service_t child;
@@ -639,6 +717,16 @@ int main(int argc, const char *argv[])
         alog("ATTACH", @"capture_test  euid=%d  args=%@", geteuid(),
              [[args subarrayWithRange:NSMakeRange(1, args.count - 1)] componentsJoinedByString:@" "]);
 
+        if (args.count >= 3 && [args[1] isEqualToString:@"--probe-interface"]) {
+            unsigned vid = 0, pid = 0;
+            if (sscanf(args[2].UTF8String, "%4x:%4x", &vid, &pid) != 2) {
+                alog("ERROR", @"'%@' is not a VID:PID", args[2]);
+                printSuggestions();
+                return 1;
+            }
+            return probeInterfaceOpen((uint16_t)vid, (uint16_t)pid);
+        }
+
         if (args.count >= 3 && [args[1] isEqualToString:@"--authorize"]) {
             unsigned vid = 0, pid = 0;
             if (sscanf(args[2].UTF8String, "%4x:%4x", &vid, &pid) != 2) {
@@ -660,7 +748,9 @@ int main(int argc, const char *argv[])
                 printSuggestions();
                 return 1;
             }
-            return captureTest((uint16_t)vid, (uint16_t)pid);
+            // Optional third arg: hold the capture open for N seconds.
+            double hold = (args.count >= 4) ? args[3].doubleValue : 0.0;
+            return captureTest((uint16_t)vid, (uint16_t)pid, hold);
         }
 
         listDevices();
