@@ -1,0 +1,99 @@
+// AirUSB Hub — TCP byte stream, and the in-memory pipe used by every test.
+//
+// TcpStream is deliberately thin: non-blocking sockets, TCP_NODELAY, and nothing
+// else. All the interesting behaviour (framing, priority, backpressure) lives
+// above it, so it can be swapped for QUIC without any of that moving.
+
+#ifndef AIRUSB_TRANSPORT_TCPTRANSPORT_H
+#define AIRUSB_TRANSPORT_TCPTRANSPORT_H
+
+#include "IAirUsbTransport.h"
+
+#include <deque>
+#include <memory>
+#include <string>
+
+namespace airusb::transport {
+
+class TcpStream final : public IByteStream {
+public:
+    TcpStream() = default;
+    explicit TcpStream(int fd) noexcept : _fd(fd) {}
+    ~TcpStream() override;
+
+    TcpStream(const TcpStream&) = delete;
+    TcpStream& operator=(const TcpStream&) = delete;
+
+    /// Blocking connect, then the socket is switched to non-blocking.
+    static std::unique_ptr<TcpStream> connect(const std::string& host, std::uint16_t port,
+                                              Status* status = nullptr);
+
+    /// Listening socket helper. Returns -1 on failure.
+    static int listen(std::uint16_t port, Status* status = nullptr);
+
+    /// Accepts one connection from a listening fd. Returns nullptr when there is
+    /// nothing pending.
+    static std::unique_ptr<TcpStream> accept(int listenFd, Status* status = nullptr);
+
+    IoResult write(std::span<const std::uint8_t> src) override;
+    IoResult read(std::span<std::uint8_t> dst) override;
+    void close() override;
+    bool isOpen() const noexcept override { return _fd >= 0; }
+
+    int fd() const noexcept { return _fd; }
+
+private:
+    int _fd = -1;
+};
+
+/// A byte pipe in memory. Two of these cross-wired give a full-duplex connection
+/// with no kernel involved, which is what makes the loopback gate deterministic:
+/// a real socketpair introduces scheduling noise that turns ordering bugs
+/// intermittent.
+class MemoryPipe {
+public:
+    /// One direction of the pipe.
+    class Endpoint final : public IByteStream {
+    public:
+        // Both open flags are needed, not just our own: a reader must be able to
+        // tell "nothing yet" from "the peer hung up", and only the peer's flag
+        // says which. Tracking one flag makes a closed connection look like an
+        // indefinite stall.
+        Endpoint(std::deque<std::uint8_t>* in, std::deque<std::uint8_t>* out,
+                 bool* selfOpen, bool* peerOpen) noexcept
+            : _in(in), _out(out), _self(selfOpen), _peer(peerOpen) {}
+
+        IoResult write(std::span<const std::uint8_t> src) override;
+        IoResult read(std::span<std::uint8_t> dst) override;
+        void close() override { *_self = false; }
+        bool isOpen() const noexcept override { return *_self; }
+
+        /// Caps how much may sit unread, so a test can exercise backpressure.
+        void setCapacity(std::size_t bytes) noexcept { _capacity = bytes; }
+
+    private:
+        std::deque<std::uint8_t>* _in;
+        std::deque<std::uint8_t>* _out;
+        bool*                     _self;
+        bool*                     _peer;
+        std::size_t               _capacity = 0;   // 0 = unbounded
+    };
+
+    MemoryPipe() = default;
+
+    std::unique_ptr<IByteStream> endpointA();
+    std::unique_ptr<IByteStream> endpointB();
+
+    std::size_t bytesAtoB() const noexcept { return _aToB.size(); }
+    std::size_t bytesBtoA() const noexcept { return _bToA.size(); }
+
+private:
+    std::deque<std::uint8_t> _aToB;
+    std::deque<std::uint8_t> _bToA;
+    bool _openA = true;
+    bool _openB = true;
+};
+
+} // namespace airusb::transport
+
+#endif // AIRUSB_TRANSPORT_TCPTRANSPORT_H

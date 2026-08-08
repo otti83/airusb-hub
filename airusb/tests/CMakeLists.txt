@@ -1,9 +1,10 @@
 function(airusb_test name)
     add_executable(${name} unit/${name}.cpp)
-    target_link_libraries(${name} PRIVATE airusb_protocol)
+    target_link_libraries(${name} PRIVATE airusb_transport)
     add_test(NAME ${name} COMMAND ${name})
 endfunction()
 
 airusb_test(test_codec)
 airusb_test(test_validate)
 airusb_test(test_core)
+airusb_test(test_transport)

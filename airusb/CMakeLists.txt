@@ -31,6 +31,15 @@ add_library(airusb_protocol STATIC
     core/RequestTable.cpp
     core/CreditController.cpp
 )
+
+add_library(airusb_transport STATIC
+    transport/RecordLayer.cpp
+    transport/FrameScheduler.cpp
+    transport/TcpTransport.cpp
+    transport/FaultTransport.cpp
+)
+target_include_directories(airusb_transport PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(airusb_transport PUBLIC airusb_protocol)
 target_include_directories(airusb_protocol PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
 # The whole point of this layer is portability. Guard it: nothing here may pull in
