@@ -53,8 +53,34 @@ four real defects were found and fixed rather than guessed at:
 
 MinGW proves headers, APIs and linkage. It does **not** prove MSVC, which is
 stricter under `/permissive-` and needs `/utf-8` for the non-ASCII characters in
-user-facing strings. Both are set in `CMakeLists.txt`; a real MSVC build is still
-the acceptance test, and that is the one thing here that has not been run.
+user-facing strings. Both are set in `CMakeLists.txt`, and the MSVC build is now
+the acceptance test in CI — see below.
+
+### What MSVC actually does now (2026-08-09)
+
+The audit below was a prediction. CI has since settled it, and then some:
+
+```
+MSVC 19.51.36252.0, /W4 /permissive-, zero warnings
+100% tests passed out of 24
+verdict=PASS  outTransfers=5 largestOut=131072 bytesWritten=281088 mismatched=0
+SEGMENTATION out=2 in=2 contRecords=14 maxSegment=16552 largestOut=131072 fired=yes
+RESULT=PASS
+```
+
+That `SEGMENTATION` line is the load-bearing one and it is new. Before it, the
+largest transfer any end-to-end run had ever carried was 16 384 bytes — which
+fits inside one 16 640-byte record, so the segmented path had never executed
+anywhere, on any platform, while a unit test claimed it was being exercised. The
+write probe's largest run is now 131 072 bytes, sized against Noise's 65 519-byte
+plaintext ceiling so that it must split at any legal record size, and the run
+FAILS if it does not.
+
+The Windows job also starts two `airusb-hubd` daemons and pairs them through the
+control API — all three guard refusals provoked, the exporter-first order that
+tears the session down mid-decision, reconnect, attach, `probe verdict=PASS`. So
+the product's window is verified on Windows too, not merely compiled. See
+[`GUI.md`](GUI.md).
 
 The whole Windows target now also compiles warning-free under the flag set CMake
 actually configures — `-Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion
@@ -93,6 +119,21 @@ out-of-bounds read in the importer's ATTACH reject path on a peer-controlled
 body, and a handshake timeout that counted iterations rather than reading a clock
 (making the documented 15 s window about four minutes on Windows, where the sleep
 tick is 15.625 ms).
+
+---
+
+## With a window instead of a command line
+
+`airusb-hubd` is the same thing with an interface. It runs on Windows exactly as
+it runs everywhere else, needs no privileges, and opens a page in whatever
+browser is already installed:
+
+```powershell
+.\build\Release\airusb-hubd.exe --share --share-port 7714 --name "GMKtec"
+```
+
+The two-machine procedure — firewall rule, which side shares, what to compare —
+is written out in [`GUI.md`](GUI.md).
 
 ---
 

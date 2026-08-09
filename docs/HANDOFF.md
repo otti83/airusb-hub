@@ -1,8 +1,11 @@
 # AirUSB Hub — Session Handoff
 
-**Written:** 2026-08-08 · **Last updated:** 2026-08-09, after the Linux importer was
-finished end to end on real hardware (full L6 + L8; §0). Next session's focus is
-**Windows verification then GUI design** — see §0.
+**Written:** 2026-08-08 · **Last updated:** 2026-08-09, after **Windows
+verification and the GUI** — both of the things the previous handoff named as the
+next session's work are done (§0). The product now has an interface, it is the
+same interface on three operating systems, and Windows is verified against the
+code that is actually in the tree rather than against the code that was there
+before segmentation landed.
 **Purpose:** resume this project in a fresh session with no access to the previous
 conversation. Everything load-bearing is here or in the documents it points to.
 **Repo:** `/Users/mba/Desktop/AirUSB Hub` — public at
@@ -21,50 +24,70 @@ records this line).
 | Encryption + authentication | **done** — Noise_XX / Noise_IK, official vectors matched |
 | Session layer, L1 protocol, manifest | **done** |
 | Networking | **done** — real TCP; macOS↔macOS, macOS↔Linux, **Windows↔macOS on two machines** |
-| Windows client | **done** — MSVC 19.51 builds it, 13/13 native, full BOT exchange |
+| Windows client | **done, and re-verified against the CURRENT tree** — MSVC 19.51, 24/24 native, full BOT exchange **with segmentation actually firing** (§3.4) |
+| **The product's window** | **done, and it is the same window on three OSes** — `airusb-hubd`, a loopback control plane and one embedded page. Pairing, attach, verification. §3.9, `GUI.md` |
 | **Receiving on Linux** | **WORKS on real hardware, over the network** — a real 058f:6387 drive captured on the Mac (`airusb-exportd --serve`) mounted on the Linux kernel via `airusb-vhci --host`, read-only, real files read; clean teardown (full L6 + L8 PASS, `LINUX_IMPORTER_PLAN.md` §7) |
 | Receiving on a Mac | **blocked on Apple** — FB24214361, §2 |
 | Receiving on Windows | UdeCx driver not written. **Not blocked by anyone** |
 
 ```
-22 test suites / 0 failures  (was 19; +test_l5_segmentation, test_dataplane, test_netbridge)
+24 test suites / 0 failures  (was 22; +test_control 154 checks, +test_hub_e2e 62)
 3 fuzz targets / 0 crashes / 0 UB findings
 Zero warnings: macOS (Clang, full set), Linux (GCC, ASan+UBSan),
                Windows (MinGW, full set), Windows (MSVC 19.51, /W4 /permissive-)
-NOTE: the MSVC/two-machine Windows runs predate this session's segmentation +
-      async-data-plane changes — re-verify the Windows CLIENT before trusting it (§3.4).
-~30,000 lines ours + 10 vendored files
+~32,000 lines ours + 10 vendored files
 ```
 
-### THE NEXT SESSION: (1) Windows verification, (2) GUI app design
+### What the previous handoff asked for, and what came of it
 
-Two goals, in order. Neither waits on Apple.
+Both items are done. Neither needed Apple.
 
-**1. Windows operation verification (§3.4, §4.3).** This session rewrote the data
-path — it wired segmentation into `ExporterSession` + `RemoteDevicePort` and added
-the async `ImporterDataPlane`. The **Windows CLIENT** (`airusb-net`, portable) uses
-`ExporterSession` and `RemoteDevicePort`, and its last real proof (MSVC 19.51,
-13/13, the two-machine BOT exchange, §3.5) PREDATES those changes. So: re-run the
-Windows CI/MSVC build and the two-machine `airusb-net` run (Windows exporter ↔
-macOS importer, or Windows client ↔ macOS `airusb-net serve`) to confirm
-segmentation and the changed exporter did not regress the Windows path — ideally
-with a transfer big enough to actually segment (>16 640 B). The strict-MinGW build
-of the changed TUs is already clean, but no MSVC build or run has happened since.
-Then, if wanted, the **Windows IMPORTER** (UdeCx `airusb.sys`, §4.4) — unwritten,
-self-service (`bcdedit /set testsigning on`), and now much cheaper because
-`VhciBridge`/`VhciNetBridge` proved the translation-then-async-plane split works
-against a real kernel with no driver; the same split applies to UdeCx.
+**1. Windows verification — DONE, and it found the thing it was meant to find.**
+The instruction was to re-run Windows with "a transfer big enough to actually
+segment (>16 640 B)". It turned out nothing had *ever* segmented end to end, on
+any platform: the write probe's largest run was 16 384 bytes, which fits inside
+the 16 640-byte default record once you subtract the header, body and AEAD tag —
+and the unit test asserting that this run "is big enough to force record
+fragmentation" was asserting the opposite of what it said. The largest run is now
+131 072 bytes, chosen against Noise's 65 519-byte plaintext ceiling so it segments
+at *any* legal record size. `RemoteDevicePort` counts what happened, `airusb-net`
+prints it and FAILS the run if a 128 KiB transfer crossed unsplit, and both CI
+jobs assert `fired=yes`. Windows/MSVC now reports
+`SEGMENTATION out=2 in=2 contRecords=14 maxSegment=16552 largestOut=131072
+fired=yes` alongside `RESULT=PASS`. §3.4.
 
-**2. GUI app design.** `apple/` is a SwiftUI app (device list, detail, eject) that
-today only hosts the entitlement probe (§2.5). Design the real product GUI — pick a
-device to share / to import, show pairing SAS, show attach state — and decide
-cross-platform strategy (SwiftUI for macOS; what for Windows/Linux). Nothing here is
-built yet beyond the probe window.
+**2. The GUI — DONE.** The open question was "SwiftUI for macOS; what for Windows
+and Linux". The answer is one loopback HTTP control plane and one page compiled
+into the binary, because the browser is the only toolkit already present on all
+three machines *and* the only one this project can test on all three. No
+dependency was added. It shares, connects, pairs with the six-digit check,
+attaches and verifies — on macOS, Linux and Windows. Design, security model and
+the two-machine procedure: **`GUI.md`**. Evidence: §3.9.
+
+### THE NEXT SESSION
+
+In order, and none of it waits on Apple:
+
+1. **Two machines, macOS ↔ Windows, with the hub.** Everything else about the hub
+   is verified; this one cannot be, from here — the Windows box has RDP and
+   nothing else. The procedure is written out and ready to paste in `GUI.md`
+   ("Two machines, macOS and Windows"). Measured 2026-08-09: the Mac reaches
+   `192.168.0.109` in ~28 ms via the Tailscale subnet router on `utun8`, and
+   Windows still has no route back — so **Windows shares and the Mac imports**,
+   the same direction §3.5 had to use.
+2. **The hub against real hardware.** `airusb-exportd --serve` already speaks this
+   exact protocol, so pointing the hub's importer at a real captured drive needs
+   no new code — only `sudo` on the Mac, which the assistant does not have. One
+   command each side; see §3.9.
+3. **Windows × Linux (§4.3).** Both halves exist. The routing between the Windows
+   box and the Lima guest has still never been measured.
+4. **The Windows importer, UdeCx (§4.4).** The only remaining large piece, and
+   self-service.
 
 The **Windows box**: `GMKtec 192.168.0.109`, RDP + SMB open, **SSH closed**, on a
 different LAN from the Mac (reached via the `ts-464` subnet router). The assistant
 cannot run anything there — every Windows step is handed to the user as a
-copy-pasteable command (§5).
+copy-pasteable command (§5, `GUI.md`).
 
 ### The Linux importer is DONE — full L6 + L8 on real hardware (2026-08-09)
 
@@ -374,16 +397,31 @@ that direct `g++` line doubles as proof that nothing depends on cmake.
 
 ### 3.4 Windows — exactly what is and is not verified
 
-> **CROSS-DEBUG STATUS (2026-08-09): STALE, RE-VERIFY.** Everything below was true
-> BEFORE this session wired segmentation into `ExporterSession`/`RemoteDevicePort`
-> and added the async `ImporterDataPlane`. The Windows client (`airusb-net`) links
-> `airusb_session`, so it inherits those changes. What HAS been re-checked since:
-> the strict-MinGW compile of the changed TUs is clean. What has NOT: no MSVC build
-> and no run (single-machine or two-machine) since the change. **First Windows task
-> next session: rebuild under MSVC and re-run the two-machine `airusb-net` BOT
-> exchange, with a transfer >16 640 B so segmentation actually fires on the Windows
-> path.** The Linux side proved the same protocol changes correct on a real kernel
-> (§3.7), so a Windows regression would be a platform detail, not a design flaw.
+> **STATUS (2026-08-09): RE-VERIFIED against the current tree. The stale warning
+> that used to be here is discharged.** MSVC 19.51 builds every portable target,
+> runs 24/24 suites natively, completes a loopback BOT exchange read AND write,
+> and — the part that was missing — **segments a 128 KiB transfer while doing it**:
+>
+> ```
+> 100% tests passed out of 24
+> verdict=PASS  outTransfers=5 largestOut=131072 bytesWritten=281088 mismatched=0
+> SEGMENTATION out=2 in=2 contRecords=14 maxSegment=16552 largestOut=131072 fired=yes
+> RESULT=PASS
+> PASS: a USB Mass Storage exchange completed on Windows, segmented.
+> ```
+>
+> And separately, the window: two `airusb-hubd` processes on the Windows runner
+> pair with each other through the control API — all three guard refusals
+> provoked, exporter-first (the order that tears the session down mid-decision),
+> reconnect with a new SAS matching on both sides, attach, `probe verdict=PASS`.
+>
+> **What made the difference is not that the job was re-run.** Nothing had ever
+> segmented end to end: the largest transfer any run had carried was 16 384 bytes,
+> which fits in one 16 640-byte record, and the unit test claiming otherwise was
+> wrong. Re-running the old job would have produced the old green tick. See §0.
+>
+> Still not verified on Windows: the two-machine run, and the clock's behaviour
+> across sleep. Both need the physical box (§5).
 
 `mingw-w64` is installed via Homebrew. `scripts/cross-build-windows.sh` produces a
 statically linked `airusb-net.exe` (PE32+ x86-64).
@@ -650,6 +688,88 @@ to it.
 
 ---
 
+### 3.9 The window, and what it has actually done — 2026-08-09
+
+`airusb-hubd` is a loopback HTTP control plane plus one page compiled into the
+binary. Full design, security model and the copy-pasteable two-machine procedure:
+**[`GUI.md`](GUI.md)**. Only the evidence and the traps are here.
+
+**macOS ↔ Linux, over the real network, both directions, by hand.**
+Mac (`airusb-hubd --share --share-port 7751`) ↔ Lima `airusb` guest
+(`--host host.lima.internal`):
+
+```
+SAS 486844 on BOTH windows; the Mac named the Linux hub's fingerprint exactly
+  V6VJE4PE POZDK4MO LVYOMORI WVJ6IN5Z
+macOS accepted FIRST — the hard order — pinned, and dropped the session
+Linux reconnected by itself with a NEW number, 428174, and the Mac showed the
+  same 428174 as its session number rather than as a question
+Linux accepted, attached, verified:
+  PASS  058f:6387 Super(5G)  'AirUSB' 'Scripted Device'  61440 x 512  rtt 2032 us
+Reverse (Linux shares on 7752, Mac imports through Lima's forward): PASS, rtt 5453 us
+```
+
+The reverse direction went straight to `connected` with no prompt, correctly:
+pins are per identity pair, not per direction.
+
+**Interop — the hub is not merely talking to itself.** Both directions against
+the pre-existing `airusb-net`: hub importer ← `airusb-net serve` gives
+`BotProbe PASS, 61440 x 512`; and `airusb-net --write-test` → hub share gives
+`RESULT=PASS` with `SEGMENTATION out=2 in=2 largestOut=131072 fired=yes`. The
+hub's exporter half therefore handles segmented 128 KiB transfers too.
+
+**The pairing ceremony is the hard part, and the reason it works is written
+down.** The SAS comes from the handshake hash, so it differs every session and
+both people must compare the SAME session's number — but the exporter's grants
+are read at handshake time, so the instant it pins a peer it MUST end the
+session. Together those guarantee a tear-down mid-pairing, every time, and
+whether that recovers depends on who pressed first. The resolution: the importer
+pins **without** dropping (it authorises nothing, so nothing it decided is
+stale), the exporter pins **and** drops, the importer reconnects by itself, and
+both windows show the current session's number at all times. `test_hub_e2e` runs
+both orders over real TCP on all three platforms.
+
+**Two defects this work found in the existing code, both now fixed:**
+
+- `ImporterClient::call()` and `RemoteDevicePort::submit()` spun on `Busy`
+  **for ever**. A peer that accepted a connection and then stopped answering hung
+  the caller — invisible in a command-line tool that exits, fatal in a daemon
+  that also serves a window from the same thread. They now use `T_net_ctrl` and
+  `T_urb_wd_imp` from the project's own timeout table.
+- The window asked "do these six digits match?" with **no number under it** for
+  about a second, on every first pairing, because the drop cleared the SAS but
+  left the state at "awaiting approval". A one-second window that repairs itself
+  — so it would have survived every manual test. The previous CI run recorded it
+  happening on Windows before the fix landed:
+  `importer awaiting-approval sas=287034` / `sas=` / `sas=` / `sas=058752`.
+  It matters because a person trained to answer a security question while looking
+  at nothing has lost the whole value of the ceremony.
+
+**Traps worth keeping:**
+
+- **Do not probe the sharing port with `nc -z` or `Test-NetConnection`.** §3.5
+  recorded this for `airusb-net`; it applies to the hub and was reproduced on
+  2026-08-09. A bare TCP connect is *accepted* and enters the handshake, so a
+  probe occupies the hub's single peer slot. It is reclaimed after twenty seconds
+  by the handshake deadline, as designed — but the twenty seconds are real.
+- **`mv` preserves mtime, so `make` can skip the rebuild.** The first attempt to
+  prove the blank-SAS regression test bit was measuring a stale object file and
+  reported the fixed tree as still broken. `touch` after restoring a file.
+- The exporter now runs its `ExporterSession` for **unpaired** peers as well,
+  which is what §3.14 always specified: PING answered, LIST_DEVICES refused. It
+  had to change — without it, a machine that has not approved you yet is
+  indistinguishable from one that has gone away, and the pairing heartbeat has to
+  tell those apart.
+
+**Not yet done with the hub:** the two-machine macOS ↔ Windows run (§5 — needs the
+user), and pointing it at real hardware. The second needs no code:
+`airusb-exportd --serve` speaks this protocol already, so
+`sudo ./build/airusb-exportd --device 058f:6387 --serve --port 7714` plus
+`./build/airusb-agent` on the Mac, and Connect from any hub, reads a real drive
+through the window. `sudo` is blocked for the assistant, so it is a user step.
+
+---
+
 ## 4. THE WORK QUEUE while Apple decides
 
 Apple's answer has no timeline and may be "no". **Nothing in this section waits on
@@ -767,8 +887,15 @@ resets.
 
 ### 4.2 macOS × Windows — as far as it can currently go
 
-The protocol half is **done and measured** (§3.6). It cannot go further until the
-Windows importer exists, and that is §4.4.
+The protocol half is **done and measured** (§3.6), and since 2026-08-09 the
+Windows half is measured against the *current* tree rather than a pre-segmentation
+one (§3.4). The one thing outstanding that does not need the UdeCx driver is the
+**two-machine run with the hub**, which needs the physical box: `GUI.md` has the
+procedure ready to paste, and the direction is forced — Windows shares, the Mac
+imports, because Windows still has no route back to the Mac.
+
+Beyond that it cannot go further until the Windows importer exists, and that is
+§4.4.
 
 There is one cheap, unblocked follow-up: the Windows box currently serves a
 simulated device only. A **Windows exporter for real hardware** (WinUSB/UsbDk
@@ -925,7 +1052,15 @@ airusb/
                SEPARATE type so that promise stays absolute rather than becoming
                conditional on a flag. Test instruments, NOT the data path;
                nothing in core/protocol/transport includes them
+  control/     THE PRODUCT'S WINDOW, and the same one on three OSes. Json (a
+               writer whose only door escapes, and a reader that accepts exactly
+               one shape), HttpServer (loopback-only, no filesystem anywhere in
+               it, guard as a pure function), HubState (the pairing ceremony —
+               read its header before changing anything), ControlApi (the routes),
+               WebUi (the page, in chunks so no single string literal can hit
+               MSVC's limit), SimulatedDeviceSource
   tools/       airusb_net_main — serve/connect over a real socket
+               airusb_hubd_main — the daemon behind the window. No root, ever
   platform/macos/  StatusMapMacos, MacUsbCommon, DiskGuard, AgentUsbIo,
                HostDeviceExporter (an IUsbDevicePort), airusb_exportd_main
                (+ NEW `--serve`: TCP ExporterSession over the captured real drive),

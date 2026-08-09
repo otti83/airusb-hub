@@ -27,8 +27,14 @@ entitlement (see below).
 | Sharing a device from a Mac | **works on real hardware** |
 | Encryption and authentication | **done** — Noise_XX / Noise_IK |
 | Networking, cross-platform | **done** — a USB exchange runs macOS↔macOS and macOS↔Linux over TCP |
+| **Receiving a device on Linux** | **done** — a real drive on a Mac, enumerated by the Linux kernel over the network, filesystem mounted |
+| **An interface** | **done** — one window, the same on macOS, Linux and Windows: [`docs/GUI.md`](docs/GUI.md) |
 | Receiving a device on a Mac | **blocked** — awaiting Apple, FB24214361 |
-| Receiving on Windows / Linux | client works; the driver half is next |
+| Receiving on Windows | client works; the UdeCx driver half is next, and needs nobody's permission |
+
+```bash
+airusb-hubd        # prints a local address; open it
+```
 
 ---
 
