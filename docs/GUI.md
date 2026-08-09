@@ -163,9 +163,18 @@ for the same reason.
 ### Step 0 — get `airusb-hubd.exe` onto the Windows machine
 
 **Read this step. It is the one that used to be missing**, and without it the rest
-is a procedure for running a file that does not exist. There is nothing to
-install — the binary is statically linked, needs no runtime, no Visual C++
-redistributable and no Python. It is one file. Pick whichever route suits.
+is a procedure for running a file that does not exist. It is one file either way;
+the two builds differ in what they expect the machine to already have, and the
+difference is measured rather than assumed — these are the DLLs each one imports:
+
+| | size | needs |
+|---|---|---|
+| **MinGW** (`scripts/cross-build-windows.sh`) | 13 MB | `bcrypt` · `kernel32` · `ws2_32` · UCRT — all part of Windows 10 and later. **Nothing to install.** |
+| **MSVC** (the CI artifact) | 347 KB | the above **plus `MSVCP140.dll`, `VCRUNTIME140.dll`, `VCRUNTIME140_1.dll`** — the Visual C++ 2015–2022 x64 redistributable |
+
+The GMKtec already has that redistributable: it ran an MSVC-built `airusb-net.exe`
+during the two-machine run in `HANDOFF.md` §3.5. On a machine where that is not
+known, take the MinGW one.
 
 **Route A — copy it from the Mac over SMB.** Fastest, because the Mac can already
 build it. Measured 2026-08-09: `192.168.0.109` answers on 445 (SMB) and 3389
@@ -181,13 +190,14 @@ open build-win                            # then drag it to the mounted share
 
 Mount the share first with **Finder → Go → Connect to Server →
 `smb://192.168.0.109`**, or from an RDP session copy it out of a folder you share
-back. The cross-compiled binary is MinGW-built; it is the same sources and the
-same protocol as the MSVC build, and the MinGW build is exercised by CI on every
+back. This binary is the MinGW one from the table above: same sources, same
+protocol, nothing to install on the far side, and CI cross-builds it on every
 commit.
 
 **Route B — download the MSVC build from CI.** This is the binary the Windows job
-actually tested, which is the stronger provenance. In a browser **on the Windows
-machine**, signed in to GitHub:
+actually tested, which is the stronger provenance — at the cost of the runtime
+dependency in the table above. In a browser **on the Windows machine**, signed in
+to GitHub:
 
 <https://github.com/otti83/airusb-hub/actions/workflows/ci.yml> → the newest
 green run → **Artifacts** → `airusb-windows-msvc-x64` → unzip. It contains
