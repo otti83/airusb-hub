@@ -94,3 +94,31 @@ clang++ -std=c++20 -g -O1 -fsanitize="$SAN" \
 echo
 echo "running ${RUNS} executions over ${NOISE_CORPUS} (sanitizers: ${SAN})"
 ./build/fuzz_noise -max_len=4096 -runs="${RUNS}" -print_final_stats=1 "$NOISE_CORPUS"
+
+# ---------------------------------------------------------------------------
+# The kernel/user ABI (W1).
+#
+# The worst blast radius of the four. The others parse bytes from a network peer
+# into a user-mode process; this one parses bytes from an UNPRIVILEGED LOCAL
+# PROCESS into a kernel-mode driver, so a missed bound is kernel memory
+# corruption reachable from a normal account. The machine that would find it is
+# reachable only by RDP and costs a reboot per iteration, which is the entire
+# argument for fuzzing it here instead.
+#
+# It also asserts round-tripping, not merely absence of crashes: anything the
+# decoder accepts must re-encode to the identical bytes. A decoder that
+# normalises accepts two spellings of one record, and two ends that disagree
+# about what was said is the failure this format exists to prevent.
+# ---------------------------------------------------------------------------
+UDECX_CORPUS="${5:-tests/vectors/corpus_udecxipc}"
+mkdir -p "$UDECX_CORPUS"
+
+clang++ -std=c++20 -g -O1 -fsanitize="$SAN" \
+    -fno-sanitize-recover=undefined \
+    tests/fuzz/fuzz_udecxipc.cpp \
+    platform/windows/UdecxIpc.cpp core/Status.cpp core/UsbTypes.cpp \
+    -o build/fuzz_udecxipc
+
+echo
+echo "running ${RUNS} executions over ${UDECX_CORPUS} (sanitizers: ${SAN})"
+./build/fuzz_udecxipc -max_len=4096 -runs="${RUNS}" -print_final_stats=1 "$UDECX_CORPUS"

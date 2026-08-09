@@ -191,6 +191,7 @@ target_link_libraries(airusb_linux_usbip PUBLIC airusb_core airusb_transport air
 # ---------------------------------------------------------------------------
 add_library(airusb_windows_udecx STATIC
     platform/windows/WindowsUsb.cpp
+    platform/windows/UdecxIpc.cpp
 )
 target_link_libraries(airusb_windows_udecx PUBLIC airusb_core)
 

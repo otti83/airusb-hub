@@ -158,7 +158,7 @@ implementation that only talks to itself can be perfectly self-consistent and
 completely wrong.
 
 ```
-25 test suites, 0 failures      3 fuzz targets, 0 crashes
+26 test suites, 0 failures      4 fuzz targets, 0 crashes
 CI on every commit: macOS/Clang · Linux/GCC+ASan+UBSan · Windows/MSVC · MinGW cross-build
 zero warnings under -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow,
 and under MSVC /W4 /permissive-

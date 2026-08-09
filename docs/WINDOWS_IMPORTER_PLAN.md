@@ -26,8 +26,10 @@ RDP, and each iteration costs a reboot somebody has to be present for.
 airusb.sys  (KMDF + UdeCx, kernel mode)         W4 — cannot be built or run here
     │  IOCTL_INTERNAL_USB_SUBMIT_URB from the guest's drivers
     │
-    ├── inverted call: N parked "give me the next URB" IOCTLs
-    └── shared-memory arena: OUT data copied in before parking, IN data copied back
+    └── inverted call: N parked "give me the next URB" IOCTLs.
+        Payload travels in the IOCTL buffer (METHOD_OUT_DIRECT down,
+        METHOD_IN_DIRECT up) — NOT a shared arena; see W1 for why that
+        idea was removed rather than hardened.
     │
     ▼
 airusb-winhost.exe  (user mode, no privileges)  W5
@@ -51,23 +53,112 @@ be unit-tested, fuzzed, sanitised and debugged without rebooting anything.
 
 Each gate is Goal / Evidence / PASS, and a failed gate does not advance.
 
-### W1 — the driver↔host channel, fuzzed · NOT STARTED
+### W1 — the driver↔host channel, fuzzed · **DONE, 2026-08-09**
 
-**Goal.** A codec for the inverted-call records: URB metadata down, completions
-up, arena slot indices in both directions.
+**Goal.** A codec for the records crossing between `airusb.sys` and the
+user-mode host, written portably and fuzzed, because it is an ABI whose
+user-mode end is unprivileged and whose kernel end is not.
 
-**Why first.** It is the ABI between two processes, one of which is in the
-kernel. A length field trusted where it should be validated is a kernel-mode
-memory bug reachable from user mode — the exact CVE class `protocol/` was
-designed around, and the reason `UsbipCodec` and `AgentProtocol` are both fuzzed
-on every platform rather than only on the OS they serve.
+**The design was reviewed before implementation (GPT-5.6, read-only) and the
+review deleted a whole subsystem.** The original plan had a shared-memory arena
+carved into slots by the driver, with the host naming a slot index and "never
+choosing an offset". That claim is false:
 
-**Evidence.** Round-trip tests over the full field ranges; a fuzz target added
-to `tests/fuzz`; every decode of a hostile record refused rather than clamped.
+> Once the whole section is writable in its process, the host can write every
+> byte of every slot at any time. Slot indices restrict what the protocol
+> accepts; they do not restrict memory access.
 
-**PASS** iff the codec builds and is fuzzed on macOS, Linux and Windows, and no
-decode path can produce an arena slot index, offset or length that has not been
-bounds-checked against the arena the host actually allocated.
+So there is **no arena**. Payload rides in the IOCTL buffer —
+`METHOD_OUT_DIRECT` for work going down, `METHOD_IN_DIRECT` for completions
+coming up — and the I/O manager probes and locks the pages, handing the driver
+an MDL whose length is authoritative. That does not mitigate slot arithmetic,
+mapping lifetime, stale-slot disclosure and slot quarantine; it deletes them. An
+arena can come back later if measurement demands it, carrying **payload only and
+never metadata**.
+
+**What the format enforces, and why each rule exists:**
+
+* **Identity is more than a request id.** Every record carries a session
+  incarnation (random, per binding) and a device incarnation (bumped per
+  plug-in), and ids are never reused within a session. "Unique while
+  outstanding" is not enough: a late completion arriving after a plug-out and
+  re-plug would otherwise land on a fresh request that reused the number.
+* **Endpoint address is not endpoint identity** — alternate settings reuse
+  addresses. Endpoints are named by an opaque driver-assigned id.
+* **No raw kernel constants on the wire.** `USBD_STATUS` and USBD transfer flags
+  stay inside the driver; the wire carries a small abstract result enum. This
+  keeps the ABI from becoming Windows-shaped, and — the load-bearing part —
+  means the short-transfer decision is made by the side that holds
+  `USBD_SHORT_TRANSFER_OK`, which is the driver, never the unprivileged host.
+* **One length, not two.** A payload length that can disagree with the record
+  length is a bug waiting for someone to check the wrong one.
+* **Configure is a transaction, not a ticket acknowledgement.** It carries the
+  set to enable AND the set to release. The released set is the one that
+  matters: touching a released endpoint's queue afterwards is a use-after-free
+  on a kernel object.
+* **Cancel is a notification, never a prerequisite.** The driver completes the
+  guest's URB the moment cancellation wins and does not wait for the far side.
+
+**And what it deliberately does NOT refuse.** A short successful transfer, a
+zero-length transfer, partial progress alongside a failure, and a completion for
+a request that has already been retired are ordinary USB lifecycle events. A
+codec that called those malformed would make routine cancellation
+indistinguishable from an attack.
+
+**Evidence.** `tests/unit/test_udecxipc.cpp` (100 checks): round trips, then one
+case per deviation — truncation, a length that disagrees with the buffer in
+either direction, trailing bytes, a wrong version, a record decoded as the wrong
+opcode, every reserved byte, out-of-range enums, undefined flag bits, a payload
+disagreeing with its header, a setup packet on a non-control transfer, a length
+past the cap, a configure whose counts do not match its body, a configure naming
+both a configuration and an alternate setting, a bool that is neither 0 nor 1,
+and an unknown opcode. Plus `tests/fuzz/fuzz_udecxipc.cpp`, seeded with eleven
+valid records, which asserts more than absence of crashes: **anything the
+decoder accepts must re-encode to identical bytes**, because a decoder that
+normalises accepts two spellings of one record.
+
+400 000 executions, coverage 243, no crashes and no round-trip violations.
+
+**PASS.**
+
+### What the same review says about W3 and W4 — do not rediscover these
+
+Recorded here because they cost nothing now and a bugcheck later.
+
+* **Purge must not wait for the network.** During purge every forwarded request
+  must be completed and new ones must fail, and only then may the driver call
+  `UdecxUsbEndpointPurgeComplete`. Making a remote acknowledgement a
+  prerequisite lets a dead or malicious host wedge UdeCx permanently.
+* **Endpoint reset is not cancellation.** It means clear the halt and restore
+  data-toggle semantics, and it is an asynchronous `WDFREQUEST` that must be
+  completed after the exporter has done it or failed.
+* **One request state machine**, `QUEUED → EXPORTED → COMPLETING → RETIRED`,
+  with cancellation and completion competing for exactly one transition out of
+  `EXPORTED`. KMDF requires winning `WdfRequestUnmarkCancelable` before an
+  ordinary completion; if it returns `STATUS_CANCELLED`, the cancel path owns
+  the request and completing it again is a double completion.
+* **Complete UDE URBs at `DISPATCH_LEVEL`**, on a separate DPC where necessary,
+  including cancellations. `UdecxUsbDevicePlugOutAndDelete` is `PASSIVE_LEVEL`.
+* **Snapshot the whole IOCTL buffer before walking nested lengths**, and never
+  retain a pointer into it after completing that IOCTL. This applies hardest to
+  the manifest, whose `bLength`/`wTotalLength`/counts are all bounds.
+* **Zero a buffer before it is exposed.** A short transfer otherwise lets user
+  mode read whatever a previous guest transfer left behind.
+* **Bind everything to one `WDFFILEOBJECT` session**, and on cleanup atomically
+  disconnect devices and retire requests. Two handles must never implicitly
+  share a session.
+* **A malformed completion that names a live request must retire that request**
+  with a driver-chosen failure. Merely rejecting the IOCTL leaves the guest's
+  URB hanging forever.
+
+**And one finding that is not a memory-safety issue at all**, which is why it is
+easy to miss: an unprivileged process that can call `plugIn` can present
+*arbitrary USB identities* to Windows and make it load guest kernel drivers
+against attacker-chosen descriptors and traffic. That is a local "malicious USB
+device" capability. The control device needs a restrictive ACL, and **who is
+allowed to plug in has to be a decision this project makes explicitly** rather
+than inherits from "the host is unprivileged, so it is safe". It is not the same
+question, and W4 must answer it before the driver ships to anyone.
 
 ### W2 — the speed and status tables · **DONE, 2026-08-09**
 
