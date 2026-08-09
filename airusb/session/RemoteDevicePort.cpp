@@ -1,6 +1,7 @@
 #include "RemoteDevicePort.h"
 
 #include "../core/Watchdog.h"
+#include "../protocol/Segmentation.h"
 #include "../protocol/Validate.h"
 
 #include <cstring>
@@ -29,6 +30,8 @@ Status RemoteDevicePort::submit(std::uint8_t epAddr, std::uint8_t xferType,
     if (actualLen) *actualLen = 0;
     if (!_link) return Status::TransportLost;
 
+    const bool isOut = (dir == static_cast<std::uint8_t>(wire::Dir::Out));
+
     SubmitBody sb;
     sb.epAddr    = epAddr;
     sb.xferType  = xferType;
@@ -37,36 +40,42 @@ Status RemoteDevicePort::submit(std::uint8_t epAddr, std::uint8_t xferType,
     sb.timeoutMs = static_cast<std::uint32_t>(watchdog::kUrbCeilingBulk);
     if (setup) std::memcpy(sb.setup, setup, 8);
 
-    std::vector<std::uint8_t> body;
-    encodeSubmit(sb, body);
-    if (dir == static_cast<std::uint8_t>(wire::Dir::Out))
-        body.insert(body.end(), dataOut.begin(), dataOut.end());
+    std::vector<std::uint8_t> submitBody;
+    encodeSubmit(sb, submitBody);
 
     const std::uint64_t rid = ++_requestId;
 
-    Header h;
-    h.type      = static_cast<std::uint8_t>(wire::Type::Submit);
-    h.flags     = wire::kFlagSegFirst;
+    Header base;
+    base.type      = static_cast<std::uint8_t>(wire::Type::Submit);
     // §3.4: the channel is derived, never negotiated. Both peers compute it
     // identically, which is what removes the per-endpoint open round trip that
     // the Linux vhci shim could not have provided anyway.
-    h.channel   = static_cast<std::uint16_t>((_attachSlot << 8) | epAddr);
-    h.attachId  = _attachId;
-    h.requestId = rid;
-    h.bodyLen   = static_cast<std::uint32_t>(body.size());
-    // total_len is the DATA payload only: buffer_len on OUT, nothing on IN.
-    h.totalLen  = (dir == static_cast<std::uint8_t>(wire::Dir::Out)) ? bufferLen : 0;
+    base.channel   = static_cast<std::uint16_t>((_attachSlot << 8) | epAddr);
+    base.attachId  = _attachId;
+    base.requestId = rid;
+    base.status    = 0;
 
-    std::vector<std::uint8_t> rec;
-    encodeHeader(h, rec);
-    rec.insert(rec.end(), body.begin(), body.end());
+    // The DATA payload is buffer_len bytes on OUT and nothing on IN; that is what
+    // gets segmented. The 40-byte SubmitBody rides on record 0 only. A transfer
+    // that fits in one record emits exactly one record — the common case is
+    // unchanged.
+    const std::span<const std::uint8_t> outData =
+        isOut ? dataOut : std::span<const std::uint8_t>{};
 
-    if (const Status s = _link->sendRecord(rec); s != Status::Ok) return s;
+    const std::uint32_t maxPlain = _link->maxPlaintextBytes();
+    if (maxPlain <= wire::kHeaderSize + wire::kBodySubmit) return Status::Internal;
+    const std::uint32_t maxSeg = maxPlain - static_cast<std::uint32_t>(wire::kHeaderSize)
+                                          - static_cast<std::uint32_t>(wire::kBodySubmit);
+
+    if (const Status s = emitTransfer(base, submitBody, outData, maxSeg,
+            [this](std::span<const std::uint8_t> rec) { return _link->sendRecord(rec); });
+        s != Status::Ok)
+        return s;
     if (const Status s = _link->flush(); s != Status::Ok) return s;
 
     ++_issued;
 
-    // ---- wait for the COMPLETE ---------------------------------------------
+    // ---- wait for record 0 of the COMPLETE ---------------------------------
     std::vector<std::uint8_t> in;
     for (;;) {
         const Status r = _link->receiveRecord(in);
@@ -94,20 +103,69 @@ Status RemoteDevicePort::submit(std::uint8_t epAddr, std::uint8_t xferType,
     if (!decodeComplete(rbody, cb)) return Status::MalformedFrame;
 
     Limits lim;
-    lim.maxRecordBytes = _link->maxRecordBytes();
-    const auto payload = rbody.subspan(wire::kBodyComplete);
-    if (auto v = validateComplete(rh, cb, payload, lim); !v.ok()) return v.status;
+    lim.maxRecordBytes   = _link->maxRecordBytes();
+    lim.maxTransferBytes = bufferLen;
+    const auto firstChunk = rbody.subspan(wire::kBodyComplete);
+    if (auto v = validateComplete(rh, cb, firstChunk, lim); !v.ok()) return v.status;
 
     // R5 at the copy site, not only in the validator. This is the check that
     // stops a buggy or hostile exporter overrunning a buffer whose size OUR
     // kernel chose — CVE-2016-3955 class, and the reason R5 is asserted twice.
+    // It must bound the FULL transfer before we reassemble anything.
     if (cb.actualLen > bufferLen) return Status::XferOverrun;
-    if (cb.payloadLen > payload.size()) return Status::MalformedFrame;
 
     if (dir == static_cast<std::uint8_t>(wire::Dir::In)) {
         if (cb.payloadLen > bufferLen) return Status::XferOverrun;
-        dataIn.assign(payload.begin(),
-                      payload.begin() + static_cast<std::ptrdiff_t>(cb.payloadLen));
+
+        if (!rh.segMore()) {
+            // The whole payload is in this one record — the common small case,
+            // byte-for-byte the behaviour before segmentation existed.
+            if (cb.payloadLen > firstChunk.size()) return Status::MalformedFrame;
+            dataIn.assign(firstChunk.begin(),
+                          firstChunk.begin() + static_cast<std::ptrdiff_t>(cb.payloadLen));
+        } else {
+            // Segmented: reassemble the payload across the Data continuations and
+            // hand nothing up until it is whole. One transfer is outstanding, so
+            // the arena and in-flight caps are as tight as they can be.
+            Reassembler::Limits rl;
+            rl.maxTransferBytes = bufferLen;
+            rl.arenaBytes       = bufferLen;
+            rl.maxInFlight      = 1;
+            Reassembler ra(rl);
+
+            Status e = Status::Ok;
+            Reassembler::Outcome o = ra.accept(rh, firstChunk, e);
+            if (o == Reassembler::Outcome::Rejected) return e;
+
+            std::vector<std::uint8_t> dr;
+            while (o == Reassembler::Outcome::NeedMore) {
+                for (;;) {
+                    const Status r = _link->receiveRecord(dr);
+                    if (r == Status::Busy) continue;
+                    if (r != Status::Ok) return r;
+                    if (!dr.empty()) break;
+                }
+                Header dh;
+                if (!decodeHeader(dr, dh)) return Status::MalformedFrame;
+                if (dr.size() - wire::kHeaderSize < dh.bodyLen) return Status::MalformedFrame;
+                // A continuation is a Data record on the exact same (channel,
+                // request_id); anything else on this stream means the framing is
+                // misaligned, and with one transfer outstanding there is no other
+                // legitimate id to see.
+                if (dh.type != static_cast<std::uint8_t>(wire::Type::Data))
+                    return Status::MalformedFrame;
+                if (dh.channel != rh.channel || dh.requestId != rid)
+                    return Status::MalformedFrame;
+                if (auto v = validateHeader(dh, dr.size() - wire::kHeaderSize, lim); !v.ok())
+                    return v.status;
+
+                const auto dbody = std::span<const std::uint8_t>(dr)
+                                      .subspan(wire::kHeaderSize, dh.bodyLen);
+                o = ra.accept(dh, dbody, e);
+                if (o == Reassembler::Outcome::Rejected) return e;
+            }
+            dataIn = ra.take(rh);
+        }
     }
     if (actualLen) *actualLen = cb.actualLen;
 

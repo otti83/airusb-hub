@@ -82,6 +82,18 @@ public:
                        std::uint32_t negotiatedMaxRecordBytes);
     std::uint32_t maxRecordBytes() const noexcept { return _maxRecord; }
 
+    /// The most PLAINTEXT body bytes a single record can carry: the record
+    /// ceiling minus this cipher's per-record overhead. Segmentation sizes its
+    /// records against this rather than maxRecordBytes(), because sendRecord()
+    /// rejects a body whose size plus overhead exceeds the ceiling — so a
+    /// segmenter that used the full ceiling would have every largest record
+    /// bounce back LimitExceeded under a real (non-null) cipher.
+    std::uint32_t maxPlaintextBytes() const noexcept
+    {
+        const std::size_t oh = _cipher ? _cipher->overhead() : 0;
+        return _maxRecord > oh ? _maxRecord - static_cast<std::uint32_t>(oh) : 0;
+    }
+
     /// Drains whatever is buffered for sending. Returns Ok when the buffer is
     /// empty. A partial flush is normal on a non-blocking socket.
     Status flush();

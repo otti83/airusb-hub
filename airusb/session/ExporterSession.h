@@ -26,6 +26,7 @@
 #include "../core/IUsbDevicePort.h"
 #include "../core/Status.h"
 #include "../protocol/Messages.h"
+#include "../protocol/Segmentation.h"
 
 #include <cstdint>
 #include <functional>
@@ -100,8 +101,23 @@ private:
     Status handleAttach(const protocol::Header& h, std::span<const std::uint8_t> body);
     Status handleDetach(const protocol::Header& h, std::span<const std::uint8_t> body);
     Status handleSubmit(const protocol::Header& h, std::span<const std::uint8_t> body);
+    Status handleData(const protocol::Header& h, std::span<const std::uint8_t> body);
     Status handleClearHalt(const protocol::Header& h);
     Status handlePing(const protocol::Header& h, std::span<const std::uint8_t> body);
+
+    /// Issues one fully-assembled transfer to the device and answers with a
+    /// COMPLETE, segmenting the reply across records when the IN payload exceeds
+    /// one. `reqHeader` supplies the channel/request id the reply must echo (and
+    /// the type an ERROR would reference). `dataOut` is the ENTIRE OUT payload —
+    /// reassembled first for a segmented transfer, so the device sees exactly one
+    /// logical transfer and never a segment boundary that would inject a short
+    /// packet.
+    Status completeSubmit(const protocol::Header& reqHeader,
+                          const protocol::SubmitBody& sb,
+                          std::span<const std::uint8_t> dataOut);
+
+    /// Drops any half-received segmented OUT transfer and releases its arena.
+    void resetReassembly() noexcept;
 
     Status sendRecord(std::span<const std::uint8_t> record);
     Status sendSimple(wire::Type type, Status status, std::uint64_t requestId,
@@ -130,6 +146,16 @@ private:
     std::uint64_t _handled   = 0;
     std::uint64_t _transfers = 0;
     ContinuousNs  _lastHeardNs = 0;
+
+    /// A segmented OUT transfer being reassembled. The session is one-transfer-
+    /// at-a-time today (the pipelined data plane is P2.9/L6), so at most one is
+    /// in flight and a single pending slot is enough. The device is not touched
+    /// until `_rx` reports the payload complete.
+    bool               _rxActive    = false;
+    std::uint16_t      _rxChannel   = 0;
+    std::uint64_t      _rxRequestId = 0;
+    protocol::SubmitBody _rxSb;
+    protocol::Reassembler _rx;
 
     /// Retired attach ids are quarantined for 60 s (§3.8 step 8) so a late
     /// message from a torn-down attach cannot be mistaken for a live one.

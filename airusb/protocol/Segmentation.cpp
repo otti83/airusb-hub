@@ -30,6 +30,52 @@ std::vector<SegmentPlan> planSegments(std::uint32_t totalLen, std::uint32_t maxS
     return out;
 }
 
+Status emitTransfer(const Header& base,
+                    std::span<const std::uint8_t> fixedBody,
+                    std::span<const std::uint8_t> data,
+                    std::uint32_t maxSegmentBytes,
+                    const std::function<Status(std::span<const std::uint8_t>)>& send)
+{
+    if (maxSegmentBytes == 0) return Status::BadArgument;
+
+    const std::uint32_t total = static_cast<std::uint32_t>(data.size());
+    const std::vector<SegmentPlan> plan = planSegments(total, maxSegmentBytes);
+
+    std::vector<std::uint8_t> rec;
+    for (std::size_t i = 0; i < plan.size(); ++i) {
+        const SegmentPlan& s = plan[i];
+
+        Header h    = base;
+        h.segOffset = s.offset;
+        h.totalLen  = total;
+        h.flags     = static_cast<std::uint8_t>((s.first ? wire::kFlagSegFirst : 0) |
+                                                (s.more  ? wire::kFlagSegMore  : 0));
+
+        const bool carriesFixedBody = (i == 0);
+        if (carriesFixedBody) {
+            h.bodyLen = static_cast<std::uint32_t>(fixedBody.size()) + s.length;
+        } else {
+            // Continuations are pure payload: a Data record with no fixed body and
+            // status 0 (validateHeader rejects a non-zero status on a non-response
+            // type). The transfer's real status rode on record 0's header.
+            h.type    = static_cast<std::uint8_t>(wire::Type::Data);
+            h.status  = 0;
+            h.bodyLen = s.length;
+        }
+
+        rec.clear();
+        encodeHeader(h, rec);
+        if (carriesFixedBody)
+            rec.insert(rec.end(), fixedBody.begin(), fixedBody.end());
+        rec.insert(rec.end(),
+                   data.begin() + static_cast<std::ptrdiff_t>(s.offset),
+                   data.begin() + static_cast<std::ptrdiff_t>(s.offset + s.length));
+
+        if (const Status st = send(rec); st != Status::Ok) return st;
+    }
+    return Status::Ok;
+}
+
 // ---------------------------------------------------------------------------
 
 Reassembler::Outcome Reassembler::accept(const Header& h,
@@ -180,6 +226,15 @@ void Reassembler::forgetChannel(std::uint16_t channel)
         } else {
             ++it;
         }
+    }
+}
+
+void Reassembler::forget(std::uint16_t channel, std::uint64_t requestId)
+{
+    const auto it = _partial.find(Key{ channel, requestId });
+    if (it != _partial.end()) {
+        _held -= it->second.bytes.size();
+        _partial.erase(it);
     }
 }
 

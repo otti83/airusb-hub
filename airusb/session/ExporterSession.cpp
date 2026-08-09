@@ -112,8 +112,12 @@ Status ExporterSession::pump()
         if (r != Status::Ok) {
             if (r == Status::TransportLost) {
                 // §7.3: silence does NOT release the capture. The device stays
-                // held until an explicit detach or the lease timer expires.
+                // held until an explicit detach or the lease timer expires. A
+                // half-received segmented OUT is dropped, though — the device was
+                // never touched, so there is nothing to unwind, and a resuming
+                // peer re-submits from the start.
                 if (_state == State::Leased) _state = State::Orphaned;
+                resetReassembly();
             }
             return r;
         }
@@ -167,6 +171,7 @@ Status ExporterSession::handle(const Header& h, std::span<const std::uint8_t> bo
         case wire::Type::Attach:      return handleAttach(h, body);
         case wire::Type::Detach:      return handleDetach(h, body);
         case wire::Type::Submit:      return handleSubmit(h, body);
+        case wire::Type::Data:        return handleData(h, body);
         case wire::Type::EpClearHalt: return handleClearHalt(h);
 
         case wire::Type::Goodbye:
@@ -307,6 +312,10 @@ Status ExporterSession::handleDetach(const Header& h, std::span<const std::uint8
     if (_state != State::Leased && _state != State::Orphaned)
         return refuse(h, Status::NotFound, "Nothing is attached.");
 
+    // Any half-received segmented OUT dies with the attach; the device never saw
+    // it, so there is nothing to drain on its behalf.
+    resetReassembly();
+
     _state = State::Draining;
 
     // With one transfer in flight at a time there is nothing to drain yet. When
@@ -372,6 +381,82 @@ Status ExporterSession::handleSubmit(const Header& h, std::span<const std::uint8
     if (auto v = validateSubmit(h, sb, dataSection, lim); !v.ok())
         return refuse(h, v.status, "SUBMIT failed validation");
 
+    if (h.segMore()) {
+        // A segmented transfer begins. Only an OUT transfer carries segmented
+        // data — an IN transfer sends no OUT payload, so SEG_MORE on it is
+        // malformed. Only one transfer is in flight (the pipeline is L6), so a
+        // second one starting mid-reassembly is a framing error, not a queue.
+        if (sb.dir != static_cast<std::uint8_t>(wire::Dir::Out))
+            return refuse(h, Status::MalformedFrame, "a segmented IN SUBMIT is malformed");
+        if (_rxActive)
+            return refuse(h, Status::MalformedFrame, "overlapping segmented SUBMIT");
+
+        _rxActive    = true;
+        _rxChannel   = h.channel;
+        _rxRequestId = h.requestId;
+        _rxSb        = sb;
+        _rx.clear();
+
+        Status e = Status::Ok;
+        const Reassembler::Outcome o = _rx.accept(h, dataSection, e);
+        if (o == Reassembler::Outcome::Rejected) {
+            resetReassembly();
+            return refuse(h, e, "segmentation rejected the first segment");
+        }
+        // NeedMore: the device is NOT touched until the whole transfer arrives.
+        // Handing it the segments as they land would inject a short packet at each
+        // seam, which a bulk device reads as the end of the data phase.
+        return Status::Ok;
+    }
+
+    // A transfer that fits in one record — the common case, unchanged. If a
+    // segmented one is mid-flight, a fresh single-record SUBMIT is a framing error.
+    if (_rxActive)
+        return refuse(h, Status::MalformedFrame, "a SUBMIT arrived during reassembly");
+
+    return completeSubmit(h, sb, dataSection);
+}
+
+Status ExporterSession::handleData(const Header& h, std::span<const std::uint8_t> body)
+{
+    if (_state != State::Leased || !_port)
+        return refuse(h, Status::Detaching, "That device is no longer attached.");
+
+    // R12: as with SUBMIT, a stale attach id is dropped silently.
+    if (h.attachId != _attachId) return Status::Ok;
+
+    // A Data record only ever continues the one segmented OUT transfer in flight.
+    // With no pipeline, any other (channel, request_id) — or a Data with nothing
+    // in progress — means the stream is misaligned.
+    if (!_rxActive || h.channel != _rxChannel || h.requestId != _rxRequestId)
+        return refuse(h, Status::MalformedFrame, "a DATA segment arrived with no transfer in progress");
+
+    Status e = Status::Ok;
+    const Reassembler::Outcome o = _rx.accept(h, body, e);
+    if (o == Reassembler::Outcome::Rejected) {
+        resetReassembly();
+        return refuse(h, e, "segmentation rejected a continuation");
+    }
+    if (o == Reassembler::Outcome::NeedMore)
+        return Status::Ok;
+
+    // Complete: the whole OUT payload is assembled. Issue it as ONE transfer.
+    const std::vector<std::uint8_t> full = _rx.take(h);
+    const SubmitBody sb = _rxSb;
+
+    Header reqHeader;
+    reqHeader.type      = static_cast<std::uint8_t>(wire::Type::Submit);
+    reqHeader.channel   = _rxChannel;
+    reqHeader.requestId = _rxRequestId;
+    reqHeader.attachId  = _attachId;
+
+    resetReassembly();
+    return completeSubmit(reqHeader, sb, full);
+}
+
+Status ExporterSession::completeSubmit(const Header& reqHeader, const SubmitBody& sb,
+                                       std::span<const std::uint8_t> dataOut)
+{
     CompleteBody cb;
     cb.epAddr       = sb.epAddr;
     cb.xferType     = sb.xferType;
@@ -389,12 +474,12 @@ Status ExporterSession::handleSubmit(const Header& h, std::span<const std::uint8
         sp.wValue        = static_cast<std::uint16_t>(sb.setup[2] | (sb.setup[3] << 8));
         sp.wIndex        = static_cast<std::uint16_t>(sb.setup[4] | (sb.setup[5] << 8));
         sp.wLength       = static_cast<std::uint16_t>(sb.setup[6] | (sb.setup[7] << 8));
-        st = _port->controlTransfer(sp, dataSection, payload);
+        st = _port->controlTransfer(sp, dataOut, payload);
     } else if (sb.dir == static_cast<std::uint8_t>(wire::Dir::In)) {
         st = _port->bulkIn(sb.epAddr, sb.bufferLen, payload);
     } else {
         std::uint32_t moved = 0;
-        st = _port->bulkOut(sb.epAddr, dataSection, &moved);
+        st = _port->bulkOut(sb.epAddr, dataOut, &moved);
         cb.actualLen = moved;
     }
 
@@ -411,34 +496,42 @@ Status ExporterSession::handleSubmit(const Header& h, std::span<const std::uint8
     // overrunning a kernel transfer buffer whose size the importer's own kernel
     // chose (CVE-2016-3955 class).
     if (cb.actualLen > cb.requestedLen)
-        return refuse(h, Status::Internal, "device reported more than was requested");
+        return refuse(reqHeader, Status::Internal, "device reported more than was requested");
 
-    Header rh;
-    rh.type      = static_cast<std::uint8_t>(wire::Type::Complete);
-    rh.flags     = wire::kFlagSegFirst;
-    rh.channel   = h.channel;
-    rh.attachId  = _attachId;
-    rh.requestId = h.requestId;
-    rh.status    = static_cast<std::uint16_t>(st);
+    // Build the COMPLETE and emit it, segmenting the IN payload across records
+    // when it exceeds one. total_len is the payload length on every record;
+    // seg_offset advances; the fixed 40-byte COMPLETE body rides record 0 only.
+    Header base;
+    base.type      = static_cast<std::uint8_t>(wire::Type::Complete);
+    base.channel   = reqHeader.channel;
+    base.attachId  = _attachId;
+    base.requestId = reqHeader.requestId;
+    base.status    = static_cast<std::uint16_t>(st);
 
     std::vector<std::uint8_t> cbody;
     encodeComplete(cb, cbody);
-    cbody.insert(cbody.end(), payload.begin(), payload.end());
-    rh.bodyLen  = static_cast<std::uint32_t>(cbody.size());
-    // §3.6 exactness: total_len == iso_pkt_count*16 + payload_len. The fixed
-    // 40-byte COMPLETE body is not part of it.
-    rh.totalLen = cb.payloadLen;
 
-    std::vector<std::uint8_t> rec;
-    encodeHeader(rh, rec);
-    rec.insert(rec.end(), cbody.begin(), cbody.end());
+    const std::uint32_t maxPlain = _secure->transport()->maxPlaintextBytes();
+    if (maxPlain <= wire::kHeaderSize + wire::kBodyComplete) return Status::Internal;
+    const std::uint32_t maxSeg = maxPlain - static_cast<std::uint32_t>(wire::kHeaderSize)
+                                          - static_cast<std::uint32_t>(wire::kBodyComplete);
 
     ++_transfers;
-    return sendRecord(rec);
+    return emitTransfer(base, cbody, payload, maxSeg,
+        [this](std::span<const std::uint8_t> rec) { return sendRecord(rec); });
+}
+
+void ExporterSession::resetReassembly() noexcept
+{
+    _rxActive    = false;
+    _rxChannel   = 0;
+    _rxRequestId = 0;
+    _rx.clear();
 }
 
 void ExporterSession::close()
 {
+    resetReassembly();
     if (_port) {
         _devices->release(_uid);
         _port = nullptr;

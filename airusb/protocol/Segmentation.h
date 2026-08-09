@@ -50,6 +50,7 @@
 #include "../core/Status.h"
 
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <span>
 #include <vector>
@@ -72,6 +73,41 @@ struct SegmentPlan {
 /// the packet size).
 std::vector<SegmentPlan> planSegments(std::uint32_t totalLen,
                                       std::uint32_t maxSegmentBytes);
+
+/// Emits one logical transfer as one or more records, invoking `send` once per
+/// record with the fully framed bytes (header + body). This is the sender half of
+/// segmentation, shared by the importer's `RemoteDevicePort` and the exporter's
+/// `ExporterSession` so the two never disagree about the framing.
+///
+/// Record 0 keeps `base.type` (SUBMIT or COMPLETE) and `base.status`, sets
+/// SEG_FIRST, and carries `fixedBody` (the encoded SubmitBody/CompleteBody)
+/// followed by the first slice of `data`. Every later record is a `Type::Data`
+/// continuation with status 0 and no fixed body — pure payload. On every record
+/// `total_len` is `data.size()` and `seg_offset` advances exactly by the bytes
+/// already sent, which is what the `Reassembler` on the far end verifies for
+/// gap-free, overlap-free contiguity.
+///
+/// `maxSegmentBytes` is the most DATA bytes any single record may carry. The
+/// caller derives it from the transport's plaintext ceiling MINUS the 32-byte
+/// header MINUS `fixedBody.size()`, so record 0 — the largest, because it also
+/// carries the fixed body — still fits. Passing that same value for the (smaller)
+/// continuation records simply wastes `fixedBody.size()` bytes per record, which
+/// is negligible and keeps every seg_offset a clean multiple.
+///
+/// A zero-length transfer still emits exactly one record: a zero-length transfer
+/// is a real wire event (how a host terminates one that is an exact multiple of
+/// the packet size), and swallowing it would lose it.
+///
+/// This is deliberately NOT "issue each record as its own USB transfer". A bulk
+/// transfer split anywhere but a wMaxPacketSize boundary injects a short packet
+/// the device reads as the end of the data phase; reassembly MUST complete before
+/// the transfer reaches a device. This helper only frames the wire; the far end
+/// pairs it with `Reassembler`.
+Status emitTransfer(const Header& base,
+                    std::span<const std::uint8_t> fixedBody,
+                    std::span<const std::uint8_t> data,
+                    std::uint32_t maxSegmentBytes,
+                    const std::function<Status(std::span<const std::uint8_t>)>& send);
 
 /// Reassembles segmented payloads, keyed by (channel, request_id).
 ///
@@ -113,6 +149,13 @@ public:
     /// Drops any partial transfer for a channel — used when an attach goes away,
     /// so a peer that disconnects mid-transfer does not leave the arena held.
     void forgetChannel(std::uint16_t channel);
+
+    /// Drops the one partial transfer keyed by (channel, request_id) — used when a
+    /// single transfer is cancelled or times out mid-reply, so a pipelined
+    /// receiver releases just that reassembly and not its siblings on the same
+    /// endpoint. A no-op if nothing is partial for that key.
+    void forget(std::uint16_t channel, std::uint64_t requestId);
+
     void clear() noexcept;
 
     std::uint64_t bytesHeld() const noexcept { return _held; }

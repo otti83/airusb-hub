@@ -324,6 +324,118 @@ void testHousekeeping()
     }
 }
 
+void testEmit()
+{
+    std::printf("emit, then reassemble through real record bytes\n");
+
+    auto baseComplete = [] {
+        Header h;
+        h.type      = static_cast<std::uint8_t>(wire::Type::Complete);
+        h.channel   = 0x0142;
+        h.attachId  = 7;
+        h.requestId = 99;
+        h.status    = 0;
+        return h;
+    };
+
+    TEST_CASE("record 0 keeps the type and fixed body; continuations are Data") {
+        const std::uint32_t total = 200'000;
+        const auto payload = pattern(total, 3);
+        const std::vector<std::uint8_t> fixed(wire::kBodyComplete, 0xEE);
+        const std::uint32_t maxSeg = 16384;
+
+        std::vector<std::vector<std::uint8_t>> recs;
+        const Status s = emitTransfer(baseComplete(), fixed, payload, maxSeg,
+            [&](std::span<const std::uint8_t> r) {
+                recs.emplace_back(r.begin(), r.end());
+                return Status::Ok;
+            });
+        CHECK(s == Status::Ok);
+        CHECK(recs.size() > 1u);
+
+        Header h0;
+        CHECK(decodeHeader(recs[0], h0));
+        CHECK_EQ(h0.type, static_cast<std::uint8_t>(wire::Type::Complete));
+        CHECK(h0.segFirst());
+        CHECK(h0.segMore());
+        CHECK_EQ(h0.segOffset, 0u);
+        CHECK_EQ(h0.totalLen, total);
+        // header + fixed body + one full segment of data
+        CHECK_EQ(recs[0].size(), wire::kHeaderSize + wire::kBodyComplete + maxSeg);
+
+        for (std::size_t i = 1; i < recs.size(); ++i) {
+            Header hi;
+            CHECK(decodeHeader(recs[i], hi));
+            CHECK_EQ(hi.type, static_cast<std::uint8_t>(wire::Type::Data));
+            CHECK(!hi.segFirst());
+            CHECK_EQ(hi.status, 0u);
+            CHECK_EQ(hi.totalLen, total);
+        }
+
+        // Reassemble the DATA back out of the framed records: record 0 contributes
+        // the bytes after its fixed body, every continuation its whole body.
+        Reassembler r;
+        Status err = Status::Ok;
+        Reassembler::Outcome o = Reassembler::Outcome::NeedMore;
+        for (std::size_t i = 0; i < recs.size(); ++i) {
+            Header hi;
+            CHECK(decodeHeader(recs[i], hi));
+            const std::size_t fixedLen = (i == 0) ? wire::kBodyComplete : 0;
+            const auto chunk = std::span<const std::uint8_t>(recs[i])
+                                  .subspan(wire::kHeaderSize + fixedLen);
+            o = r.accept(hi, chunk, err);
+        }
+        CHECK(o == Reassembler::Outcome::Complete);
+        CHECK(r.take(h0) == payload);
+    }
+
+    TEST_CASE("a transfer that fits emits exactly one record") {
+        const std::vector<std::uint8_t> fixed(wire::kBodySubmit, 0);
+        const auto payload = pattern(1000, 1);
+        int n = 0;
+        Header seen;
+        Header base;
+        base.type = static_cast<std::uint8_t>(wire::Type::Submit);
+        emitTransfer(base, fixed, payload, 16384,
+            [&](std::span<const std::uint8_t> rec) {
+                ++n; decodeHeader(rec, seen); return Status::Ok;
+            });
+        CHECK_EQ(n, 1);
+        CHECK(seen.segFirst());
+        CHECK(!seen.segMore());
+        CHECK_EQ(seen.totalLen, 1000u);
+    }
+
+    TEST_CASE("a zero-length transfer still emits one record") {
+        const std::vector<std::uint8_t> fixed(wire::kBodySubmit, 0);
+        int n = 0;
+        Header seen;
+        Header base;
+        base.type = static_cast<std::uint8_t>(wire::Type::Submit);
+        emitTransfer(base, fixed, {}, 16384,
+            [&](std::span<const std::uint8_t> rec) {
+                ++n; decodeHeader(rec, seen); return Status::Ok;
+            });
+        CHECK_EQ(n, 1);
+        CHECK(seen.segFirst());
+        CHECK(!seen.segMore());
+        CHECK_EQ(seen.totalLen, 0u);
+    }
+
+    TEST_CASE("a send error stops the emission and propagates") {
+        const std::vector<std::uint8_t> fixed(wire::kBodyComplete, 0);
+        const auto payload = pattern(100'000, 2);
+        int n = 0;
+        const Status s = emitTransfer(baseComplete(), fixed, payload, 16384,
+            [&](std::span<const std::uint8_t>) {
+                ++n;
+                return n >= 2 ? Status::TransportLost : Status::Ok;
+            });
+        CHECK(s == Status::TransportLost);
+        CHECK_EQ(n, 2);      // stopped at the failing send, did not keep going
+    }
+}
+
 } // namespace
 
 int main()
@@ -333,5 +445,6 @@ int main()
     testRoundTrip();
     testHostilePeer();
     testHousekeeping();
+    testEmit();
     TEST_MAIN_END();
 }
