@@ -174,6 +174,13 @@ target_link_libraries(airusb_linux_usbip PUBLIC airusb_core airusb_transport)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     add_executable(vhci_probe platform/linux/vhci_probe_main.cpp)
     target_link_libraries(vhci_probe PRIVATE airusb_linux_usbip)
+
+    # L4: the same bridge the unit tests drive, against a real kernel.
+    add_executable(airusb-vhci
+        platform/linux/airusb_vhci_main.cpp
+        tests/fakes/ScriptedDevice.cpp
+    )
+    target_link_libraries(airusb-vhci PRIVATE airusb_linux_usbip airusb_session)
 endif()
 
 # ---------------------------------------------------------------------------

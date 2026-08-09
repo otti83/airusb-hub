@@ -19,7 +19,8 @@ authenticated as `otti83`).
 | Networking | **done** — real TCP, macOS↔macOS and macOS↔Linux |
 | Windows client | **works** — MSVC 19.51 builds it, 13/13 suites pass natively, full BOT exchange over a real socket |
 | Receiving on a Mac | **blocked on Apple** — FB24214361, see §2 |
-| Receiving on Windows / Linux | driver half not written |
+| **Receiving on Linux** | **WORKS** — the kernel enumerates it, binds usb-storage, and mounts a filesystem on it (§3.5) |
+| Receiving on Windows | driver half not written |
 
 ```
 18 test suites / 0 failures
@@ -407,6 +408,62 @@ Two details worth keeping:
 
 ---
 
+### 3.5 Linux enumerated it — 2026-08-09
+
+The thing this project exists to do, done for the first time on any platform.
+`platform/linux/airusb-vhci` attaches a socketpair to vhci-hcd and runs
+`VhciBridge` against a `ScriptedDevice`. The kernel's own dmesg:
+
+```
+vhci_hcd vhci_hcd.0: Device attached
+usb 4-1: new SuperSpeed USB device number 6 using vhci_hcd
+usb 4-1: New USB device found, idVendor=058f, idProduct=6387, bcdDevice= 0.02
+usb 4-1: Product: AirUSB
+usb-storage 4-1:1.0: USB Mass Storage device detected
+scsi 0:0:0:0: Direct-Access     AirUSB   Scripted Device  0001 PQ: 0 ANSI: 6
+sd 0:0:0:0: [sda] 61440 512-byte logical blocks: (31.5 MB/30.0 MiB)
+sd 0:0:0:0: [sda] Attached SCSI removable disk
+```
+
+`lsusb` resolves it out of the USB ID database — `058f:6387 Alcor Micro Corp.
+Flash Drive` — which is the verbatim rule proving itself: the VID and PID the
+kernel read are the manifest's bytes, unaltered. `lsblk` shows `sda`, 30M.
+
+Then a real filesystem, which is L7 arriving early:
+
+```
+dd if=/dev/sda ... 32768 bytes copied, 11.5 MB/s
+mkfs.vfat /dev/sda        OK
+mount /dev/sda /mnt/air   OK
+echo ... > hello.txt      OK
+umount                    OK      <- the cache flush completed: WRITE(10) and the
+                                     CSW path both work through the bridge
+remount + cat             "hello from a remote USB device"
+```
+
+**The defect this gate found.** The first version of the tool took `--speed` from
+the command line. Attaching the SuperSpeed manifest at high speed produced:
+
+```
+usb 3-1: Invalid ep0 maxpacket: 9
+usb usb3-port1: unable to enumerate USB device
+```
+
+`bMaxPacketSize0` is a power-of-two EXPONENT at SuperSpeed (9 = 512) and a
+literal byte count at high speed, where only 8/16/32/64 are legal. The
+descriptors were right; the speed claimed for them was not. The fix was not to
+document the flag — it was to delete it. The speed now comes from
+`manifest().speed()`, because it is a fact about the device rather than a
+preference, and a tool that can express that contradiction will eventually be
+asked to. This is the project's speed trap arriving from a third direction.
+
+**What this does NOT yet do:** the device is simulated and local. Pointing the
+same bridge at a `RemoteDevicePort` — a real drive on the Mac, across the
+encrypted session — is L6, and it needs the two prerequisites that remain:
+segmentation, and a data plane that can pipeline.
+
+---
+
 ## 4. Verifying Windows again (all of this now passes)
 
 ### 4.0 Done — CI covers it
@@ -597,7 +654,7 @@ Expect MSVC to find things MinGW did not. Paste whatever it says.
    cast would have produced, and the test fails if anyone ever "simplifies" it
    back into one.
 
-   **Next: L4** — the same bridge, against a real kernel, in the `airusb` VM.
+   **L4 PASSED, and it went straight through L7 on the way.** See §3.5.
 3. **P2.9 `CiHostBackend`** — blocked on Apple only.
 4. ~~**The exporter's write path**~~ — **DONE, 2026-08-09.** It was going to be
    "tested for free" by a real importer mounting a filesystem, which is a bad way
