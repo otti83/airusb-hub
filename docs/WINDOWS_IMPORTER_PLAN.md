@@ -356,10 +356,28 @@ right and everything else got wrong: **it watches for pending TX and pushes it**
 (`pendingTxBytes()`), which is the bug that cost this project a session when the
 exporter stranded the tail of a 128 KiB reply.
 
-### W6 — bring-up on the GMKtec · NEEDS THE USER
+### W6 — bring-up · NEEDS A SPARE MACHINE AND A PERSON AT IT
 
-`bcdedit /set testsigning on`, reboot, install the INF, plug in a share from the
-Mac, and watch Device Manager.
+**Not on the GMKtec.** That machine is reachable only over the network and is
+also the project's only Windows peer; a boot loop there cannot be recovered
+remotely and costs both. The user has said a spare Windows machine will be
+provided for the first load.
+
+`bcdedit /set testsigning on`, reboot, install the INF, and watch Device
+Manager — but not in that order on the first attempt. The ordering below exists
+so that a failure has ONE possible cause instead of four:
+
+1. the driver loads and the controller appears, with no device and no host;
+2. a fixed synthetic device enumerates, with no host service and no network;
+3. a LOCAL scripted host over the IOCTL ABI drives a RAM-backed BOT device to
+   Explorer, and is made to survive stalls, reset, cancellation, a host process
+   killed mid-transfer, malformed replies and endpoint reconfiguration;
+4. only then the session layer replaces the scripted backend;
+5. only then a real drive from the Mac.
+
+**And run Static Driver Verifier and Code Analysis before step 1.** SDV checks
+KMDF rules without running the driver, which is the only verification available
+when a mistake costs a reboot with somebody present.
 
 **Evidence.** The Windows equivalent of the Linux gate: the device appears in
 Device Manager under the right VID/PID, `diskmgmt` shows the volume, files are

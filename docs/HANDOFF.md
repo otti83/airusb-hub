@@ -1,11 +1,14 @@
 # AirUSB Hub — Session Handoff
 
-**Written:** 2026-08-08 · **Last updated:** 2026-08-09, after **Windows
-verification and the GUI** — both of the things the previous handoff named as the
-next session's work are done (§0). The product now has an interface, it is the
-same interface on three operating systems, and Windows is verified against the
-code that is actually in the tree rather than against the code that was there
-before segmentation landed.
+**Written:** 2026-08-08 · **Last updated:** 2026-08-09, at the end of a session
+that finished Windows verification, built the GUI, took the Windows importer
+from nothing to a driver that compiles, and then had the whole repository read
+adversarially — which found four live bugs in that day's code and one security
+claim in the README that was not true. All are fixed.
+
+**The next session is architecture, not features, and it starts by consulting
+GPT-5.6 with the brief in §4.7.** Read THE NEXT SESSION below before anything
+else.
 **Purpose:** resume this project in a fresh session with no access to the previous
 conversation. Everything load-bearing is here or in the documents it points to.
 **Repo:** `/Users/mba/Desktop/AirUSB Hub` — public at
@@ -28,7 +31,8 @@ records this line).
 | **The product's window** | **done, and proven on two real machines** — `airusb-hubd` on the GMKtec and this Mac paired with a human comparing the six digits, then read a device; §3.9, `GUI.md` |
 | **Receiving on Linux** | **WORKS on real hardware, over the network** — a real 058f:6387 drive captured on the Mac (`airusb-exportd --serve`) mounted on the Linux kernel via `airusb-vhci --host`, read-only, real files read; clean teardown (full L6 + L8 PASS, `LINUX_IMPORTER_PLAN.md` §7) |
 | Receiving on a Mac | **blocked on Apple** — FB24214361, §2 |
-| Receiving on Windows | UdeCx driver not written. **Not blocked by anyone** |
+| Receiving on Windows | **W1–W3 done and tested, W4 (`airusb.sys`) BUILDS but has never been loaded** — §3.11, `WINDOWS_IMPORTER_PLAN.md`. Not blocked by anyone; the first load needs a spare machine and a person at it |
+| The architecture | **four changes stand between the proof and a product** — see THE NEXT SESSION below, and §4.6 for how they were found |
 
 ```
 27 test suites / 0 failures  (+test_control, test_hub_e2e, test_windowsusb,
@@ -65,36 +69,61 @@ dependency was added. It shares, connects, pairs with the six-digit check,
 attaches and verifies — on macOS, Linux and Windows. Design, security model and
 the two-machine procedure: **`GUI.md`**. Evidence: §3.9.
 
-### THE NEXT SESSION
+### THE NEXT SESSION: the architecture, not more features
 
-In order, and none of it waits on Apple:
+**Start by consulting GPT-5.6 about the architecture. The brief is written out
+in §4.7 — paste it, do not improvise one.** The last two consultations each
+deleted or rewrote a subsystem before it was built, which is cheaper than
+building it twice, and the questions in §4.7 are the ones this session could not
+answer for itself.
 
-1. **The Windows importer, UdeCx (§4.4).** With real hardware through the window
-   now done (§3.9), this is the largest remaining piece and the only one that
-   would add a new operating system to the "really enumerates it" column. It is
-   self-service: `bcdedit /set testsigning on` for development.
+The work is no longer "add the next endpoint type". An adversarial read of the
+whole repository (§4.6) found that the proven result is narrow and real — one
+macOS exporter, one BOT flash drive, one Linux importer, one clean LAN — and
+that four things standing between it and a product are **architectural**, not
+missing features. Doing them in the wrong order means doing them twice.
 
-   (macOS ↔ Windows with the hub is **done** — §3.9. The binary question that
-   blocked it is also settled: `scripts/cross-build-windows.sh` now produces
-   `airusb-hubd.exe`, and both CI jobs publish it as
-   `airusb-windows-msvc-x64` / `airusb-windows-mingw-x64`. Before that it was
-   produced by nothing at all, and the procedure told the user to run a file
-   that did not exist. **No release asset has been published**; if a plain
-   no-login download URL would be easier, that is a deliberate publishing step
-   and needs asking for.)
-2. **The hub against real hardware.** `airusb-exportd --serve` already speaks this
-   exact protocol, so pointing the hub's importer at a real captured drive needs
-   no new code — only `sudo` on the Mac, which the assistant does not have. One
-   command each side; see §3.9.
-3. **Windows × Linux (§4.3).** Both halves exist. The routing between the Windows
-   box and the Lima guest has still never been measured.
-4. **The Windows importer, UdeCx (§4.4).** The only remaining large piece, and
-   self-service.
+**A1 — the privileged broker.** The window is a diagnostic front end. `hubd`
+attaches a `RemoteDevicePort` and runs `BotProbe`; it never tells `airusb-vhci`
+or a Windows service to present anything to a real USB stack, and it carries its
+own identity and pin store, separate from the privileged tools'. So "attach" in
+the window and "attach" in the product are different verbs, and the pairing
+ceremony protects the wrong session. Until a privileged broker exists that the
+window drives, the GUI and the real USB paths are two parallel demonstrations.
+**This is the one that makes the others worth doing**, and it subsumes the half
+fix in §4.6 item 1.
 
-The **Windows box**: `GMKtec 192.168.0.109`, RDP + SMB open, **SSH closed**, on a
-different LAN from the Mac (reached via the `ts-464` subnet router). The assistant
-cannot run anything there — every Windows step is handed to the user as a
-copy-pasteable command (§5, `GUI.md`).
+**A2 — an asynchronous exporter.** `ExporterSession` performs the device
+transfer inline while processing the session. An interrupt IN that legitimately
+idles therefore blocks cancellation, detach and keepalive for the whole session,
+and there is no `CANCEL` handler at all — a cancelled transfer is retired
+locally while the physical one continues. This needs per-endpoint queues, async
+transfer ownership and a separate lifecycle pump. It is the reason HID and
+composite devices cannot be attempted yet.
+
+**A3 — session lifecycle: HELLO, keepalive, lease, reconnect.** Roles,
+capabilities, max transfer and keepalive are all defined in `Wire.h` and
+exchanged by nobody; `SecureSession` adopts its own configured record size, so
+two builds that disagree complete the handshake and fail later, obscurely.
+`_lastHeardNs` is written and never swept, and the "orphaned until the lease
+expires" comment describes an expiry that does not exist. There is no session
+resumption: a network blip is undefined behaviour rather than a controlled
+recovery.
+
+**A4 — the Windows importer, finished.** W1–W3 are done and W4 builds
+(§3.11). The remaining path is written out in `WINDOWS_IMPORTER_PLAN.md` and its
+first step is NOT to connect the network: make the driver enumerate a fixed
+synthetic device, then drive it from a local scripted host, then swap in the
+session layer. **A real machine must be present for the first load** — a KMDF
+fault is a bugcheck, and a boot loop on a box reachable only over the network is
+unrecoverable. The user has said a spare Windows machine will be provided for
+this; do not load a driver on the GMKtec.
+
+Ordering: **A1, then A2, then A3, with A4 in parallel** because it is
+independent and its risky step is gated on hardware that is not here yet.
+
+Everything in §4.6 that is not one of these four is a consequence of them or is
+small enough to fall out on the way.
 
 ### The Linux importer is DONE — full L6 + L8 on real hardware (2026-08-09)
 
@@ -864,7 +893,39 @@ forwarding. They just never asked "and what was the length?" or "and is the
 slot free now?". A test that checks a verdict without checking the number
 beside it is the shape of test that lets this class of bug through.
 
-### The routing asymmetry is GONE — macOS → Windows, 2026-08-09
+### 3.11 The Windows importer, where this session left it
+
+Gate by gate in `WINDOWS_IMPORTER_PLAN.md`. In one screen:
+
+| | |
+|---|---|
+| **W1** the driver↔host ABI | **DONE.** Fuzzed, 400k executions, coverage 243. The fuzzer asserts more than absence of crashes: anything the decoder accepts must re-encode to identical bytes |
+| **W2** speed / `USBD_STATUS` tables | **DONE and VERIFIED against the real WDK** — `wdk_abi_check.c` compiled on the GMKtec, `ABI CHECK PASS` |
+| **W3** `UdecxBridge` | **DONE**, 77 checks, no kernel involved. Four bugs found in it by review and fixed (§3.10) |
+| **W4** `airusb.sys` | **BUILDS. NEVER LOADED.** 19,968 bytes, machine 0x8664, subsystem NATIVE. Five IOCTL bodies and the endpoint callbacks are stubs |
+| **W5** host service | not started |
+| **W6** bring-up | **needs a spare machine and a person at it** |
+
+**The toolchain is installed on the GMKtec and the assistant can drive it.**
+VS Build Tools 2022 with MSVC 14.44.35207, Windows SDK 10.0.28000.0, WDK
+10.1.28000, KMDF 1.35, UdeCx 1.1. Two scripts do everything and neither uses a
+`.vcxproj`, because a project file is one more thing that can be configured
+differently from the answer you wanted:
+
+```
+scripts/wdk-abi-check.ps1     compiles the constant check   -> ABI CHECK PASS
+scripts/wdk-build-driver.ps1  compiles and links airusb.sys -> DRIVER BUILD PASS
+```
+
+**Do not load a driver on the GMKtec.** A KMDF fault is a bugcheck; a boot loop
+on a machine reachable only over the network cannot be recovered by the
+assistant, and that machine is also the only Windows peer the project has. The
+user has said a spare Windows machine will be provided. The plan's ordering for
+that machine — synthetic device first, then a local scripted host, then the
+network — exists so that a failure at bring-up has one possible cause instead of
+four.
+
+### 3.12 The routing asymmetry is GONE — macOS → Windows, 2026-08-09
 
 Every two-machine run in this file until now had to put **Windows on the sharing
 side**, and §3.5 says why: "Windows has no route back to the Mac". That was a
@@ -891,7 +952,7 @@ driver, not after: a driver that cannot be pointed at anything is untestable,
 and discovering the routing problem at bring-up time would waste the reboot
 cycles that are the expensive part of driver work.
 
-### Real hardware, through the window — PASS, 2026-08-09
+### 3.13 Real hardware, through the window — PASS, 2026-08-09
 
 The last cell. `airusb-exportd --serve` captured the physical 058f:6387 and the
 hub read it through the control API, with no new code on either side — the
@@ -1267,6 +1328,60 @@ no unplug, no sleep, no impaired network.
 also cites `airusb/exporter/` and `airusb/importer/` paths that are actually
 `airusb/session/`.
 
+### 4.7 The GPT-5.6 consultation to run FIRST — paste this, do not improvise
+
+Two consultations this project has run each paid for themselves before a line
+was written. The first deleted a whole subsystem — a shared-memory arena whose
+"the host never chooses an offset" premise was simply false, replaced by direct
+I/O that removes the hazard rather than mitigating it. The second found four
+live bugs in code that had passed 64 green checks the same day, plus a README
+making a security claim that was not true.
+
+So: run this before designing A1–A3, not after. Read-only, in the repo:
+
+```bash
+codex exec -m gpt-5.6-sol -s read-only --skip-git-repo-check "$(cat brief.md)"
+```
+
+It reads the repository itself; do not paste summaries, because a summary
+carries the blind spots of whoever wrote it. Point it at `docs/HANDOFF.md`,
+`docs/WINDOWS_IMPORTER_PLAN.md`, `docs/LINUX_IMPORTER_PLAN.md`, `docs/GUI.md`
+and the code, then ask:
+
+**On A1, the privileged broker.** What should own the identity and the pin
+store, given that today the window has one set and the privileged tools have
+another — and that this is why the six-digit ceremony protects the wrong
+session? What is the right process topology on three operating systems where
+the privileged half is a root daemon on macOS, a root process writing sysfs on
+Linux, and a kernel driver plus a service on Windows? Where does the trust
+decision live so that the broker never makes it alone and the window cannot be
+impersonated by another local process? Is a broker even the right shape, or
+should the window BE the privileged process on some platforms?
+
+**On A2, the asynchronous exporter.** `ExporterSession` performs a device
+transfer inline. What is the smallest change that lets an interrupt IN idle for
+ever without blocking cancellation, detach and keepalive — per-endpoint queues,
+a thread per endpoint, a completion port, something else? How should `CANCEL`
+be represented on the wire and what does the exporter do with a transfer the
+importer has abandoned but the device has not finished? This project is
+single-threaded everywhere above the platform layer and would like to stay that
+way; say plainly if that is no longer tenable.
+
+**On A3, lifecycle.** HELLO is defined and never exchanged. Is negotiating
+record size, capabilities and keepalive at HELLO the right design, or should
+those be fixed by version? What should a lease expiry actually DO to a captured
+device, given that §7.3 says silence must not release it? What does session
+resumption look like when the attach id and the device incarnation both have to
+survive — or should a blip simply be a clean detach and re-attach, and the
+complexity of resumption is not worth it?
+
+**And the standing question:** what has this project claimed that its evidence
+does not support? That one found the README's pairing claim last time. Ask it
+every session.
+
+Record what comes back the way §4.6 records the last one: findings that are
+real, findings that are wrong, and the ordering by what breaks a user first.
+
 ### 4.5 Smaller, fully unblocked
 
 * **`PAIR_*` handlers.** The opcodes are reserved in `Wire.h` (0x10/0x11/0x12) and
@@ -1383,6 +1498,16 @@ airusb/
                HostDeviceExporter (an IUsbDevicePort), airusb_exportd_main
                (+ NEW `--serve`: TCP ExporterSession over the captured real drive),
                airusb_agent_main, AgentProtocol (portable) + AgentLink (POSIX only)
+  platform/windows/  THE WINDOWS IMPORTER'S PORTABLE HALF, built and tested on
+               EVERY platform for the same reason platform/linux is. WindowsUsbAbi.h
+               (plain C, no includes — the ONLY copy of the transcribed WDK
+               constants, readable from both C++ and a kernel TU), WindowsUsb
+               (the speed and USBD_STATUS tables, and the short-transfer rule
+               that differs from Linux in kind), UdecxIpc (the kernel/user ABI
+               codec, fuzzed), UdecxBridge (the translation — read
+               VhciNetBridge first), wdk_abi_check.c (compiled ONLY where the
+               WDK exists; compiling it IS the verification),
+               driver/airusb_sys.{h,c} (KMDF/UdeCx. BUILDS, NEVER LOADED)
   platform/linux/  UsbipCodec (the USB/IP byte layer, built and fuzzed on EVERY
                platform), LinuxUsb (the speed and errno tables), VhciBridge (the
                SYNCHRONOUS translation, L4/local), VhciNetBridge (NEW — the
@@ -1410,8 +1535,12 @@ Layer graph, one direction only:
 ```bash
 cd "/Users/mba/Desktop/AirUSB Hub/airusb"
 cmake -S . -B build && cmake --build build && (cd build && ctest --output-on-failure)
-./tests/fuzz/build_and_run.sh 300000
-./scripts/cross-build-windows.sh          # produces build-win/airusb-net.exe
+./tests/fuzz/build_and_run.sh 300000      # four targets now, incl. fuzz_udecxipc
+./scripts/cross-build-windows.sh          # airusb-net.exe AND airusb-hubd.exe
+
+# On the GMKtec, over ssh (see §5 for the CP932 / job-object traps):
+#   scripts/wdk-abi-check.ps1      -> ABI CHECK PASS
+#   scripts/wdk-build-driver.ps1   -> DRIVER BUILD PASS (does NOT install it)
 
 # The cross-build script passes only -Wall -Wextra. To check the Windows target
 # under the flag set CMake actually configures — which is how the last warning
