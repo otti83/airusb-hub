@@ -91,6 +91,21 @@ public:
 
     MemoryPipe() = default;
 
+    /// Caps how much may sit unread in each direction, so a test can make
+    /// `write()` take only part of what it was offered.
+    ///
+    /// A real socket does this whenever its send buffer fills, and until a test
+    /// could reproduce it, the code that has to cope with a short write was
+    /// never once exercised: an unbounded pipe accepts everything, so `flush()`
+    /// always completed and the buffered tail it can leave behind never
+    /// existed. That gap was found on a real link between two machines, not
+    /// here, which is the wrong way round. Call this BEFORE endpointA/B.
+    void setCapacity(std::size_t aToB, std::size_t bToA) noexcept
+    {
+        _capacityAtoB = aToB;
+        _capacityBtoA = bToA;
+    }
+
     std::unique_ptr<IByteStream> endpointA();
     std::unique_ptr<IByteStream> endpointB();
 
@@ -102,6 +117,8 @@ private:
     std::deque<std::uint8_t> _bToA;
     bool _openA = true;
     bool _openB = true;
+    std::size_t _capacityAtoB = 0;   // 0 = unbounded
+    std::size_t _capacityBtoA = 0;
 };
 
 } // namespace airusb::transport

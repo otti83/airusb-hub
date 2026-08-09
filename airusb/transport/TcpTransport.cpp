@@ -209,12 +209,16 @@ IoResult MemoryPipe::Endpoint::read(std::span<std::uint8_t> dst)
 
 std::unique_ptr<IByteStream> MemoryPipe::endpointA()
 {
-    return std::make_unique<Endpoint>(&_bToA, &_aToB, &_openA, &_openB);
+    auto e = std::make_unique<Endpoint>(&_bToA, &_aToB, &_openA, &_openB);
+    e->setCapacity(_capacityAtoB);
+    return e;
 }
 
 std::unique_ptr<IByteStream> MemoryPipe::endpointB()
 {
-    return std::make_unique<Endpoint>(&_aToB, &_bToA, &_openB, &_openA);
+    auto e = std::make_unique<Endpoint>(&_aToB, &_bToA, &_openB, &_openA);
+    e->setCapacity(_capacityBtoA);
+    return e;
 }
 
 } // namespace airusb::transport

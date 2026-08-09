@@ -165,9 +165,14 @@ struct Rig {
     bool            ok    = false;
     std::uint64_t   reqId = 0;
 
-    Rig(std::uint32_t recSize, DeviceManifest m)
+    /// `exporterSendCap` limits how much the exporter may leave unread in the
+    /// pipe, which is how a socket whose send buffer is full behaves. 0 is
+    /// unbounded, and unbounded is why the stranded-tail bug was invisible here
+    /// for the life of the project.
+    Rig(std::uint32_t recSize, DeviceManifest m, std::size_t exporterSendCap = 0)
         : device(std::move(m)), source(&device)
     {
+        pipe.setCapacity(/*aToB=*/0, /*bToA=*/exporterSendCap);
         (void)storeA.pin(idB.publicIdentity(), "B", kDefaultGrants, 1);
         (void)storeB.pin(idA.publicIdentity(), "A", kDefaultGrants, 1);
 
@@ -291,8 +296,23 @@ Status remoteTransfer(Rig& r, std::uint8_t ep, std::uint8_t dir, std::uint32_t b
 
     (void)r.exporter.pump();
 
+    // Reading one record used to be enough because the pipe was unbounded, so
+    // the exporter's single pump() wrote the entire reply at once. Against a
+    // pipe that can fill — like every real socket — the reply arrives over
+    // several pumps, and starving here would report TransportLost for a peer
+    // that is simply mid-send.
+    auto nextRecord = [&](std::vector<std::uint8_t>& into) -> Status {
+        for (int spins = 0; spins < 100000; ++spins) {
+            const Status rr = link->receiveRecord(into);
+            if (rr == Status::Ok && !into.empty()) return Status::Ok;
+            if (rr != Status::Ok && rr != Status::Busy) return rr;
+            (void)r.exporter.pump();
+        }
+        return Status::TransportLost;
+    };
+
     std::vector<std::uint8_t> in;
-    if (link->receiveRecord(in) != Status::Ok || in.empty()) return Status::Busy;
+    if (nextRecord(in) != Status::Ok) return Status::Busy;
     Header rh;
     if (!decodeHeader(in, rh)) return Status::MalformedFrame;
     if (rh.type != static_cast<std::uint8_t>(wire::Type::Complete))
@@ -319,8 +339,7 @@ Status remoteTransfer(Rig& r, std::uint8_t ep, std::uint8_t dir, std::uint32_t b
             Reassembler::Outcome o = ra.accept(rh, firstChunk, e);
             while (o == Reassembler::Outcome::NeedMore) {
                 std::vector<std::uint8_t> dr;
-                if (link->receiveRecord(dr) != Status::Ok || dr.empty())
-                    return Status::TransportLost;
+                if (const Status rr = nextRecord(dr); rr != Status::Ok) return rr;
                 Header dh;
                 if (!decodeHeader(dr, dh)) return Status::MalformedFrame;
                 const auto db = std::span<const std::uint8_t>(dr)
@@ -370,6 +389,32 @@ void testExporterEndToEnd()
             CHECK_EQ(inData.size(), std::size_t{kBig});
             CHECK(inData == pattern(kBig, 0x5A));                 // the device's bytes, intact
         }
+    }
+
+    TEST_CASE("a reply whose tail does not fit is still delivered") {
+        // The bug this pins down was found between two machines, not here.
+        //
+        // `flush()` returns Ok on a would-block short write and keeps the rest
+        // buffered — correct, because a short write is not an error. But every
+        // record except the last one gets pushed along by the NEXT sendRecord,
+        // and the last one has nothing behind it. Before ExporterSession::pump
+        // drained the buffer, the tail of a large reply sat there for ever
+        // while the importer waited for bytes that would never move.
+        //
+        // 8 KiB of capacity against a 120 KiB reply guarantees the socket fills
+        // several times over, so this fails without the fix rather than
+        // depending on timing.
+        Rig r(wire::kRecordBytesDefault, proto.manifest(), /*exporterSendCap=*/8192);
+        CHECK(r.ok);
+        const std::uint32_t attachId = doAttach(r);
+        CHECK(attachId != 0);
+
+        std::vector<std::uint8_t> inData;
+        const Status si = remoteTransfer(r, kEpIn, kIn, kBig, {}, inData, attachId);
+        CHECK(si == Status::Ok);
+        CHECK_EQ(r.device.inCalls, 1);
+        CHECK_EQ(inData.size(), std::size_t{kBig});
+        CHECK(inData == pattern(kBig, 0x5A));
     }
 
     TEST_CASE("a small transfer still emits exactly one record (fast path intact)") {

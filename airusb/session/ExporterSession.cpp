@@ -105,6 +105,23 @@ Status ExporterSession::pump()
     transport::RecordLayer* t = _secure->transport();
     if (!t) return Status::TransportLost;
 
+    // Push whatever the socket would not take last time, BEFORE reading.
+    //
+    // `flush()` returns Ok on a would-block short write and leaves the rest
+    // buffered, so a reply that did not fit is not an error — it is a reply that
+    // has not been sent yet. Every record but the last self-heals, because the
+    // next sendRecord() flushes again; the LAST record of a transfer has nothing
+    // behind it, so without this line its tail sits in the buffer for ever while
+    // the importer waits for bytes that will never move.
+    //
+    // Unreachable at small transfers, which is why it survived: a 2 KB reply
+    // fits in any socket buffer. It appeared the first time a 128 KiB COMPLETE
+    // crossed a real link between two machines — 8 records, ~28 ms away — which
+    // is exactly the case `WINDOWS.md` predicted and filed as residual risk.
+    if (t->pendingTxBytes() != 0) {
+        if (const Status s = t->flush(); s != Status::Ok) return s;
+    }
+
     for (;;) {
         std::vector<std::uint8_t> rec;
         const Status r = t->receiveRecord(rec);

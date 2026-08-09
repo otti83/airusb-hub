@@ -40,6 +40,21 @@ Status SimulatedDeviceSource::claim(const DeviceUid& u, IUsbDevicePort** portOut
         if (whyNot) *whyNot = "That device is already in use by another machine.";
         return Status::Busy;
     }
+    // A Bulk-Only Mass Storage Reset, on every claim.
+    //
+    // This device outlives the sessions that use it, unlike a real one: a real
+    // capture re-opens the hardware and the hardware resets itself. Here the
+    // same RAM disk is handed to whoever attaches next, with whatever phase the
+    // last peer left it in — and a peer that disconnected mid-command leaves it
+    // expecting a data phase. The next peer's very first CBW is then answered
+    // with a stall, on a device that is in fact perfectly healthy.
+    //
+    // Observed between two machines: a write probe failed halfway, and the next
+    // attach could not get past TEST_UNIT_READY. Resetting on CLAIM rather than
+    // on release is deliberate — release does not run if the process is killed,
+    // and the invariant worth having is "an attach starts from a known phase".
+    _device.reset();
+
     _claimed    = true;
     *portOut    = &_device;
     manifestOut = _device.manifest();

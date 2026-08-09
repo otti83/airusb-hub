@@ -79,11 +79,23 @@ Status RemoteDevicePort::submit(std::uint8_t epAddr, std::uint8_t xferType,
 
     if (outData.size() > maxSeg) ++_segmentedOut;
 
+    // The deadline covers SENDING as well as waiting. A 128 KiB OUT is eight
+    // records, and a socket that will not take all of them leaves the tail
+    // buffered — `flush()` reports Ok for that, because a short write is not an
+    // error. Blocking for a reply to a request that is still half in our own
+    // send buffer is a deadlock we would be holding both ends of.
+    const Clock& clock = Clock::system();
+    const Deadline deadline = Deadline::afterMs(clock, watchdog::kUrbWatchdogImporter);
+
     if (const Status s = emitTransfer(base, submitBody, outData, maxSeg,
             [this](std::span<const std::uint8_t> rec) { return _link->sendRecord(rec); });
         s != Status::Ok)
         return s;
-    if (const Status s = _link->flush(); s != Status::Ok) return s;
+    for (;;) {
+        if (const Status s = _link->flush(); s != Status::Ok) return s;
+        if (_link->pendingTxBytes() == 0) break;
+        if (deadline.expired(clock)) return Status::XferTimeout;
+    }
 
     ++_issued;
 
@@ -96,8 +108,6 @@ Status RemoteDevicePort::submit(std::uint8_t epAddr, std::uint8_t xferType,
     // is deliberately larger than the device ceiling: the exporter should be
     // the one to give up on the device and say so, and this only fires when the
     // exporter itself has gone quiet.
-    const Clock& clock = Clock::system();
-    const Deadline deadline = Deadline::afterMs(clock, watchdog::kUrbWatchdogImporter);
     auto awaitRecord = [&](std::vector<std::uint8_t>& into) -> Status {
         for (;;) {
             const Status r = _link->receiveRecord(into);

@@ -136,8 +136,22 @@ Status ImporterClient::call(wire::Type type, std::span<const std::uint8_t> body,
     encodeHeader(h, rec);
     rec.insert(rec.end(), body.begin(), body.end());
 
+    const Clock& clock = Clock::system();
+    const Deadline deadline = Deadline::afterMs(clock, watchdog::kNetCtrl);
+
     if (const Status s = link->sendRecord(rec); s != Status::Ok) return s;
-    if (const Status s = link->flush(); s != Status::Ok) return s;
+    // Control messages are small and will almost always leave in one write, but
+    // "almost always" is what a partial write is. Waiting for a reply to a
+    // request still sitting in our own send buffer is a deadlock, and the cost
+    // of ruling it out here is one comparison.
+    for (;;) {
+        if (const Status s = link->flush(); s != Status::Ok) return s;
+        if (link->pendingTxBytes() == 0) break;
+        if (deadline.expired(clock)) {
+            _why = "could not send the request in time";
+            return Status::XferTimeout;
+        }
+    }
 
     // A deadline, because this loop used to have none.
     //
@@ -153,9 +167,6 @@ Status ImporterClient::call(wire::Type type, std::span<const std::uint8_t> body,
     // exchange may take (§ the timeout table), so the number is not invented
     // here. The clock is the continuous one, so a laptop that sleeps mid-call
     // times out on waking rather than granting itself the nap.
-    const Clock& clock = Clock::system();
-    const Deadline deadline = Deadline::afterMs(clock, watchdog::kNetCtrl);
-
     std::vector<std::uint8_t> in;
     for (;;) {
         const Status r = link->receiveRecord(in);
