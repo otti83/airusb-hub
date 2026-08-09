@@ -18,7 +18,7 @@ authenticated as `otti83`). Everything below is pushed.
 | Session layer, L1 protocol, manifest | **done** |
 | Networking | **done** — real TCP; macOS↔macOS, macOS↔Linux, **Windows↔macOS on two machines** |
 | Windows client | **done** — MSVC 19.51 builds it, 13/13 native, full BOT exchange |
-| **Receiving on Linux** | **WORKS, incl. over the network** — the kernel enumerates it, binds `usb-storage`, mounts a filesystem: locally (§3.6) and via `airusb-vhci --host` over an encrypted session on a real kernel (L6+L8 PASS, `LINUX_IMPORTER_PLAN.md` §7). Only a real captured drive remains |
+| **Receiving on Linux** | **WORKS on real hardware, over the network** — a real 058f:6387 drive captured on the Mac (`airusb-exportd --serve`) mounted on the Linux kernel via `airusb-vhci --host`, read-only, real files read; clean teardown (full L6 + L8 PASS, `LINUX_IMPORTER_PLAN.md` §7) |
 | Receiving on a Mac | **blocked on Apple** — FB24214361, §2 |
 | Receiving on Windows | UdeCx driver not written. **Not blocked by anyone** |
 
@@ -53,14 +53,21 @@ correctness cores were built hosted first (segmentation L5; `ImporterDataPlane`,
 94 checks; `VhciNetBridge`, 125 checks) and reviewed to PASS by GPT-5.6 across
 three rounds (§7); the blocking-vs-liveness reasoning is recorded in §7.
 
-**The ONE thing left for the FULL gate: a real drive.** The L6 run used a
-*simulated* device (`airusb-net serve`). Pointing it at a real `058f:6387`
-captured by the macOS exporter (P2.8) needs the user's `sudo` on the Mac (capture
-is root-only, and `sudo` is blocked for the assistant on the Mac — §5). The steps:
-run the macOS exporter daemon against `058f:6387`, then `airusb-vhci --host
-<mac-ip>` in the VM (route first — the Mac and VM reach each other via
-`host.lima.internal`; §4.3). Everything else — protocol, crypto, segmentation, the
-async data plane, the non-blocking bridge — is proven. **Nothing waits on Apple.**
+**THE FULL L6 GATE PASSED ON REAL HARDWARE, 2026-08-09.** `airusb-exportd --device
+058f:6387 --serve` (the new `--serve` mode + `airusb-agent`) captured the real
+31.5 GB SuperSpeed drive on the Mac and served it over TCP; `airusb-vhci --host
+host.lima.internal` in the Lima VM mounted it. The Linux kernel enumerated the real
+drive (`Direct-Access Generic Flash Disk`, `sd [sda] 61440000 512-byte blocks
+(31.5 GB)`, `Attached SCSI removable disk`), `lsblk` showed `sda1 exfat "Memory
+32GB"`, and `mount -o ro /dev/sda1` listed the drive's actual files read-only
+(`df`: 14 G used). Teardown was clean and the drive returned to the Mac, re-mounted,
+data untouched. That is the whole product working on real hardware, macOS exporter
+→ Linux importer, end to end — and **nothing about it waited on Apple.**
+
+The macOS *importer* is still the only Apple-blocked piece (§2). What remains is
+polish, not new capability: `airusb-exportd --serve` is a test-tool serve loop
+(the shipping exporter is the launchd daemon/agent); the Windows importer (UdeCx,
+§4.4) is unwritten but self-service; and the smaller unblocked items in §4.5.
 
 ---
 

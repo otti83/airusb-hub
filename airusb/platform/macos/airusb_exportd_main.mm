@@ -249,10 +249,13 @@ int runServe(HostDeviceExporter& exporter, std::uint16_t port,
         std::unique_ptr<transport::TcpStream> conn;
         for (int i = 0; i < 3000 && !conn; ++i) {          // wait for the next importer
             conn = transport::TcpStream::accept(listenFd, &st);
-            if (!conn) {
-                if (!exporter.agentAlive()) break;
-                platform::sleepMs(20);
-            }
+            // Actively watch the agent WHILE IDLE: waitWhileAgentAlive() reads the
+            // link with a short timeout and detects its EOF, so a console user
+            // quitting the agent releases the drive promptly even with no importer
+            // attached. The passive agentAlive() flag only flips on a failed bulk
+            // transfer, which never happens when nothing is being forwarded — so
+            // polling it here would hold the capture until the next importer.
+            if (!conn && !exporter.waitWhileAgentAlive(20)) break;
         }
         if (!conn) continue;
         logLine("ATTACH", @"importer connected");

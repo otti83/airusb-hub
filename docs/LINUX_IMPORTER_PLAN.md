@@ -576,10 +576,15 @@ idVendor=058f idProduct=6387`, `Product: AirUSB`, `usb-storage … detected`,
 `sda 30M disk usb`), then `mkfs.vfat` / `mount` / write / `umount` (WRITE(10)+CSW
 flushed) / remount / `cat` returned the exact bytes. The bridge forwarded ~1100
 transfers / ~17 MB through segmentation and the async plane, stalled=0.
-**What is left for the FULL gate:** the device was simulated (`airusb-net serve`),
-not a real `058f:6387` captured by the macOS exporter — that capture needs the
-user's `sudo` on the Mac (P2.8). Everything the importer builds is now proven on a
-real kernel.
+**FULL GATE PASSED ON REAL HARDWARE, 2026-08-09.** `airusb-exportd --device
+058f:6387 --serve` (new `--serve` mode) + `airusb-agent` captured the real 31.5 GB
+SuperSpeed drive on the Mac and served it over TCP to `airusb-vhci --host
+host.lima.internal` in the VM. The kernel enumerated the real drive (`Direct-Access
+Generic Flash Disk`, `sd [sda] 61440000 512-byte blocks (31.5 GB)`), `lsblk` showed
+`sda1 exfat "Memory 32GB"`, `mount -o ro /dev/sda1` succeeded and its real files
+were listed read-only (14 GB used). Teardown was clean; the drive returned to the
+Mac and re-mounted, data untouched. macOS exporter → Linux importer, real hardware,
+end to end — nothing waited on Apple.
 
 The three hard-correctness prerequisites were built and proven with no kernel in
 the loop first: segmentation (L5), the non-blocking `ImporterDataPlane` (§4.3 item
