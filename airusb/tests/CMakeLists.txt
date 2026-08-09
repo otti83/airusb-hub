@@ -30,6 +30,7 @@ airusb_test(test_l5_segmentation)
 airusb_test(test_dataplane)
 airusb_test(test_netbridge airusb_linux_usbip)
 airusb_test(test_exporter airusb_diag)
+airusb_test(test_windowsusb airusb_windows_udecx)
 airusb_test(test_control  airusb_control)
 airusb_test(test_hub_e2e  airusb_control)
 

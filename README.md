@@ -158,7 +158,7 @@ implementation that only talks to itself can be perfectly self-consistent and
 completely wrong.
 
 ```
-24 test suites, 0 failures      3 fuzz targets, 0 crashes
+25 test suites, 0 failures      3 fuzz targets, 0 crashes
 CI on every commit: macOS/Clang · Linux/GCC+ASan+UBSan · Windows/MSVC · MinGW cross-build
 zero warnings under -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow,
 and under MSVC /W4 /permissive-
@@ -225,6 +225,7 @@ Requires macOS 13+, Xcode 26. Tested on macOS 26.5, Apple M1.
 | [Why two processes](docs/P1_CAPTURE_VERIFICATION.md) | What was measured on real hardware. |
 | [The exporter](docs/P2_8_EXPORTER.md) | How sharing works, and the hardware evidence. |
 | [The Linux importer](docs/LINUX_IMPORTER_PLAN.md) | vhci-hcd, gate by gate, with the evidence for each. |
+| [The Windows importer](docs/WINDOWS_IMPORTER_PLAN.md) | UdeCx, gate by gate. In progress — the portable half first, as on Linux. |
 | [Security](docs/P2_4_SECURITY.md) | What protects a session, and how it was verified. |
 | [Windows](docs/WINDOWS.md) | Building and running on Windows, and what MSVC settled. |
 | [Entitlement](docs/ENTITLEMENT_REQUEST.md) | The one Apple-managed entitlement the macOS receiving half needs. |

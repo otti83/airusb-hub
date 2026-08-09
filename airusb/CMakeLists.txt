@@ -175,6 +175,25 @@ add_library(airusb_linux_usbip STATIC
 # so the fuzzed codec is unaffected.
 target_link_libraries(airusb_linux_usbip PUBLIC airusb_core airusb_transport airusb_session)
 
+# ---------------------------------------------------------------------------
+# platform/windows — the Windows importer's portable half.
+#
+# Built on EVERY platform, for the same reason platform/linux/UsbipCodec is: it
+# is pure translation against a kernel ABI, and a wrong constant produces a
+# device that enumerates and then misbehaves. Finding that on the development
+# Mac costs a rebuild; finding it with a kernel-mode driver in the loop costs a
+# bugcheck and a reboot on a machine this project can only reach by RDP.
+#
+# The WDK headers are not included here and must not be. When a real driver
+# build DOES include them, AIRUSB_WITH_WDK static_asserts every transcribed
+# constant against Microsoft's own — that build is the acceptance test for the
+# numbers, and these tests are the acceptance test for the mapping.
+# ---------------------------------------------------------------------------
+add_library(airusb_windows_udecx STATIC
+    platform/windows/WindowsUsb.cpp
+)
+target_link_libraries(airusb_windows_udecx PUBLIC airusb_core)
+
 # The L1 gate. Linux only, because it writes to vhci-hcd's sysfs and there is
 # nothing to point it at anywhere else.
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
