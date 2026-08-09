@@ -229,7 +229,17 @@ jobs:
             # Exporter first — the order that tears the session down while the
             # other side is still deciding, and the one a naive implementation
             # never recovers from.
-            Post 8801 $hA 'share/approve' '{"accept":true}' | Out-Null
+            # The approval names the question it is answering. An answer that
+            # does not is refused, and that refusal is checked first.
+            $shA = (Get-State 8801 $hA).share
+            $r = Invoke-WebRequest -Method Post -Uri 'http://127.0.0.1:8801/api/share/approve' `
+                   -Headers $hA -ContentType 'application/json' -Body '{"accept":true}' -SkipHttpErrorCheck
+            if ($r.StatusCode -ne 400) { throw "a ticketless approval got $($r.StatusCode), wanted 400" }
+            Write-Host "the ceremony refuses an answer with no ticket"
+
+            $bodyA = @{ accept = $true; ticket = $shA.approvalTicket
+                        fingerprint = $shA.peerFingerprint; sas = $shA.sas } | ConvertTo-Json -Compress
+            Post 8801 $hA 'share/approve' $bodyA | Out-Null
             $ok = $false
             foreach ($i in 1..40) {
               Start-Sleep -Milliseconds 500
@@ -239,7 +249,9 @@ jobs:
                 $sh = (Get-State 8801 $hA).share
                 if ($sh.sas -ne $im.sas) { throw "after the reconnect the numbers disagree" }
                 Write-Host "  reconnected with a new number, matching on both sides: $($im.sas)"
-                Post 8802 $hB 'import/approve' '{"accept":true}' | Out-Null
+                $bodyB = @{ accept = $true; ticket = $im.approvalTicket
+                            fingerprint = $im.peerFingerprint; sas = $im.sas } | ConvertTo-Json -Compress
+                Post 8802 $hB 'import/approve' $bodyB | Out-Null
               }
               if ($im.state -eq 'connected' -or $im.state -eq 'attached') { $ok = $true; break }
             }
@@ -396,8 +408,40 @@ jobs:
           [ -n "$sasA" ] && [ "$sasA" = "$sasB" ] \
             || { echo "the two sides showed different numbers"; exit 1; }
 
-          B -X POST -d '{"accept":true}' http://127.0.0.1:8802/api/import/approve > /dev/null
-          A -X POST -d '{"accept":true}' http://127.0.0.1:8801/api/share/approve > /dev/null
+          # The approval names the QUESTION it is answering: the ticket the
+          # daemon minted for this session, plus the fingerprint and the digits
+          # that were on screen. An answer with none of those is refused now,
+          # and the two lines below prove that before using the real one — a
+          # ceremony whose refusals have stopped working looks exactly like one
+          # that is working.
+          field() { grep -o "\"$2\":\"[^\"]*\"" "$1" | head -1 | cut -d'"' -f4; }
+
+          B http://127.0.0.1:8802/api/state > /tmp/bs.json
+          A http://127.0.0.1:8801/api/state > /tmp/as.json
+          tB=$(python3 -c "import json;print(json.load(open('/tmp/bs.json'))['import']['approvalTicket'])")
+          fB=$(python3 -c "import json;print(json.load(open('/tmp/bs.json'))['import']['peerFingerprint'])")
+          tA=$(python3 -c "import json;print(json.load(open('/tmp/as.json'))['share']['approvalTicket'])")
+          fA=$(python3 -c "import json;print(json.load(open('/tmp/as.json'))['share']['peerFingerprint'])")
+          [ -n "$tB" ] && [ "$tB" != "00000000000000000000000000000000" ] \
+            || { echo "no approval ticket was offered"; exit 1; }
+
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+                 -H "X-AirUSB-Token: $TB" -H 'Content-Type: application/json' \
+                 -d '{"accept":true}' http://127.0.0.1:8802/api/import/approve)
+          [ "$code" = 400 ] || { echo "an approval with no ticket got $code, wanted 400"; exit 1; }
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+                 -H "X-AirUSB-Token: $TB" -H 'Content-Type: application/json' \
+                 -d "{\"accept\":true,\"ticket\":\"$tB\",\"fingerprint\":\"$fB\",\"sas\":\"000000\"}" \
+                 http://127.0.0.1:8802/api/import/approve)
+          [ "$code" = 403 ] || { echo "an approval with the wrong digits got $code, wanted 403"; exit 1; }
+          echo "the ceremony refuses a ticketless and a mismatched answer"
+
+          sB=$(python3 -c "import json;print(json.load(open('/tmp/bs.json'))['import']['sas'])")
+          sA=$(python3 -c "import json;print(json.load(open('/tmp/as.json'))['share']['sas'])")
+          B -X POST -d "{\"accept\":true,\"ticket\":\"$tB\",\"fingerprint\":\"$fB\",\"sas\":\"$sB\"}" \
+            http://127.0.0.1:8802/api/import/approve > /dev/null
+          A -X POST -d "{\"accept\":true,\"ticket\":\"$tA\",\"fingerprint\":\"$fA\",\"sas\":\"$sA\"}" \
+            http://127.0.0.1:8801/api/share/approve > /dev/null
 
           for i in $(seq 1 40); do
             state=$(B http://127.0.0.1:8802/api/state | grep -o '"state":"[a-z-]*"' | sed -n 2p)
@@ -413,6 +457,87 @@ jobs:
           grep -q '"passed":true' verify.json \
             || { echo "the verification failed:"; cat verify.json; exit 1; }
           echo 'PASS: paired over the control API and read the device through it.'
+
+      - name: The privileged broker, and the window as its client
+        env:
+          ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: |
+          set -eu -o pipefail
+          # A1's gate, minus the kernel. GitHub's runner has no vhci-hcd, so the
+          # presenter reports canPresent=false — and THAT is the assertion worth
+          # having here: a build that cannot present must say so rather than
+          # offering an Attach button that does something smaller. The kernel
+          # half is proven on the Lima VM and recorded in the handoff.
+          mkdir -p /tmp/brk && cd /tmp/brk
+          "$GITHUB_WORKSPACE/airusb/build/airusb-net" serve --port 7761 \
+              --id exp.id --peers exp.peers > exp.log 2>&1 &
+          "$GITHUB_WORKSPACE/airusb/build/airusb-brokerd" --socket /tmp/brk/b.sock \
+              --simulated --id br.id --peers br.peers > brk.log 2>&1 &
+          trap 'pkill -f airusb-brokerd || true; pkill -f "airusb-net serve" || true;
+                pkill -f airusb-hubd || true; echo "--- broker ---"; cat /tmp/brk/brk.log;
+                echo "--- window ---"; cat /tmp/brk/hub.log 2>/dev/null || true' EXIT
+          sleep 2
+          grep -q "presenter linux-vhci" brk.log \
+            || { echo "the broker did not report a presenter"; cat brk.log; exit 1; }
+
+          "$GITHUB_WORKSPACE/airusb/build/airusb-hubd" --broker /tmp/brk/b.sock \
+              --ui-port 8811 --no-open --token /tmp/brk/hub.token > hub.log 2>&1 &
+          for i in $(seq 1 50); do [ -s /tmp/brk/hub.token ] && break; sleep 0.2; done
+
+          # THE assertion: the window shows the MACHINE's identity, the one the
+          # broker holds and the one a peer authenticates — not an identity of
+          # its own. That separation is the defect A1 exists to close.
+          grep -q "held by the broker" hub.log \
+            || { echo "the window is not using the broker's identity"; cat hub.log; exit 1; }
+          brokerFp=$(grep -o '@@AIRUSB_BROKER@@ identity .*' brk.log | cut -d' ' -f3-)
+          grep -q "$brokerFp" hub.log \
+            || { echo "the window shows a different identity from the broker"; exit 1; }
+
+          T=$(cat /tmp/brk/hub.token)
+          H() { curl -sS -H "X-AirUSB-Token: $T" -H 'Content-Type: application/json' "$@"; }
+          H -X POST -d '{"host":"127.0.0.1","port":7761}' \
+            http://127.0.0.1:8811/api/import/connect > /dev/null
+          for i in $(seq 1 40); do
+            H http://127.0.0.1:8811/api/state > /tmp/brk/s.json
+            st=$(python3 -c "import json;print(json.load(open('/tmp/brk/s.json'))['import']['state'])")
+            [ "$st" = "awaiting-approval" ] && break
+            sleep 0.5
+          done
+          [ "$st" = "awaiting-approval" ] \
+            || { echo "no pairing question appeared (state $st)"; exit 1; }
+
+          t=$(python3 -c "import json;print(json.load(open('/tmp/brk/s.json'))['import']['approvalTicket'])")
+          f=$(python3 -c "import json;print(json.load(open('/tmp/brk/s.json'))['import']['peerFingerprint'])")
+          v=$(python3 -c "import json;print(json.load(open('/tmp/brk/s.json'))['import']['sas'])")
+
+          # Refused through the broker channel, not merely in the class behind it.
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+                 -H "X-AirUSB-Token: $T" -H 'Content-Type: application/json' \
+                 -d "{\"accept\":true,\"ticket\":\"${t:0:30}ff\",\"fingerprint\":\"$f\",\"sas\":\"$v\"}" \
+                 http://127.0.0.1:8811/api/import/approve)
+          [ "$code" = 403 ] || { echo "a stale ticket got $code through the broker, wanted 403"; exit 1; }
+
+          H -X POST -d "{\"accept\":true,\"ticket\":\"$t\",\"fingerprint\":\"$f\",\"sas\":\"$v\"}" \
+            http://127.0.0.1:8811/api/import/approve > /dev/null
+          for i in $(seq 1 40); do
+            H http://127.0.0.1:8811/api/state > /tmp/brk/s.json
+            st=$(python3 -c "import json;print(json.load(open('/tmp/brk/s.json'))['import']['state'])")
+            [ "$st" = "connected" ] && break
+            sleep 0.5
+          done
+          [ "$st" = "connected" ] || { echo "pairing never completed (state $st)"; exit 1; }
+
+          # And the honesty check: on a runner with no vhci-hcd the broker must
+          # report that it cannot present, in words, rather than pretending.
+          can=$(python3 -c "import json;print(json.load(open('/tmp/brk/s.json'))['import']['canPresent'])")
+          echo "canPresent=$can"
+          if [ "$can" = "False" ]; then
+            why=$(python3 -c "import json;print(json.load(open('/tmp/brk/s.json'))['import'].get('cannotPresentBecause',''))")
+            [ -n "$why" ] || { echo "it said no and gave no reason"; exit 1; }
+            echo "  reason: $why"
+          fi
+          echo 'PASS: the window drove the broker, and the identity is the machine one.'
 
   # ---------------------------------------------------------------------------
   # macOS. The development platform, and the only one with the real exporter.

@@ -11,15 +11,18 @@ device itself is forwarded.
 Peer to peer, LAN only. No cloud, no account, no server. Every session is
 encrypted and mutually authenticated (Noise).
 
-> **Pairing is not yet uniform, and this is the honest version.** The window
-> (`airusb-hubd`) shows a six-digit number on both machines and waits for a
-> person to say they match. The command-line tools — including
-> `airusb-exportd --serve` and `airusb-vhci`, which are the pair that actually
-> makes Linux enumerate a device — **trust the first peer that connects** and
-> print the number without asking. That is trust-on-first-use, and on a shared
-> LAN the first connector is not guaranteed to be you. Making the real path use
-> the ceremony the window already implements is the top item in
-> [`docs/HANDOFF.md`](docs/HANDOFF.md) §4.6.
+> **One identity per machine, and one ceremony.** `airusb-brokerd` owns the
+> machine's identity, its pinned peers and its leases, and it is the process
+> that hands a device to your operating system. The window is a client of it: it
+> holds no key, and it cannot pin a peer the broker did not itself put a
+> question about. So the six digits you compare belong to the session that
+> really moves a filesystem — which was not true before 2026-08-09, when the
+> window had an identity of its own and the command-line tools had another.
+>
+> The command-line tools are still there and still useful, and an unpaired peer
+> is REFUSED by default: they print the number and tell you to compare it.
+> `--trust-on-first-use` is the honest name for taking the risk deliberately,
+> and it has to be typed.
 
 ---
 
@@ -29,14 +32,21 @@ encrypted and mutually authenticated (Noise).
 |---|---|
 | **Share a device from a Mac** | **works, on real hardware** — a 31.5 GB SuperSpeed drive, captured from macOS and handed back cleanly |
 | **Receive a device on Linux** | **works** — the Linux kernel enumerates it, binds `usb-storage`, and mounts the filesystem |
-| **The window** | **works on macOS, Linux and Windows** — one interface, one binary, no toolkit to install ([`docs/GUI.md`](docs/GUI.md)) |
-| Encryption, authentication, pairing | done — Noise_XX / Noise_IK, checked against the official test vectors |
-| Receive a device on **Windows** | not yet — needs a UdeCx driver. Nobody's permission required; just unwritten |
+| **The window** | **works on macOS, Linux and Windows** — one interface, one binary, no toolkit to install ([`docs/GUI.md`](docs/GUI.md)). On Linux its **Attach** really enumerates the device; where it cannot, it says so instead of doing something smaller |
+| Encryption, authentication, pairing | done — Noise_XX, checked against the official test vectors, with limits negotiated at HELLO before either side can act. Noise_IK is implemented and vector-tested; production runs XX |
+| Receive a device on **Windows** | **the driver is written, builds, and analyses clean — and has never been loaded.** Nobody's permission required; it needs a spare machine and a person at the keyboard |
 | Receive a device on **macOS** | **blocked on Apple** — see below |
 
 So there is a working product today: **a Mac shares a drive, a Linux machine
-uses it as a real USB device.** Sharing from Linux or Windows, and receiving on
-Windows or macOS, are the parts still missing.
+uses it as a real USB device, and the window is how you do it.** Sharing from
+Linux or Windows, and receiving on Windows or macOS, are the parts still
+missing.
+
+**And one limit worth stating plainly:** every hardware claim here rests on a
+single SuperSpeed flash drive on a clean LAN. No keyboards, no cameras, no USB 2
+speeds, no hubs, no unplug-mid-write. The exporter now REFUSES a device with an
+interrupt or isochronous endpoint rather than accepting it and hanging — so a
+keyboard gets a sentence, not a silence — but that is a refusal, not support.
 
 > **The macOS receiving half is blocked, and only that half.** Presenting a
 > virtual USB host controller on macOS needs
@@ -70,6 +80,18 @@ both screens, and accept. It offers a simulated drive so the whole path works on
 a machine with nothing plugged in; add `airusb-exportd` on a Mac to share real
 hardware. Windows binaries are published by CI on every commit.
 
+Started that way, the window says **DIAGNOSTIC ONLY** — it can pair with another
+machine and read a device from it, and it cannot add one to this computer. To
+actually receive a device, run the broker as well; on Linux that is:
+
+```bash
+sudo ./build/airusb-brokerd --share            # owns the identity and the vhci port
+./build/airusb-hubd --broker /run/airusb-broker.sock
+```
+
+The window then shows **this machine's** identity rather than one of its own,
+and Attach means what it says.
+
 The window is a page served to `127.0.0.1` only, behind a token, because the
 browser is the one interface toolkit that is already installed on all three
 operating systems — and the only one this project can actually test on all
@@ -92,7 +114,7 @@ three. Details and the security model: [`docs/GUI.md`](docs/GUI.md).
                                                                         │
                                                                         ▼
                                                      the OS loads its own driver
-                                              Linux: vhci-hcd  ·  Windows: UdeCx (todo)
+                                     Linux: vhci-hcd  ·  Windows: UdeCx (written, never loaded)
                                               macOS: blocked on an Apple entitlement
 ```
 

@@ -1,3 +1,13 @@
+> **UPDATE, 2026-08-09 — read this before the rest of the file.** The window is
+> no longer the authority. `airusb-brokerd` owns the machine's identity, its
+> pinned peers, its leases and its USB presentation; `airusb-hubd` is a client
+> that holds no key and cannot pin a peer the broker did not itself ask about.
+> Everything below about the CEREMONY is still exactly right — the SAS, the
+> drop-after-approval, the reconnect — and everything below that implies the
+> window IS the product's session should be read as describing the broker it now
+> drives. Where the window runs with no broker it says **DIAGNOSTIC ONLY** and
+> cannot add a device to the computer. See `HANDOFF.md` §3.16 and §3.17.
+
 # The window
 
 `airusb-hubd` is the product's interface. It runs on macOS, Linux and Windows,

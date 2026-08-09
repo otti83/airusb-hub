@@ -1,21 +1,20 @@
 # AirUSB Hub — Session Handoff
 
-**Written:** 2026-08-08 · **Last updated:** 2026-08-09, at the end of a session
-that finished Windows verification, built the GUI, took the Windows importer
-from nothing to a driver that compiles, and then had the whole repository read
-adversarially — which found four live bugs in that day's code and one security
-claim in the README that was not true. All are fixed.
+**Written:** 2026-08-08 · **Last updated:** 2026-08-09, at the end of the session
+that did the architecture. The four items the previous handoff opened on —
+A1 the privileged broker, A2 the asynchronous exporter, A3 the session
+lifecycle, A4 the Windows importer — are **done**, in the order GPT-5.6 said to
+do them in rather than the order they were listed in, because its first finding
+was that the listed order would have cemented a stop-ship bug.
 
-**The next session is architecture, not features, and it starts by consulting
-GPT-5.6 with the brief in §4.7.** Read THE NEXT SESSION below before anything
-else.
+**The next session's job is the compatibility envelope, and the one thing only a
+human can do is load a driver.** Read §0 and then §4.
+
 **Purpose:** resume this project in a fresh session with no access to the previous
 conversation. Everything load-bearing is here or in the documents it points to.
 **Repo:** `/Users/mba/Desktop/AirUSB Hub` — public at
 <https://github.com/otti83/airusb-hub> (Apache-2.0, branch `main`, `gh`
-authenticated as `otti83`). Everything below is committed AND pushed to
-`origin/main` (this session's L5→L6 work through the real-hardware pass; last commit
-records this line).
+authenticated as `otti83`).
 
 ---
 
@@ -24,120 +23,76 @@ records this line).
 | | state |
 |---|---|
 | Sharing a USB device from a Mac | **works on real hardware** (058f:6387 SuperSpeed) |
-| Encryption + authentication | **done** — Noise_XX / Noise_IK, official vectors matched |
-| Session layer, L1 protocol, manifest | **done** |
-| Networking | **done** — real TCP; macOS↔macOS, macOS↔Linux, **Windows↔macOS on two machines** |
-| Windows client | **done, and re-verified against the CURRENT tree** — MSVC 19.51, 24/24 native, full BOT exchange **with segmentation actually firing** (§3.4) |
-| **The product's window** | **done, and proven on two real machines** — `airusb-hubd` on the GMKtec and this Mac paired with a human comparing the six digits, then read a device; §3.9, `GUI.md` |
-| **Receiving on Linux** | **WORKS on real hardware, over the network** — a real 058f:6387 drive captured on the Mac (`airusb-exportd --serve`) mounted on the Linux kernel via `airusb-vhci --host`, read-only, real files read; clean teardown (full L6 + L8 PASS, `LINUX_IMPORTER_PLAN.md` §7) |
+| Encryption + authentication | **done** — Noise_XX matched against the official vectors. Noise_IK is implemented and vector-tested but production only ever runs XX |
+| Session layer | **done, and now actually negotiated** — HELLO/HELLO_OK is exchanged before `established()` is true (§3.15) |
+| Networking | **done** — real TCP; macOS↔macOS, macOS↔Linux, Windows↔macOS on two machines |
+| Windows client | **done** — MSVC 19.51, native suites, full BOT exchange with segmentation firing |
+| **The window** | **done, and it is now a CLIENT of the broker** — it holds no key and cannot pin a peer the broker did not ask about (§3.16) |
+| **Receiving on Linux** | **works on real hardware, over the network, AND through the window** — `airusb-brokerd` drives the vhci presenter; the Attach button produced `Attached SCSI removable disk` (§3.17) |
 | Receiving on a Mac | **blocked on Apple** — FB24214361, §2 |
-| Receiving on Windows | **W1–W3 done and tested, W4 (`airusb.sys`) BUILDS but has never been loaded** — §3.11, `WINDOWS_IMPORTER_PLAN.md`. Not blocked by anyone; the first load needs a spare machine and a person at it |
-| The architecture | **four changes stand between the proof and a product** — see THE NEXT SESSION below, and §4.6 for how they were found |
+| Receiving on Windows | **W1–W5 done. `airusb.sys` builds, passes Code Analysis, and HAS NEVER BEEN LOADED** — §3.18. Not blocked by anyone; the first load needs a spare machine and a person at it |
+| The exporter's data plane | **asynchronous** — per-endpoint queues, ep0 a barrier, real CANCEL (§3.19) |
+| Device ownership | **survives the session that made it** — `LeaseAuthority`, and the bug it closes (§3.19) |
 
 ```
-27 test suites / 0 failures  (+test_control, test_hub_e2e, test_windowsusb,
-                              test_udecxipc, test_udecxbridge)
-4 fuzz targets / 0 crashes / 0 UB findings  (+fuzz_udecxipc, round-trip enforced)
+29 test suites / 0 failures   (+test_lifecycle 149, +test_broker 85)
+6 fuzz targets / 0 crashes    (+fuzz_usbip, +fuzz_broker; round-trip enforced)
 Zero warnings: macOS (Clang, full set), Linux (GCC, ASan+UBSan),
-               Windows (MinGW, full set), Windows (MSVC 19.51, /W4 /permissive-)
-~36,000 lines ours + 10 vendored files
+               Windows (MinGW, -Wconversion -Wsign-conversion -Wshadow),
+               Windows (MSVC 19.51, /W4 /permissive-)
+airusb.sys: DRIVER BUILD PASS, CODE ANALYSIS 0 findings — never loaded
+~40,000 lines ours + 10 vendored files
 ```
 
 ### What the previous handoff asked for, and what came of it
 
-Both items are done. Neither needed Apple.
+It asked for the §4.7 GPT-5.6 consultation to be run BEFORE designing anything.
+It was, and it paid for itself for the third time in a row: **its first finding
+was not one of the four architectural items at all.**
 
-**1. Windows verification — DONE, and it found the thing it was meant to find.**
-The instruction was to re-run Windows with "a transfer big enough to actually
-segment (>16 640 B)". It turned out nothing had *ever* segmented end to end, on
-any platform: the write probe's largest run was 16 384 bytes, which fits inside
-the 16 640-byte default record once you subtract the header, body and AEAD tag —
-and the unit test asserting that this run "is big enough to force record
-fragmentation" was asserting the opposite of what it said. The largest run is now
-131 072 bytes, chosen against Noise's 65 519-byte plaintext ceiling so it segments
-at *any* legal record size. `RemoteDevicePort` counts what happened, `airusb-net`
-prints it and FAILS the run if a 128 KiB transfer crossed unsplit, and both CI
-jobs assert `fired=yes`. Windows/MSVC now reports
-`SEGMENTATION out=2 in=2 contRecords=14 maxSegment=16552 largestOut=131072
-fired=yes` alongside `RESULT=PASS`. §3.4.
+> `ExporterSession` correctly refused to release the capture when its importer
+> disappeared, and then the session OBJECT was destroyed by the serving loop —
+> taking with it the only record of who owned the drive. `CapturedDeviceSource::claim()`
+> had no owner check, so the next paired peer to connect was handed the same
+> physical device.
 
-**2. The GUI — DONE.** The open question was "SwiftUI for macOS; what for Windows
-and Linux". The answer is one loopback HTTP control plane and one page compiled
-into the binary, because the browser is the only toolkit already present on all
-three machines *and* the only one this project can test on all three. No
-dependency was added. It shares, connects, pairs with the six-digit check,
-attaches and verifies — on macOS, Linux and Windows. Design, security model and
-the two-machine procedure: **`GUI.md`**. Evidence: §3.9.
+So "silence does not release the capture" was true of the local operating system
+and false of every other machine on the network, which is the case it was
+written for. Verified in `airusb_exportd_main.mm` and in `airusb-net` before
+anything was changed. It also said the proposed ordering — A1, then A2, then A3
+— was unsafe, because A1 would have institutionalised that behaviour. The order
+actually used was **A3a (the lease), A1, A2, A3b, A4**, and this handoff is
+organised the same way.
 
-### THE NEXT SESSION: the architecture, not more features
+The full consultation, its findings, and the two places it was WRONG are in
+§4.6.
 
-**Start by consulting GPT-5.6 about the architecture. The brief is written out
-in §4.7 — paste it, do not improvise one.** The last two consultations each
-deleted or rewrote a subsystem before it was built, which is cheaper than
-building it twice, and the questions in §4.7 are the ones this session could not
-answer for itself.
+### THE NEXT SESSION: the compatibility envelope, and one driver load
 
-The work is no longer "add the next endpoint type". An adversarial read of the
-whole repository (§4.6) found that the proven result is narrow and real — one
-macOS exporter, one BOT flash drive, one Linux importer, one clean LAN — and
-that four things standing between it and a product are **architectural**, not
-missing features. Doing them in the wrong order means doing them twice.
+The architecture is done. What is left is that **every hardware claim in this
+repository still rests on a single SuperSpeed BOT flash drive on a clean LAN.**
 
-**A1 — the privileged broker.** The window is a diagnostic front end. `hubd`
-attaches a `RemoteDevicePort` and runs `BotProbe`; it never tells `airusb-vhci`
-or a Windows service to present anything to a real USB stack, and it carries its
-own identity and pin store, separate from the privileged tools'. So "attach" in
-the window and "attach" in the product are different verbs, and the pairing
-ceremony protects the wrong session. Until a privileged broker exists that the
-window drives, the GUI and the real USB paths are two parallel demonstrations.
-**This is the one that makes the others worth doing**, and it subsumes the half
-fix in §4.6 item 1.
+**N1 — load the driver.** `airusb.sys` builds, analyses clean, and has never
+been loaded. The staged order in `WINDOWS_IMPORTER_PLAN.md` §W6 exists so a
+first failure has ONE possible cause; run Static Driver Verifier first. **Not
+on the GMKtec** — it is reachable only over the network and is the project's
+only Windows peer, and a boot loop there costs both.
 
-**A2 — an asynchronous exporter.** `ExporterSession` performs the device
-transfer inline while processing the session. An interrupt IN that legitimately
-idles therefore blocks cancellation, detach and keepalive for the whole session,
-and there is no `CANCEL` handler at all — a cancelled transfer is retired
-locally while the physical one continues. This needs per-endpoint queues, async
-transfer ownership and a separate lifecycle pump. It is the reason HID and
-composite devices cannot be attempted yet.
+**N2 — a device that is not a flash drive.** The exporter now refuses an
+interrupt or isochronous endpoint through a synchronous port rather than hanging
+on it (§3.19), which means a keyboard gets a sentence instead of a hang — and
+it also means no keyboard has ever been carried. The block is a genuinely
+asynchronous platform port; macOS's is the interesting one, because its agent
+does bulk I/O over a blocking request/reply socket (§4.2).
 
-**A3 — session lifecycle: HELLO, keepalive, lease, reconnect.** Roles,
-capabilities, max transfer and keepalive are all defined in `Wire.h` and
-exchanged by nobody; `SecureSession` adopts its own configured record size, so
-two builds that disagree complete the handshake and fail later, obscurely.
-`_lastHeardNs` is written and never swept, and the "orphaned until the lease
-expires" comment describes an expiry that does not exist. There is no session
-resumption: a network blip is undefined behaviour rather than a controlled
-recovery.
+**N3 — sustained load.** Outstanding requests, reassembly arenas, queued replies
+and manifest sizes all have caps and none has a sustained-load gate.
 
-**A4 — the Windows importer, finished.** W1–W3 are done and W4 builds
-(§3.11). The remaining path is written out in `WINDOWS_IMPORTER_PLAN.md` and its
-first step is NOT to connect the network: make the driver enumerate a fixed
-synthetic device, then drive it from a local scripted host, then swap in the
-session layer. **A real machine must be present for the first load** — a KMDF
-fault is a bugcheck, and a boot loop on a box reachable only over the network is
-unrecoverable. The user has said a spare Windows machine will be provided for
-this; do not load a driver on the GMKtec.
-
-Ordering: **A1, then A2, then A3, with A4 in parallel** because it is
-independent and its risky step is gated on hardware that is not here yet.
-
-Everything in §4.6 that is not one of these four is a consequence of them or is
-small enough to fall out on the way.
-
-### The Linux importer is DONE — full L6 + L8 on real hardware (2026-08-09)
-
-This session finished the whole Linux importer, end to end: a real 058f:6387 drive
-captured on the Mac (`airusb-exportd --serve`, new) → encrypted network session →
-`airusb-vhci --host` → the Linux kernel enumerated it and mounted its exFAT
-filesystem read-only; teardown returned the drive to the Mac, data untouched.
-Killing the exporter mid-write gave an I/O error, not an unkillable D-state (L8).
-The three correctness cores (segmentation L5; async `ImporterDataPlane`; non-blocking
-`VhciNetBridge`) were built hosted-first, GPT-5.6-reviewed to PASS across three
-rounds, then proven on a real kernel. Details + how-to-reproduce: §3.7, §4.1, §7;
-gate evidence in `LINUX_IMPORTER_PLAN.md` §7 (L5–L8). **Reproduce the whole thing
-from the VM in ~30 s** with the two binaries already built at `/tmp/vhci-build` in
-the Lima `airusb` VM (see §3.3 / §4.1).
+**N4 — the local IPC boundary.** `LocalEndpoint` asks the kernel who the peer is
+and gets a UID. It does not get a PROGRAM, and on POSIX it cannot. Closing that
+needs XPC audit tokens plus a code requirement on macOS, polkit on Linux, and an
+Authenticode check on Windows. The header says so plainly rather than implying
+more; see §3.16.
 
 ### Apple entitlement — LOWEST PRIORITY now, RECORD ONLY (human-only action)
 
@@ -1028,6 +983,248 @@ driver (§4.4, Windows UdeCx) or Apple's answer (§2).
 
 ---
 
+
+### 3.15 HELLO is exchanged — 2026-08-09
+
+Two peers used to complete a Noise handshake and then each adopt its OWN
+configured record size. Nothing on the wire ever said what either believed, so
+two builds that disagreed reached an authenticated session, exchanged small
+messages happily, and failed on the first record between the two sizes —
+obscurely, and much later.
+
+The greeting happens **inside `SecureSession`, before `established()` is true**.
+That placement is the design rather than a convenience: every caller above it
+asks `established()` first, so there is no ordering for a caller to get wrong,
+because there is no moment at which a caller can act on limits the two ends have
+not agreed.
+
+* **Version fixes semantics; HELLO negotiates bounds.** A peer outside the
+  protocol version is REFUSED, not accommodated. Sizes take the minimum,
+  capabilities the intersection.
+* **Keepalive takes the FASTER of the two.** Each side is saying how often it
+  needs to HEAR from the other; honouring the slower one leaves the impatient
+  side declaring a healthy peer dead.
+* **Segmentation is mandatory.** A peer that cannot segment cannot carry a
+  1 MiB URB, and discovering that on the first transfer instead of at the
+  greeting is the failure being removed.
+* **The greeting is bound to the handshake.** Its session id is the channel
+  binding, so a recorded HELLO cannot be replayed into another session.
+
+Records stay at the 8 KiB pre-HELLO ceiling until the agreement lands.
+`RecordLayer::adoptRecordSize` is separate from `adoptCipher` because the two
+happen at different moments for different reasons.
+
+**A bug the tests found while this was being written, worth keeping.** The first
+floor given to `adoptRecordSize` was `kHandshakeRecordMax`, which refused the
+4 KiB record size `test_l5_segmentation` deliberately drives to prove the
+segmenter works when almost nothing fits. The 8 KiB handshake ceiling caps what
+may be sent BEFORE the greeting; the negotiated size is free to be smaller.
+There is a `kRecordBytesFloor` now, with a static_assert that it still holds a
+HELLO. A guard meant to catch nonsense had started rejecting the interesting
+case.
+
+Evidence: `tests/unit/test_session.cpp`, 407 checks — including two builds that
+disagree agreeing on the smaller size, capabilities intersecting rather than
+uniting, keepalive taking the faster, and a peer proposing an illegal size being
+refused.
+
+### 3.16 The broker — A1, and what the window can no longer do
+
+`airusb-hubd` used to generate its own identity seed and its own pin store, run
+its own session, show six digits, and record the pairing itself. Meanwhile
+`airusb-exportd` and `airusb-vhci` — the two programs that actually take a drive
+away from an operating system and give it to another — had a second identity and
+a second pin store and paired without showing anybody anything. **So a person
+compared six digits belonging to a diagnostic connection while a different key
+authorised the session that moved a filesystem.**
+
+`airusb-brokerd` is now the one process per machine that owns the identity, the
+pinned peers, the leases and the OS presentation. It is privileged, and that is
+not a choice: Linux tells vhci-hcd about a socket by writing a FILE DESCRIPTOR
+NUMBER into sysfs, a descriptor number only means anything in the process that
+writes it, writing there needs root, and the network session is on the other end
+of that same socket. The chain has no seam to put a boundary in.
+
+**The window is a client.** It holds no key, forwards no protocol record, and
+cannot pin a peer the broker did not itself put a question about. The approval
+carries a NONCE the broker minted for one specific session, plus the fingerprint
+and the digits that were on screen; all three are checked. A window one session
+out of date is refused rather than pinning a machine whose number nobody
+compared — which is the failure a person at the screen has no way to detect.
+
+With no broker running, `airusb-hubd` falls back to the diagnostic half and
+**says so**, in the window and in its startup lines:
+
+```
+@@AIRUSB_HUB@@ standalone — DIAGNOSTIC ONLY, no device is added to this computer
+@@AIRUSB_HUB@@ identity H2HWYAID ... (this window's, not this machine's)
+```
+
+versus, attached to a broker:
+
+```
+@@AIRUSB_HUB@@ identity KNVC54KY OJATO7TR UAF72FBC KP4FQU5J (this machine's, held by the broker)
+@@AIRUSB_HUB@@ presenter linux-vhci canPresent=yes
+```
+
+**What the local channel establishes, and what it does not.** `LocalEndpoint`
+asks the kernel: `getpeereid` on POSIX, the pipe's SDDL and client token on
+Windows, and it fails closed when the kernel will not say. That gives a USER.
+It does not give a PROGRAM, and on POSIX it cannot — a user can run any binary
+and can attach a debugger to their own processes. The honest consequence is that
+the broker's authority is bounded to what the logged-in person could already do
+at the keyboard. Closing the gap needs XPC audit tokens plus a code requirement
+on macOS, polkit on Linux, and an Authenticode check on Windows. **Do not
+"fix" it with a check on /proc/pid/exe** — that would make the boundary look
+stronger than it is, which is worse than the gap.
+
+Evidence: `tests/unit/test_broker.cpp`, 85 checks (codec deviations, and five
+ways an approval is refused), plus §3.17.
+
+### 3.17 The window's Attach enumerated a device — A1's gate, 2026-08-09
+
+Everything below went through the HTTP control plane the browser uses. Nothing
+called into the session layer directly, which is the point: if this passes, the
+six digits a person compares belong to the session that enumerated the device.
+
+```
+presenter linux-vhci canPresent True
+pairing question: sas=175306 fp='ACK3F7YJ DNTEW67V MLNTH2AA DIBLQEZO'
+  a stale ticket           -> 403
+  right ticket, wrong SAS  -> 403
+  the real answer          -> connected
+attach -> presented: True
+          "Presented to this computer on virtual port 8."
+
+usb 4-1: New USB device found, idVendor=058f, idProduct=6387
+scsi 0:0:0:0: Direct-Access     AirUSB   Scripted Device
+sd 0:0:0:0: [sda] Attached SCSI removable disk
+lsusb: 058f:6387 Alcor Micro Corp. Flash Drive
+dd if=/dev/sda -> 32768 bytes, 529 kB/s
+verify while presented -> 501, "this computer's own tools are what read it"
+detach -> presented: False, sda gone, every vhci port back to sta 004
+```
+
+The exporter authenticated `M6TSF22S HFX56MMG O63QKSEB DSEHN6DF` — **the same
+identity the window displayed.** That is the whole point of the change.
+
+Two details worth keeping:
+
+- **`verify` is refused while a device is presented, and that is a feature.**
+  Once the OS owns the endpoints, a second reader driving the same bulk pipes
+  would desynchronise the Bulk-Only Transport phase machine underneath a mounted
+  filesystem — the same class of corruption the "one logical transfer is one
+  call" rule exists to prevent, arriving from a completely different direction.
+- **Reproduce it** with the script recorded in §7.7.
+
+### 3.18 The Windows importer — W4 fixed, W5 written, still never loaded
+
+`airusb.sys` compiled before this session and was a scaffold. Read against the
+real UdeCx contract it was wrong in ways a build cannot see:
+
+| defect | why it mattered |
+|---|---|
+| `UDECX_WDF_DEVICE_CONFIG_INIT(&config, NULL)` | the capability query callback is marked **Required** in the kit's own header. First symptom: a controller that fails to create, which reads like a broken kit |
+| `AirUsbRetireAll()` was empty | its comment claimed every outstanding transfer was completed. None was |
+| `EvtFileClose` was the only teardown hook | Close can run long after the process died; `EvtFileCleanup` is the one that fires when the handle does |
+| no endpoint callbacks at all | purge is what a driver unload waits on |
+| plug-out from a path that held a spin lock | `UdecxUsbDevicePlugOutAndDelete` is PASSIVE_LEVEL |
+| no ACL on the device | a process that can PLUG_IN presents an arbitrary USB identity and makes Windows load kernel drivers against descriptors it chose |
+
+And two more found by re-reading the fixes, both of which a build accepts:
+
+* `WdfIoQueueGetDevice(Queue)` returns the CONTROLLER. There is no "get the
+  endpoint from the queue" call, so casting its result and reading it as an
+  endpoint context is a wrong pointer — a bugcheck at first load. There is a
+  queue context now.
+* The cancel routine completed a request while the pending list still held its
+  `LIST_ENTRY`, and the context is allocated ON the request. A use-after-free
+  reachable by unplugging at the wrong moment. It unlinks first.
+
+**Endpoints are Simple, not Dynamic**, and that is a safety decision: dynamic
+endpoints require a configure transaction that creates and destroys kernel
+objects, and no exporter here can change a captured device's configuration
+anyway.
+
+**W5 is a PRESENTER, not a fourth program.** `UdecxDriverChannel` (four
+overlapped FETCHes, non-blocking, honest backpressure) plus `UdecxPresenter`,
+wired to the already-tested `UdecxBridge` → `ImporterDataPlane` →
+`ImporterClient`. The broker uses it on Windows.
+
+Evidence, on the GMKtec over ssh:
+
+```
+ABI CHECK PASS - every transcribed constant matches the WDK
+DRIVER BUILD PASS - build-drv\airusb.sys, 36,352 bytes
+CODE ANALYSIS: 0 finding(s) in airusb_sys.c
+CODE ANALYSIS PASS
+```
+
+**"0 findings" is only worth something if the analyser was engaged**, so it was
+proved with a positive control — a file with a deliberate C6011, compiled under
+identical flags:
+
+```
+build-drv-control.c(5) : warning C6011: NULL pointer 'p' dereferenced
+build-drv-control.c(6) : warning C6387: 'p' could be '0'
+```
+
+And the broker on that machine:
+
+```
+@@AIRUSB_BROKER@@ presenter windows-udecx canPresent=no
+@@AIRUSB_BROKER@@ the AirUSB virtual host controller driver is not installed on this machine
+```
+
+**THE DRIVER HAS NEVER BEEN LOADED, on this or any machine.** Compiling is not
+evidence about a kernel and neither is static analysis. Static Driver Verifier
+is still a prerequisite and needs an MSBuild project this driver deliberately
+does not have (see `scripts/wdk-analyze-driver.ps1` for why analysis and SDV are
+different things).
+
+### 3.19 The exporter that does not wait, and the lease that outlives it
+
+**A2.** `ExporterSession` performed the device transfer INLINE, so an interrupt
+IN that legitimately idles — a keyboard with no key pressed — blocked PING,
+DETACH and the CANCEL that would have ended the wait. It is now an event loop
+with no blocking call anywhere: read, collect, admit, collect, sweep.
+
+* Per-endpoint FIFOs, because USB serialises per endpoint.
+* **ep0 is a device-wide barrier**: a control transfer can change the
+  configuration or an alternate setting, which redefines what every other
+  endpoint IS.
+* The device seam is `core/IAsyncUsbDevicePort`. `core/IUsbDevicePort` is
+  UNCHANGED, because it is the INSTRUMENT interface and `BotProbe`'s inability
+  to tell a remote device from a local one is what makes a hardware failure mean
+  something.
+* `session/InlineAsyncPort` adapts the synchronous ports and **refuses to hide
+  what it is**: `canIdle()` is false, and the exporter then declines to attach a
+  device with an interrupt or isochronous endpoint. A sentence beats a hang.
+
+**CANCEL is end to end.** It was an opcode with no handler on one side and no
+sender on the other. A queued transfer is retired cleanly; one on the bus is
+aborted if the backend can; a backend that CANNOT abort reports
+`cancelledCount = 0` and keeps the endpoint reserved, because starting another
+transfer on an endpoint whose previous one is still physically running is how a
+BOT phase machine desynchronises.
+
+**A3a — the lease.** `session/LeaseAuthority` owns Free / Leased / Quarantined
+and is created OUTSIDE the accept loop, so it outlives every session. Quarantined
+is not a grace period before Free: a lease never decays into availability,
+because the exporter cannot know whether the silent importer has a dirty
+filesystem mounted. It leaves quarantine only by somebody's decision — the same
+peer recovers it with a single-use token bound to its identity, the same peer
+detaches, or a person at the exporting machine forces it back. Recovery mints a
+new attach id and bumps the incarnation: **ownership is recovered, execution
+history is not**, because after a loss nobody can say which physical transfers
+took effect and replaying an OUT is how a filesystem gets a duplicate write.
+
+Evidence: `tests/unit/test_lifecycle.cpp`, 149 checks, every one written to fail
+against the previous code — an interrupt IN outstanding while PING is answered,
+DETACH completing an idling transfer, per-endpoint queueing, the ep0 barrier,
+five cancellation cases asserting the COUNT and not merely the arrival, nine
+lease cases, and the whole two-session sequence that used to hand the drive away.
+
 ## 4. THE WORK QUEUE while Apple decides
 
 Apple's answer has no timeline and may be "no". **Nothing in this section waits on
@@ -1209,7 +1406,7 @@ question that has never been measured — the Lima guest reaches the host via
 `host.lima.internal`, and reaching the Windows box beyond that is unproven.
 Measure before assuming; §3.4 records what that cost last time.
 
-### 4.4 The Windows importer — UdeCx
+### 4.4 The Windows importer — UdeCx (SUPERSEDED by §3.18; kept for its gate rules)
 
 `UdecxHostBackend` + `airusb.sys`, KMDF, design in `P1_IMPLEMENTATION_PLAN.md`
 §4.6. **Windows' gate is self-service:** `bcdedit /set testsigning on` for
@@ -1221,123 +1418,108 @@ Much of the work is now cheaper than it was: `VhciBridge` proved that the
 translation layer can be written against `IUsbDevicePort` and tested with no
 kernel in the loop, and the same split applies to UdeCx.
 
-### 4.6 THE GAP LIST — an adversarial review, 2026-08-09, ordered by what breaks a user first
+### 4.6 The GPT-5.6 consultation, 2026-08-09 — what it found, and where it was wrong
 
-GPT-5.6 was asked to read the whole repository and find what is missing rather
-than summarise what is here. Most of what follows is its finding; the ordering
-is by "what breaks a real user first", not by effort. **Four of its findings
-were bugs I had written that same day and are already fixed** (§3.10); these are
-the ones that remain.
+Run before a line was written, exactly as the previous handoff instructed, with
+the brief in §4.7. It is the third consultation this project has run and the
+third that paid for itself: the first deleted a subsystem whose central premise
+was false, the second found four live bugs in that day's code, and this one
+found a stop-ship bug that was NOT one of the four things it had been asked
+about — and said the proposed ordering would have cemented it.
 
-**The overstated claims are corrected in the tree already** — the README no
-longer says a person compares six digits "before anything is trusted", because
-that is true of the window and false of the command-line pair that actually
-enumerates a device. Leaving that sentence up was the single worst thing in the
-repository, and it was mine.
+**Every finding below was verified against the tree before being acted on.** The
+two it got wrong are recorded at the end so nobody re-litigates them.
 
-**1. The real path did not do the pairing ceremony — HALF FIXED, 2026-08-09.**
-Both `airusb-vhci --host` and `airusb-exportd --serve` used to pin whoever
-connected first and print the six digits without asking. Both now **REFUSE an
-unpaired peer by default**, print its number, and say to compare it with the
-other machine's; taking the risk deliberately requires typing
-`--trust-on-first-use`, which is the honest name for it.
+**FIXED, in the order it recommended:**
 
-That closes the silent hole. What it does NOT do is give those two programs the
-ceremony itself — a person still cannot answer "they match" to them, only
-restart with a flag. The real fix is item 2: the window drives a privileged
-broker, and the broker never decides trust on its own.
+1. **"Silence does not release the capture" was true locally and false
+   remotely.** `ExporterSession` went Orphaned; the daemon then destroyed the
+   session and `claim()` had no owner check. §3.19, `session/LeaseAuthority`.
+2. **The importer could hang for ever after ATTACH_OK.** The manifest receive
+   loop spun on `Busy` with no clock — a hang with no message, burning a core,
+   on the one path a user reaches by typing somebody else's address. It carries
+   `T_net_ctrl` now.
+3. **DEVICE_RESET was advertised with no handler.** A recovery-capable importer
+   would pick the path guaranteed to be refused. There is a handler.
+4. **CANCEL existed in the protocol and in the Windows bridge, and nowhere
+   else.** Both ends now. §3.19.
+5. **`xflags` were decoded and dropped.** ZERO_PACKET and SHORT_NOT_OK are
+   honoured. `kXfIsoAsap` still has no consumer, correctly: there is no
+   isochronous support to consume it, and that is stated rather than implied.
+6. **"Session layer done" was broader than the evidence.** HELLO is exchanged
+   now (§3.15) and the table in §0 no longer claims more than that.
+7. **"The whole product, minus only the Apple-blocked macOS importer" was
+   false.** It is nearer true — the window presents a device on Linux (§3.17) —
+   and §0 says exactly which cells are which.
+8. **The documented GUI was not the product attachment path.** It is now
+   (§3.16, §3.17), and the presenter reports `canPresent` so a build that cannot
+   present says so instead of looking like one that can.
+9. **The README's pairing procedure was stale and opposite to the CLI.** Fixed.
+10. **`fuzz_usbip.cpp` was cited by `LINUX_IMPORTER_PLAN.md` §L2 and did not
+    exist** — and this handoff *rebutted* a review that said so, asserting "no
+    reference exists in this tree". The rebuttal was wrong: the reference is at
+    `LINUX_IMPORTER_PLAN.md:506`. **A claim was checked against another document
+    instead of against the tree**, which is precisely what Evidence First is for.
+    The target exists now.
+11. **`WINDOWS_IMPORTER_PLAN.md` had stale counts and stale architecture** — 64
+    W3 checks where the test reports 77, and a W5 that still said "hand the arena
+    around" after W1 deleted the arena. Both corrected.
 
-**2. The window is a diagnostic front end, not the control plane.** `hubd`
-attaches a `RemoteDevicePort` and runs `BotProbe`; it never tells `airusb-vhci`
-or a Windows service to present anything to the local USB stack, and it only
-offers a simulated device source. "Attach" in the window and "attach" in the
-product are different verbs. This is stated in `GUI.md` but the architecture
-needs a privileged broker the window drives.
+**And two findings of its A4 review that a build could never have shown:** the
+missing capability callback, and `AirUsbRetireAll()` being an empty function
+whose comment claimed otherwise. §3.18.
 
-**3. Linux could not recover from a stall — FIXED, 2026-08-09.**
-`VhciNetBridge` used to STALL `EP_CLEAR_HALT` with a note that a clean read-only
-mount never reaches it. True, and beside the point: a stall is the ordinary way
-a mass-storage device reports a bad command, so refusing the clear turned one
-recoverable error into a device unusable until unplugged.
+**Where it was wrong, recorded so it is not re-litigated:**
 
-`ImporterDataPlane` now has a VERB path — `clearHalt()` sends `EP_CLEAR_HALT`
-and the reply is a `CTRL_ACK` dispatched by the plane itself. That is what makes
-the hazard §7 warns about structurally unreachable: fire-and-forget used to
-leave the acknowledgement in the stream for the next read to mistake for its own
-COMPLETE, and a stall recovery is always followed immediately by a transfer, so
-the misread was the common case. Verbs are kept out of `RequestTable` on purpose
-— a verb consuming an admission slot would let a stall recovery be blocked by
-the very transfers it exists to unblock — and they carry T_net_ctrl rather than
-the URB ceiling, so a dead exporter costs five seconds and an honest failure
-rather than thirty and a held-open endpoint callback.
+* It reported that `EvtFileCleanup` "is too late" — it is `EvtFileClose` that is
+  too late; Cleanup is the earlier of the two and is the correct hook. The
+  recommendation was right and the sentence had them the wrong way round.
+* It described `UDECX_USB_DEVICE_STATE_CHANGE_CALLBACKS_INIT`, which does not
+  exist. The initialiser is `UDECX_USB_DEVICE_CALLBACKS_INIT`. Confirmed by
+  reading the kit's own headers off the GMKtec rather than from memory — which
+  is the general lesson: **pull the real header before writing against an API a
+  consultation described.**
 
-The kernel's request is parked until the acknowledgement lands and is NOT
-answered optimistically: claiming the halt is cleared before the device agrees
-is how the next transfer goes out onto an endpoint that is still stalled. A
-refusal is reported as `-EPIPE` so the guest escalates to a port reset, which it
-handles natively.
+**Still open, and honestly so:**
 
-**Still open in this area:** `DeviceReset` is defined in `Wire.h` and advertised
-by the exporter with no handler behind it, which is worse than not advertising
-it. Full BOT recovery is a class reset plus clearing BOTH bulk halts; the clear
-is now there and the class reset is not.
+* **The compatibility envelope is one device.** Every hardware claim rests on a
+  single SuperSpeed BOT flash drive on a clean LAN. No USB 2 speeds, no HID, no
+  CDC, no composite, no multilingual strings, no hub topology, no unplug, no
+  sleep, no impaired network.
+* **Bounds under sustained load are unproven.** Caps exist; a gate does not.
+* **`SET_INTERFACE` is refused unless it already matches.** Audio, cameras and
+  most composite devices need it.
+* **PAIR_\* remain reserved opcodes with no handler**, and that is deliberate:
+  the ceremony is performed out of band by two people comparing six digits, and
+  an in-band pairing message would be a second way to do the one thing that must
+  have exactly one way. The trust gate refuses everything else to an Unpaired
+  peer, so nothing depends on them.
+* **The local IPC boundary is a UID, not a program.** §3.16.
 
-**4. The exporter is synchronous, which is wrong for interrupt endpoints.**
-`ExporterSession` performs the device transfer inline. An interrupt IN that
-legitimately idles blocks cancellation, detach and keepalive for the whole
-session. There is also no `CANCEL` handler: Linux cancellation retires the local
-request and the physical transfer continues.
+### 4.5 The smaller items, and where they went
 
-**5. Control OUT reported the wrong length — FIXED, 2026-08-09.** The exporter
-never set `actualLen` for a control OUT, so a class or vendor request carrying
-data succeeded physically and was reported as having moved zero bytes. USB has
-no partial control data stage — the status stage is what says it worked — so on
-success the length is what was offered, and it now says so.
+All but two of these are done; both survivors are here with the reason.
 
-**6. HELLO is never exchanged.** Roles, capabilities, max transfer and keepalive
-are defined in `Wire.h` and negotiated by nobody; `SecureSession` adopts its own
-configured record size. Two builds that disagree complete the handshake and fail
-later, obscurely. Noise IK is implemented and vector-tested but production only
-ever runs XX — "Noise_XX / Noise_IK done" should read "implemented and tested".
+| item | state |
+|---|---|
+| Manifest segmentation on the control plane | **DONE.** `emitTransfer`/`Reassembler` were never data-plane-specific. An eight-configuration SuperSpeed manifest crosses records and is compared byte for byte on the far side (`test_l5_segmentation`) |
+| `kXfZeroPacket`, `kXfShortNotOk` | **DONE.** Honoured in `InlineAsyncPort`, and the exporter passes them down from `xflags` |
+| `kXfIsoAsap` | **still no consumer, correctly** — there is no isochronous support to consume it |
+| Interrupt / isochronous endpoints | **the exporter no longer wedges on them**: `handleSubmit` dispatches on `xferType` for its deadline, and an ATTACH of such a device through a port that cannot idle is REFUSED with a sentence. Carrying one still needs an asynchronous platform port (N2 in §0) |
+| `RemoteDevicePort` hardcodes `XferType::Bulk` | **left alone, deliberately.** It is the synchronous INSTRUMENT `BotProbe` is written against, not the data path; the data path is `ImporterDataPlane`, which carries the type |
+| `PAIR_*` handlers | **still reserved, deliberately.** The ceremony is two people comparing six digits out of band. An in-band pairing message would be a second way to do the one thing that must have exactly one way, and the trust gate already refuses everything else to an Unpaired peer |
 
-**7. Keepalive and lease constants have no loop.** `_lastHeardNs` is written and
-never swept; the "orphaned until the lease expires" comment describes an expiry
-that does not exist. A network blip is undefined behaviour rather than a
-controlled recovery, and there is no session resumption at all.
-
-**8. Alternate settings are refused unless they already match.** Audio, cameras
-and most composite devices need `SET_INTERFACE`. Endpoint lookup also scans only
-interface numbers 0–31 for an 8-bit field.
-
-**9. `kXfZeroPacket` has no consumer.** Dropped, a device waits for ever for the
-terminating ZLP after an OUT that ends on an exact multiple of wMaxPacketSize.
-It does not affect the one flash drive tested, and it will affect real
-protocols.
-
-**10. Bounds under sustained load are unproven.** Outstanding requests,
-reassembly arenas, queued replies and manifest sizes have caps but no
-sustained-load gate.
-
-**11. The compatibility envelope is one device.** Every hardware claim in this
-repository rests on a single SuperSpeed BOT flash drive on a clean LAN. No USB 2
-speeds, no HID, no CDC, no composite, no multilingual strings, no hub topology,
-no unplug, no sleep, no impaired network.
-
-**Where the review was wrong**, recorded so it is not re-litigated: it reports
-`fuzz_usbip.cpp` as referenced-but-absent — no reference exists in this tree. It
-also cites `airusb/exporter/` and `airusb/importer/` paths that are actually
-`airusb/session/`.
+---
 
 ### 4.7 The GPT-5.6 consultation to run FIRST — paste this, do not improvise
 
-Two consultations this project has run each paid for themselves before a line
-was written. The first deleted a whole subsystem — a shared-memory arena whose
-"the host never chooses an offset" premise was simply false, replaced by direct
-I/O that removes the hazard rather than mitigating it. The second found four
-live bugs in code that had passed 64 green checks the same day, plus a README
-making a security claim that was not true.
+Three consultations, three times it paid for itself before a line was written.
+The first deleted a subsystem whose central premise was false. The second found
+four live bugs in code that had passed 64 green checks the same day. The third
+(§4.6) found a stop-ship bug that was not one of the four things it was asked
+about, and told this project its own plan was in the wrong order.
 
-So: run this before designing A1–A3, not after. Read-only, in the repo:
+So: run it before designing anything, not after. Read-only, in the repo:
 
 ```bash
 codex exec -m gpt-5.6-sol -s read-only --skip-git-repo-check "$(cat brief.md)"
@@ -1348,61 +1530,40 @@ carries the blind spots of whoever wrote it. Point it at `docs/HANDOFF.md`,
 `docs/WINDOWS_IMPORTER_PLAN.md`, `docs/LINUX_IMPORTER_PLAN.md`, `docs/GUI.md`
 and the code, then ask:
 
-**On A1, the privileged broker.** What should own the identity and the pin
-store, given that today the window has one set and the privileged tools have
-another — and that this is why the six-digit ceremony protects the wrong
-session? What is the right process topology on three operating systems where
-the privileged half is a root daemon on macOS, a root process writing sysfs on
-Linux, and a kernel driver plus a service on Windows? Where does the trust
-decision live so that the broker never makes it alone and the window cannot be
-impersonated by another local process? Is a broker even the right shape, or
-should the window BE the privileged process on some platforms?
+**On N1, the first driver load.** `airusb.sys` builds and passes Code Analysis
+with zero findings against a positive control. What is still likely to bugcheck?
+Review the KMDF request state machine, the cancel/complete ownership race, the
+purge and reset paths, the inverted call's bounded queues, and the IRQL of every
+callback. What is the smallest synthetic device that would prove the controller
+without proving anything else? What should Static Driver Verifier be pointed at
+first, given this driver deliberately has no MSBuild project?
 
-**On A2, the asynchronous exporter.** `ExporterSession` performs a device
-transfer inline. What is the smallest change that lets an interrupt IN idle for
-ever without blocking cancellation, detach and keepalive — per-endpoint queues,
-a thread per endpoint, a completion port, something else? How should `CANCEL`
-be represented on the wire and what does the exporter do with a transfer the
-importer has abandoned but the device has not finished? This project is
-single-threaded everywhere above the platform layer and would like to stay that
-way; say plainly if that is no longer tenable.
+**On N2, a device that is not a flash drive.** The exporter refuses an interrupt
+or isochronous endpoint through a port that cannot defer a transfer. Making the
+macOS agent genuinely asynchronous means `IOUSBHostPipe`'s
+`enqueueIORequestWithData:completionHandler:` and a tagged, multi-in-flight
+`AgentLink`. Is that the right shape? What breaks first when a HID device with a
+1 ms interval is carried over a 25 ms link — and what should the exporter do
+about an interrupt IN the importer has abandoned?
 
-**On A3, lifecycle.** HELLO is defined and never exchanged. Is negotiating
-record size, capabilities and keepalive at HELLO the right design, or should
-those be fixed by version? What should a lease expiry actually DO to a captured
-device, given that §7.3 says silence must not release it? What does session
-resumption look like when the attach id and the device incarnation both have to
-survive — or should a blip simply be a clean detach and re-attach, and the
-complexity of resumption is not worth it?
+**On N3, sustained load.** Outstanding requests, reassembly arenas, queued
+replies and manifest sizes all have caps and none has a gate. What is the
+smallest test that would actually find a leak or an unbounded queue here, given
+the whole stack is single-threaded above the platform layer?
 
-**And the standing question:** what has this project claimed that its evidence
-does not support? That one found the README's pairing claim last time. Ask it
-every session.
+**On N4, the local IPC boundary.** `LocalEndpoint` gets a UID from the kernel
+and cannot get a program. Is XPC-with-a-code-requirement / polkit / Authenticode
+the right trio, and what does each of them actually buy against the threat that
+matters — another process of the same user driving the broker?
+
+**And the standing question:** what does this project claim that its evidence
+does not support? It found the README's pairing claim, then four live bugs, then
+a `fuzz_usbip.cpp` this very document insisted did not exist. Ask it every
+session, and check the answer against the TREE rather than against another
+document — that is the specific mistake it caught last time.
 
 Record what comes back the way §4.6 records the last one: findings that are
 real, findings that are wrong, and the ordering by what breaks a user first.
-
-### 4.5 Smaller, fully unblocked
-
-* **`PAIR_*` handlers.** The opcodes are reserved in `Wire.h` (0x10/0x11/0x12) and
-  the trust gate already refuses everything else to an Unpaired peer, but no
-  handler exists. The rate limiter half is done (`session/PairingGate`).
-* **Manifest segmentation on the control plane.** `protocol::emitTransfer`/
-  `Reassembler` are now wired into the **data** plane (§4.1), but the manifest path
-  still has none — an 8-configuration device with a full string table could exceed
-  one record. The attach currently fails with a clear status rather than
-  truncating. `emitTransfer` is control-plane-agnostic, so this is now mostly a
-  matter of teaching `ImporterClient`'s manifest read to reassemble.
-* **`kXfShortNotOk` / `kXfZeroPacket` / `kXfIsoAsap` have no consumer.**
-  `Codec.cpp` round-trips `xflags`; nothing reads it. Both ends need wiring in one
-  commit. `ZERO_PACKET` matters for real writes: dropped, a device waits for ever
-  for a terminating ZLP after an exact-multiple OUT.
-* **Interrupt and isochronous endpoints.** `ExporterSession::handleSubmit`
-  dispatches on direction only and discards `sb.xferType`;
-  `RemoteDevicePort::bulkIn/bulkOut` hardcode `XferType::Bulk`. An interrupt IN
-  that legitimately idles forever wedges the exporter's serial read loop with no
-  deadline anywhere. Either promote `submit()` or refuse ATTACH for such devices
-  in v1 and say so.
 
 ---
 
@@ -1475,17 +1636,30 @@ airusb/
                Segmentation (split/reassemble; written, NOT yet wired in)
   transport/   RecordLayer, FrameScheduler, TcpTransport, FaultTransport,
                NoiseCipher
-  session/     SecureSession, PeerStore, PairingGate (the SAS attempt budget),
-               ExporterSession (now reassembles/segments — L5), ImporterClient
-               (+ attachForBridge for the async path), RemoteDevicePort (sync,
-               BotProbe's instrument), ImporterDataPlane (NEW — the async,
-               non-blocking importer data plane the vhci bridge needs)
+  session/     SecureSession (+ the HELLO exchange — nothing above it can see a
+               session before the two ends agree), PeerStore, PairingGate,
+               LeaseAuthority (NEW — who owns the device, ACROSS sessions; read
+               its header before touching exclusivity), ExporterSession (NEW
+               SHAPE — a non-blocking event loop with per-endpoint queues, ep0
+               as a barrier, and a real CANCEL), InlineAsyncPort (NEW — adapts a
+               synchronous port and REFUSES to hide that it cannot idle),
+               DevicePresenter (NEW — the seam that makes "attach" one verb),
+               ImporterClient (+ attachForBridge; the manifest read reassembles),
+               RemoteDevicePort (sync, BotProbe's instrument — deliberately
+               unchanged), ImporterDataPlane (async, non-blocking; sends CANCEL)
   diag/        BotProbe — read-only BOT prober, and its header promises WITHOUT
                QUALIFICATION that it cannot damage a drive. WriteProbe is a
                SEPARATE type so that promise stays absolute rather than becoming
                conditional on a flag. Test instruments, NOT the data path;
                nothing in core/protocol/transport includes them
-  control/     THE PRODUCT'S WINDOW, and the same one on three OSes. Json (a
+  control/     THE PRODUCT'S WINDOW and THE BROKER'S CORE. HubState is the
+               authority — identity, pins, lease, presenter, and the approval
+               NONCE that stops a stale window pinning the wrong machine.
+               BrokerProtocol/BrokerServer/BrokerClient/BrokerFacade are the
+               narrow local channel; LocalEndpoint is the only place this
+               project asks the kernel who a peer is, and its header says what
+               that does and does not establish. HubFacade is the seam that lets
+               ControlApi be the same routes over either half. Json (a
                writer whose only door escapes, and a reader that accepts exactly
                one shape), HttpServer (loopback-only, no filesystem anywhere in
                it, guard as a pure function), HubState (the pairing ceremony —
@@ -1493,7 +1667,11 @@ airusb/
                WebUi (the page, in chunks so no single string literal can hit
                MSVC's limit), SimulatedDeviceSource
   tools/       airusb_net_main — serve/connect over a real socket
-               airusb_hubd_main — the daemon behind the window. No root, ever
+               airusb_brokerd_main — THE PRIVILEGED DAEMON. Owns the machine's
+               identity, its pins, its leases and its presenter. Root, and its
+               header says why that is not a choice
+               airusb_hubd_main — the window. A CLIENT of the broker; holds no
+               key. Falls back to a diagnostic half and says so
   platform/macos/  StatusMapMacos, MacUsbCommon, DiskGuard, AgentUsbIo,
                HostDeviceExporter (an IUsbDevicePort), airusb_exportd_main
                (+ NEW `--serve`: TCP ExporterSession over the captured real drive),
@@ -1507,13 +1685,20 @@ airusb/
                codec, fuzzed), UdecxBridge (the translation — read
                VhciNetBridge first), wdk_abi_check.c (compiled ONLY where the
                WDK exists; compiling it IS the verification),
-               driver/airusb_sys.{h,c} (KMDF/UdeCx. BUILDS, NEVER LOADED)
+               UdecxDriverChannel (NEW — the IOCTL transport, W5; empty
+               everywhere but Windows so a missing port is a link error rather
+               than a silence), UdecxPresenter (NEW — W5 as an IDevicePresenter,
+               because the broker owns presentation),
+               driver/airusb_sys.{h,c} (KMDF/UdeCx. BUILDS, ANALYSES CLEAN,
+               AND HAS NEVER BEEN LOADED)
   platform/linux/  UsbipCodec (the USB/IP byte layer, built and fuzzed on EVERY
                platform), LinuxUsb (the speed and errno tables), VhciBridge (the
                SYNCHRONOUS translation, L4/local), VhciNetBridge (NEW — the
                event-driven, non-blocking bridge for the NETWORKED importer, L6),
-               FdStream, vhci_probe_main (the L1 gate), airusb_vhci_main
-               (L4 local, AND `--host` = the real network importer, L6)
+               VhciPresenter (NEW — the vhci stack behind IDevicePresenter, so
+               the WINDOW's Attach is the product's Attach), FdStream,
+               vhci_probe_main (the L1 gate), airusb_vhci_main (L4 local, AND
+               `--host` = the standalone network importer, L6)
   third_party/ Monocypher 4.0.3, BLAKE2s reference — pinned, checksummed
   scripts/     cross-build-windows.sh
 apple/         SwiftUI app (device list, detail, eject) + the entitlement probe
@@ -1535,12 +1720,13 @@ Layer graph, one direction only:
 ```bash
 cd "/Users/mba/Desktop/AirUSB Hub/airusb"
 cmake -S . -B build && cmake --build build && (cd build && ctest --output-on-failure)
-./tests/fuzz/build_and_run.sh 300000      # four targets now, incl. fuzz_udecxipc
+./tests/fuzz/build_and_run.sh 300000      # SIX targets now, incl. fuzz_usbip + fuzz_broker
 ./scripts/cross-build-windows.sh          # airusb-net.exe AND airusb-hubd.exe
 
 # On the GMKtec, over ssh (see §5 for the CP932 / job-object traps):
 #   scripts/wdk-abi-check.ps1      -> ABI CHECK PASS
 #   scripts/wdk-build-driver.ps1   -> DRIVER BUILD PASS (does NOT install it)
+#   scripts/wdk-analyze-driver.ps1 -> CODE ANALYSIS PASS (does NOT run it)
 
 # The cross-build script passes only -Wall -Wextra. To check the Windows target
 # under the flag set CMake actually configures — which is how the last warning
@@ -1653,6 +1839,55 @@ Throughput. This was independently cross-checked with GPT-5.6 (`gpt-5.6-sol` via
 admission depth 1 until there is something to measure, throughput-tune only after
 L6 passes.
 
+### The lease is the thing that outlives a session — do not "simplify" it
+
+A future reader will notice that `LeaseAuthority` is created outside every
+accept loop and threaded through as a pointer, and will be tempted to make it a
+member of `ExporterSession`. That is precisely the bug it replaces: the session
+object dies with the socket, and the ownership record died with it. If it does
+not outlive the session, it does not do anything.
+
+For the same reason `Quarantined` must never decay into `Free` on a timer. The
+exporter cannot know whether the silent importer has a dirty filesystem mounted,
+so the only honest exits are the same peer coming back, the same peer detaching,
+or a person deciding.
+
+### §7.7 How to reproduce the broker gate (§3.17)
+
+In the Lima `airusb` VM. Everything goes through the HTTP control plane, which
+is the point.
+
+```bash
+limactl shell airusb
+cmake -S "/Users/mba/Desktop/AirUSB Hub/airusb" -B /tmp/br-build -DCMAKE_BUILD_TYPE=Release
+cmake --build /tmp/br-build -j4
+sudo modprobe vhci-hcd
+
+# an exporter with a simulated device
+setsid /tmp/br-build/airusb-net serve --port 7799 --id /tmp/exp.id --peers /tmp/exp.peers \
+    </dev/null > /tmp/exp.log 2>&1 &
+# the broker: ROOT, because it writes vhci-hcd's sysfs
+sudo setsid /tmp/br-build/airusb-brokerd --socket /tmp/airusb-test.sock \
+    --id /tmp/br.id --peers /tmp/br.peers </dev/null > /tmp/br.log 2>&1 &
+# the window: a client, and root here only so it can reach the 0600 socket
+sudo setsid /tmp/br-build/airusb-hubd --broker /tmp/airusb-test.sock --ui-port 8899 \
+    --no-open --token /tmp/hub.token </dev/null > /tmp/hub.log 2>&1 &
+```
+
+Then connect, read `approvalTicket`/`sas`/`peerFingerprint` out of
+`/api/state`, POST them to `/api/import/approve`, POST the uid to
+`/api/import/attach`, and look at `dmesg`, `lsusb` and `lsblk`. The CI job
+"The privileged broker, and the window as its client" runs the same sequence
+unattended, and asserts the honest-refusal case a runner with no vhci-hcd
+produces.
+
+**The window must show the BROKER's fingerprint**, not one of its own. That one
+grep is the whole of A1:
+
+```
+@@AIRUSB_HUB@@ identity KNVC54KY ... (this machine's, held by the broker)
+```
+
 ### Open questions
 
 | # | question | state |
@@ -1667,3 +1902,8 @@ L6 passes.
 | new | does anything break under ASan? | **ANSWERED: no.** Linux, 24/24 + RESULT=PASS, no findings — including the reassembly buffers under a segmented 128 KiB transfer |
 | new | two machines, real network, one Windows | **ANSWERED: PASS** (§3.6), SAS confirmed on both consoles |
 | new | does the console mangle user-facing text on a Japanese Windows? | **it did** — CP932 read the em dash as `窶・` in the SAS line. Fixed with `platform::ConsoleUtf8` |
+| new | does the WINDOW's attach make an OS enumerate a device? | **ANSWERED: yes, on Linux** (§3.17). On macOS it cannot (Apple); on Windows the driver has never been loaded |
+| new | does a lease survive the session that made it? | **ANSWERED: yes**, and a second peer is refused `ExclusivityDenied` (`test_lifecycle`) |
+| new | can an interrupt IN idle without blocking the exporter? | **ANSWERED: yes** — proven with a port that never completes one (`test_lifecycle`). Whether a real HID device WORKS is N2 and is unanswered |
+| new | do two builds that disagree about record size still fail late? | **ANSWERED: no.** They agree on the smaller at HELLO, or refuse (`test_session`) |
+| new | does airusb.sys survive Code Analysis? | **ANSWERED: 0 findings**, with a positive control proving the analyser was engaged. It has still never been loaded |

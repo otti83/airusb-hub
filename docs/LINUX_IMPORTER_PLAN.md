@@ -503,7 +503,13 @@ Each gate is Goal / Implementation / Evidence / PASS-FAIL. A failed gate does no
 ### L2 — `UsbipCodec`, hosted and fuzzed
 
 **Goal.** A byte-exact, memory-safe USB/IP codec that builds and runs on macOS.
-**Implementation.** `platform/linux/UsbipCodec.{h,cpp}` — explicit BE byte loads, `setup[8]` untouched, 48-byte encode with padding, iso descriptor array, `number_of_packets` clamped to `[0,1024]`. `tests/fuzz/fuzz_usbip.cpp`.
+**Implementation.** `platform/linux/UsbipCodec.{h,cpp}` — explicit BE byte loads, `setup[8]` untouched, 48-byte encode with padding, iso descriptor array, `number_of_packets` clamped to `[0,1024]`. `tests/fuzz/fuzz_usbip.cpp` — which was named here from the day this plan was
+written and **did not exist until 2026-08-09**, while `HANDOFF.md` rebutted a
+review that pointed it out. The claim had been checked against another document
+instead of against the tree. It exists now, and it asserts round-tripping rather
+than only absence of crashes: the header is big-endian and the `setup[8]` inside
+it is little-endian USB that must travel verbatim, so a codec that byteswapped
+the header wholesale would corrupt enumeration itself.
 **Evidence.** Golden-vector test against the captured PDUs in `Documentation/usb/usbip_protocol.rst:447-453` (real captured wire data) plus the L1 dump, byte for byte in both directions. `static_assert`ed offsets. One hour of libFuzzer clean under ASan+UBSan, seeded with the three USB/IP CVE shapes (oversized length; `actual_length > requested_length`; iso quads overrunning the payload).
 **PASS** iff round-trip is the identity on every vector, `setup[8]` survives unswapped, and the fuzzer is clean. Must run in CI on macOS and Linux.
 

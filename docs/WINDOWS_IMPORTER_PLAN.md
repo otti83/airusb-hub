@@ -274,7 +274,7 @@ control reads — happens at memory speed instead of at LAN latency, and still
 returns the device's own bytes verbatim. The test asserts twenty such reads
 produce **zero** exporter traffic.
 
-**Evidence.** `tests/unit/test_udecxbridge.cpp`, 64 checks, against a fake
+**Evidence.** `tests/unit/test_udecxbridge.cpp`, 77 checks, against a fake
 driver channel and a REAL `ExporterSession` over a real Noise session — so a
 forwarded transfer really crosses the protocol. Cases: local descriptor answers
 with zero traffic; a real Bulk-Only Transport CBW forwarded and completed; the
@@ -302,7 +302,7 @@ is a wrong belief about the system rather than a typo:
 
 **PASS.**
 
-### W4 — `airusb.sys` · **BUILDS, 2026-08-09. NOT LOADED, deliberately.**
+### W4 — `airusb.sys` · **BUILDS AND ANALYSES CLEAN, 2026-08-09. NOT LOADED.**
 
 **Compiling is safe. Loading is not.** A KMDF fault is a bugcheck, and on a
 machine reachable only over the network a boot loop is unrecoverable — SSH does
@@ -321,14 +321,15 @@ testsigning: (off)      loaded: 0
 `scripts/wdk-build-driver.ps1`, at `/kernel /W4 /WX` on our code and
 `/external:W0` on the kit's. No `.vcxproj`, same reason as the ABI check.
 
-**What is real in it, and what is a stub — stated plainly rather than implied
-by a build that passes.** Real: `DriverEntry`, the UdeCx controller creation,
-the device-add path, the control queue, the manual FETCH queue for the inverted
-call, the per-`WDFFILEOBJECT` session, and the teardown — including the one
-IRQL rule that is easy to get wrong and only bites on a path nobody tests twice
-(`UdecxUsbDevicePlugOutAndDelete` is `PASSIVE_LEVEL`, so it is called OUTSIDE
-the spin lock). Stubbed and returning `STATUS_NOT_IMPLEMENTED`: the five IOCTL
-bodies. The endpoint callbacks are not written yet.
+**Nothing is stubbed any more, and the scaffold that was here was WRONG in ways
+a passing build could not see.** All five IOCTL bodies, the endpoint callbacks
+(reset, start, purge), D0 entry/exit, the inverted call with bounded queues, the
+KMDF cancel/complete ownership race, `EvtFileCleanup`, a PASSIVE_LEVEL work item
+for plug-out, and `SDDL_DEVOBJ_SYS_ALL_ADM_ALL` on the device object. The six
+defects the previous version had, and the two more found while fixing them, are
+listed in `HANDOFF.md` §3.18 — including the one that matters most for anyone
+reading this file next: **`UDECX_WDF_DEVICE_CONFIG_INIT(&config, NULL)` passed
+no capability query callback, and the kit's own header marks it Required.**
 
 **Three link-time facts worth not rediscovering:**
 
@@ -345,16 +346,37 @@ exists precisely for this situation — it checks KMDF rules WITHOUT running the
 driver, which is the only kind of verification available when a mistake costs a
 reboot somebody has to be present for.
 
-### W5 — `airusb-winhost.exe` · NOT STARTED
+### W5 — the Windows presenter · **DONE, 2026-08-09**
 
-**Goal.** The user-mode half: open the driver, park N inverted-call IOCTLs, run
-`UdecxBridge` over `ImporterClient`, and hand the arena around.
+**There is no arena, and this section used to say to hand one around.** W1
+deleted it (see §W1): payload travels in the IOCTL buffer itself, because once a
+section is mapped writable into a process, slot indices constrain what the
+PROTOCOL accepts and not what memory the host can write. The sentence survived
+here for a session after the thing it described was removed, which is why it is
+called out rather than quietly edited.
 
-Mostly wiring, once W1 and W3 exist. It should look like
-`platform/linux/airusb_vhci_main.cpp`, including the part that the Linux one got
-right and everything else got wrong: **it watches for pending TX and pushes it**
-(`pendingTxBytes()`), which is the bug that cost this project a session when the
-exporter stranded the tail of a 128 KiB reply.
+**And it is not `airusb-winhost.exe`.** A fourth program with a fourth identity
+would recreate exactly the split A1 exists to remove, so W5 is an
+`IDevicePresenter` that the broker owns:
+
+| | |
+|---|---|
+| `platform/windows/UdecxDriverChannel` | the IOCTL transport. Four overlapped FETCHes, non-blocking `tryReceive`, and `pendingToDriver()` answered honestly — that last one is the bug that cost this project a session when the exporter stranded the tail of a 128 KiB reply |
+| `platform/windows/UdecxPresenter` | W5 proper: opens the driver, plugs the device in, and drives `UdecxBridge` -> `ImporterDataPlane` -> `ImporterClient` |
+
+Both compile on every platform (the channel is empty off Windows, so a missing
+port is a link error rather than a silence) and are cross-built by
+`scripts/cross-build-windows.sh` into `airusb-brokerd.exe`.
+
+**Evidence, on the GMKtec:**
+
+```
+@@AIRUSB_BROKER@@ presenter windows-udecx canPresent=no
+@@AIRUSB_BROKER@@ the AirUSB virtual host controller driver is not installed on this machine
+```
+
+which is exactly right and is the sentence the window shows. Nothing here is
+evidence about a kernel.
 
 ### W6 — bring-up · NEEDS A SPARE MACHINE AND A PERSON AT IT
 
@@ -375,9 +397,16 @@ so that a failure has ONE possible cause instead of four:
 4. only then the session layer replaces the scripted backend;
 5. only then a real drive from the Mac.
 
-**And run Static Driver Verifier and Code Analysis before step 1.** SDV checks
-KMDF rules without running the driver, which is the only verification available
-when a mistake costs a reboot with somebody present.
+**Code Analysis is DONE and clean; SDV is not.** `scripts/wdk-analyze-driver.ps1`
+runs `cl /analyze` over the driver and reports 0 findings — and, because "0
+findings" is worthless if the analyser was not engaged, it was proved against a
+positive control (a file with a deliberate C6011, compiled under identical
+flags, which produced C6011 and C6387).
+
+SDV is a different thing and is STILL a prerequisite: it proves KMDF *protocol*
+rules — the request-completion state machine, the cancel/complete race — and
+needs a real MSBuild project, which this driver deliberately does not have. That
+is the one piece of pre-load verification still outstanding.
 
 **Evidence.** The Windows equivalent of the Linux gate: the device appears in
 Device Manager under the right VID/PID, `diskmgmt` shows the volume, files are
