@@ -206,39 +206,67 @@ is a constant nobody has checked.
 
 **PASS.**
 
-### W3 — `UdecxBridge`, proven with no kernel · NOT STARTED
+### W3 — `UdecxBridge`, proven with no kernel · **DONE, 2026-08-09**
 
-**Goal.** The analogue of `VhciNetBridge`: turn URB submissions into transfers
-on `ImporterDataPlane`, and completions back into URB completions.
+**Goal.** Turn URB submissions into transfers on `ImporterDataPlane`, and
+completions back into URB completions, without ever waiting on the network to
+answer a kernel lifecycle callback.
 
-Responsibilities, all of which `VhciNetBridge` already has a proven answer for:
+**What UdeCx makes EASIER than macOS, and it is worth saying.** UdeCx delivers
+URBs, not transfer descriptors, so one URB is already one logical transfer.
+There is no descriptor-chain walk, and the hazard that dominates the macOS
+design — splitting a transfer at a boundary that injects a short packet
+(P1 §5.4) — cannot arise. The driver forwards URBs whole and the bridge never
+sees a partial one.
 
-* answer `GET_DESCRIPTOR` from the manifest locally, with zero network traffic;
-* admit data transfers to the data plane, or queue them at the admission depth;
-* answer cancellation immediately and drop the late completion;
-* complete every outstanding URB with `DEVICE_GONE` if the network dies;
-* never block — the kernel side must never wait on a network round trip.
+**What it makes harder is lifecycle**, and all three answers are the same shape:
 
-**What is different from Linux, and needs its own thought:**
+* **Cancellation is answered in the same `poll()` that receives it**, before any
+  network traffic. The driver has already completed the guest's URB; the
+  acknowledgement only says nothing of ours will touch that id again.
+* **A configure transaction is answered from local knowledge.** Selecting the
+  captured configuration succeeds; selecting a different one is **refused, not
+  forwarded**, because no exporter in this project can change a captured
+  device's configuration (P1 §4.8) and a guest that believes otherwise builds
+  its endpoint table from descriptors the device is not using.
+* **Every endpoint in a configure's RELEASE set has its queued transfers
+  completed immediately**, before the transaction result is sent. The driver is
+  about to destroy those endpoint objects; a completion arriving afterwards
+  lands on a freed kernel object.
 
-* **UdeCx answers some control requests itself** from the descriptor table given
-  at `plugIn`, and those are unrecoverable by construction (§4.6 of the
-  implementation plan). The manifest makes `GET_DESCRIPTOR` safe; the residual
-  exposure is a device that rejects a configuration the manifest said it had.
-* **`EvtUsbDeviceEndpointsConfigure` hands over a `WDFREQUEST` that must be
-  parked** and completed only when the far side has answered. That is the whole
-  reason the verb interface is ticketed.
-* **The MDL is only valid while the request is held**, so OUT data must be
-  copied into the arena *before* the request is parked — not lazily when the
-  network is ready for it.
+**And the descriptor path never leaves the machine.** `Ep0Arbiter` answers
+GET_DESCRIPTOR from the manifest, so a guest's enumeration storm — dozens of
+control reads — happens at memory speed instead of at LAN latency, and still
+returns the device's own bytes verbatim. The test asserts twenty such reads
+produce **zero** exporter traffic.
 
-**Evidence.** A `test_udecxbridge` with a fake driver channel standing in for the
-kernel, mirroring `test_netbridge`: a forwarded round trip, a local
-`GET_DESCRIPTOR` with zero network traffic, cancellation answered before any
-completion with the late completion dropped, a network drop completing
-everything outstanding, and the admission queue at depth 1.
+**Evidence.** `tests/unit/test_udecxbridge.cpp`, 64 checks, against a fake
+driver channel and a REAL `ExporterSession` over a real Noise session — so a
+forwarded transfer really crosses the protocol. Cases: local descriptor answers
+with zero traffic; a real Bulk-Only Transport CBW forwarded and completed; the
+depth-1 admission queue holding a second transfer and still giving it exactly
+one terminal outcome; cancellation acknowledged in one poll with the exporter
+never running; the late completion dropped rather than delivered; a configure
+refused for the wrong configuration; released endpoints drained before the
+result; a dead network completing everything outstanding; a stale incarnation
+answered rather than forwarded; a malformed record counted and skipped without
+stopping the channel; and the two different size caps — the ABI's and this
+device's — firing in the right places.
 
-**PASS** iff all of that is green on three platforms with no driver in existence.
+**Three test bugs found on the way, all mine, all worth recording** because each
+is a wrong belief about the system rather than a typo:
+
+1. The rig submitted transfers without an ATTACH, so the exporter refused every
+   one for having no lease. It looked exactly like a bridge that could not
+   forward.
+2. The forwarded payload was 31 bytes of filler. The device on the far end is a
+   BOT state machine, not an echo, and it correctly stalled a non-command. The
+   fix — send a real CBW — makes the test prove more than it originally claimed.
+3. An "oversized transfer" case used 2 MiB, which the ABI codec refuses before
+   the bridge ever sees it. There are two caps, they are different, and the test
+   now exercises each one separately.
+
+**PASS.**
 
 ### W4 — `airusb.sys` · NOT STARTED, and not buildable here
 

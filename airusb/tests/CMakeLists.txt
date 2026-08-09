@@ -32,6 +32,7 @@ airusb_test(test_netbridge airusb_linux_usbip)
 airusb_test(test_exporter airusb_diag)
 airusb_test(test_windowsusb airusb_windows_udecx)
 airusb_test(test_udecxipc  airusb_windows_udecx)
+airusb_test(test_udecxbridge airusb_windows_udecx)
 airusb_test(test_control  airusb_control)
 airusb_test(test_hub_e2e  airusb_control)
 

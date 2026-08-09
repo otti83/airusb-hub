@@ -192,8 +192,12 @@ target_link_libraries(airusb_linux_usbip PUBLIC airusb_core airusb_transport air
 add_library(airusb_windows_udecx STATIC
     platform/windows/WindowsUsb.cpp
     platform/windows/UdecxIpc.cpp
+    platform/windows/UdecxBridge.cpp
 )
-target_link_libraries(airusb_windows_udecx PUBLIC airusb_core)
+# UdecxBridge drives session::ImporterDataPlane, the same platform -> session
+# arrow platform/linux is allowed. WindowsUsb and UdecxIpc stay pure, so the
+# fuzzed codec keeps building with nothing but core.
+target_link_libraries(airusb_windows_udecx PUBLIC airusb_core airusb_session)
 
 # The L1 gate. Linux only, because it writes to vhci-hcd's sysfs and there is
 # nothing to point it at anywhere else.
