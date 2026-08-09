@@ -1,6 +1,8 @@
 # AirUSB Hub — Session Handoff
 
-**Written:** 2026-08-09
+**Written:** 2026-08-08 · **Last updated:** 2026-08-09, after the Linux importer was
+finished end to end on real hardware (full L6 + L8; §0). Next session's focus is
+**Windows verification then GUI design** — see §0.
 **Purpose:** resume this project in a fresh session with no access to the previous
 conversation. Everything load-bearing is here or in the documents it points to.
 **Repo:** `/Users/mba/Desktop/AirUSB Hub` — public at
@@ -23,51 +25,76 @@ authenticated as `otti83`). Everything below is pushed.
 | Receiving on Windows | UdeCx driver not written. **Not blocked by anyone** |
 
 ```
-19 test suites / 0 failures        CI: 4/4 green on every push
+22 test suites / 0 failures  (was 19; +test_l5_segmentation, test_dataplane, test_netbridge)
 3 fuzz targets / 0 crashes / 0 UB findings
 Zero warnings: macOS (Clang, full set), Linux (GCC, ASan+UBSan),
                Windows (MinGW, full set), Windows (MSVC 19.51, /W4 /permissive-)
-~28,000 lines ours + 10 vendored files
+NOTE: the MSVC/two-machine Windows runs predate this session's segmentation +
+      async-data-plane changes — re-verify the Windows CLIENT before trusting it (§3.4).
+~30,000 lines ours + 10 vendored files
 ```
 
-### THE ONE THING ONLY A HUMAN CAN DO
+### THE NEXT SESSION: (1) Windows verification, (2) GUI app design
 
-**Post `FB24214361` in <https://developer.apple.com/forums/thread/802495>.**
-Filing put it in the ordinary queue; posting the number is what routes it to the
-engineer who approves these. Ready-to-paste text is in `ENTITLEMENT_REQUEST.md`.
-It has been outstanding since 2026-08-08. §2 has the evidence for why there is no
-portal checkbox to look for instead.
+Two goals, in order. Neither waits on Apple.
 
-### THE NEXT TASK: finish Mac × Linux (§4.1)
+**1. Windows operation verification (§3.4, §4.3).** This session rewrote the data
+path — it wired segmentation into `ExporterSession` + `RemoteDevicePort` and added
+the async `ImporterDataPlane`. The **Windows CLIENT** (`airusb-net`, portable) uses
+`ExporterSession` and `RemoteDevicePort`, and its last real proof (MSVC 19.51,
+13/13, the two-machine BOT exchange, §3.5) PREDATES those changes. So: re-run the
+Windows CI/MSVC build and the two-machine `airusb-net` run (Windows exporter ↔
+macOS importer, or Windows client ↔ macOS `airusb-net serve`) to confirm
+segmentation and the changed exporter did not regress the Windows path — ideally
+with a transfer big enough to actually segment (>16 640 B). The strict-MinGW build
+of the changed TUs is already clean, but no MSVC build or run has happened since.
+Then, if wanted, the **Windows IMPORTER** (UdeCx `airusb.sys`, §4.4) — unwritten,
+self-service (`bcdedit /set testsigning on`), and now much cheaper because
+`VhciBridge`/`VhciNetBridge` proved the translation-then-async-plane split works
+against a real kernel with no driver; the same split applies to UdeCx.
 
-**A device now mounts on Linux over the encrypted network session, on a real
-kernel (L6 + L8 PASSED, 2026-08-09).** `airusb-vhci --host <ip>` connects
-(`ImporterClient`), attaches, and drives `ImporterDataPlane` + `VhciNetBridge` over
-an `AF_UNIX` socketpair on `vhci-hcd` behind one `poll(2)` loop. On the Lima
-`airusb` VM against `airusb-net serve`, the kernel enumerated the device
-(`idVendor=058f idProduct=6387`, `usb-storage`, `sd [sda] … Attached SCSI removable
-disk`), and `mkfs.vfat`/`mount`/write/`umount`/remount/`cat` returned the exact
-bytes — the whole importer stack, on a real kernel, over a real network. Killing
-the exporter mid-write gave an I/O error, not a D-state hang (L8). The three
-correctness cores were built hosted first (segmentation L5; `ImporterDataPlane`,
-94 checks; `VhciNetBridge`, 125 checks) and reviewed to PASS by GPT-5.6 across
-three rounds (§7); the blocking-vs-liveness reasoning is recorded in §7.
+**2. GUI app design.** `apple/` is a SwiftUI app (device list, detail, eject) that
+today only hosts the entitlement probe (§2.5). Design the real product GUI — pick a
+device to share / to import, show pairing SAS, show attach state — and decide
+cross-platform strategy (SwiftUI for macOS; what for Windows/Linux). Nothing here is
+built yet beyond the probe window.
 
-**THE FULL L6 GATE PASSED ON REAL HARDWARE, 2026-08-09.** `airusb-exportd --device
-058f:6387 --serve` (the new `--serve` mode + `airusb-agent`) captured the real
-31.5 GB SuperSpeed drive on the Mac and served it over TCP; `airusb-vhci --host
-host.lima.internal` in the Lima VM mounted it. The Linux kernel enumerated the real
-drive (`Direct-Access Generic Flash Disk`, `sd [sda] 61440000 512-byte blocks
-(31.5 GB)`, `Attached SCSI removable disk`), `lsblk` showed `sda1 exfat "Memory
-32GB"`, and `mount -o ro /dev/sda1` listed the drive's actual files read-only
-(`df`: 14 G used). Teardown was clean and the drive returned to the Mac, re-mounted,
-data untouched. That is the whole product working on real hardware, macOS exporter
-→ Linux importer, end to end — and **nothing about it waited on Apple.**
+The **Windows box**: `GMKtec 192.168.0.109`, RDP + SMB open, **SSH closed**, on a
+different LAN from the Mac (reached via the `ts-464` subnet router). The assistant
+cannot run anything there — every Windows step is handed to the user as a
+copy-pasteable command (§5).
 
-The macOS *importer* is still the only Apple-blocked piece (§2). What remains is
-polish, not new capability: `airusb-exportd --serve` is a test-tool serve loop
-(the shipping exporter is the launchd daemon/agent); the Windows importer (UdeCx,
-§4.4) is unwritten but self-service; and the smaller unblocked items in §4.5.
+### The Linux importer is DONE — full L6 + L8 on real hardware (2026-08-09)
+
+This session finished the whole Linux importer, end to end: a real 058f:6387 drive
+captured on the Mac (`airusb-exportd --serve`, new) → encrypted network session →
+`airusb-vhci --host` → the Linux kernel enumerated it and mounted its exFAT
+filesystem read-only; teardown returned the drive to the Mac, data untouched.
+Killing the exporter mid-write gave an I/O error, not an unkillable D-state (L8).
+The three correctness cores (segmentation L5; async `ImporterDataPlane`; non-blocking
+`VhciNetBridge`) were built hosted-first, GPT-5.6-reviewed to PASS across three
+rounds, then proven on a real kernel. Details + how-to-reproduce: §3.7, §4.1, §7;
+gate evidence in `LINUX_IMPORTER_PLAN.md` §7 (L5–L8). **Reproduce the whole thing
+from the VM in ~30 s** with the two binaries already built at `/tmp/vhci-build` in
+the Lima `airusb` VM (see §3.3 / §4.1).
+
+### Apple entitlement — LOWEST PRIORITY now, RECORD ONLY (human-only action)
+
+**Do not prioritize this. Apple will not grant it for a while, and everything that
+does not depend on it is either done or is the next-session work above.** It is
+kept here only so it is not lost:
+
+- The macOS *importer* — enumerating a remote device as a real USB device ON A MAC —
+  is the ONLY thing blocked by Apple: entitlement
+  `com.apple.developer.usb.host-controller-interface`, **FB24214361**, filed
+  2026-08-08, Individual team `GZUV3UMV3B`, no response.
+- **The one action only a human can take:** post `FB24214361` in
+  <https://developer.apple.com/forums/thread/802495> (ready-to-paste text in
+  `ENTITLEMENT_REQUEST.md`). Filing alone sits in the ordinary queue; posting the
+  number routes it to the approver (DTS said so in that thread).
+- **Do NOT send anyone hunting for a portal checkbox — there is not one** (measured,
+  §2.2). The full evidence, the six-variant signing matrix, and the "if Apple says
+  no" options are all in §2; none of it needs re-deriving.
 
 ---
 
@@ -92,6 +119,11 @@ Governing rules from the master prompt:
 ---
 
 ## 2. The Apple entitlement — the only thing blocking the macOS importer
+
+> **PRIORITY: LOWEST. This is record-only.** Apple will not grant this for a while,
+> and it blocks ONLY the macOS *importer* — nothing the next session needs. The one
+> action (a human posting FB24214361, §0) can happen any time; do not build around
+> it or wait on it. Everything below is preserved so the reasoning is not re-derived.
 
 ### 2.1 Status
 
@@ -339,6 +371,17 @@ The portable client still builds the same way it always did (swap
 that direct `g++` line doubles as proof that nothing depends on cmake.
 
 ### 3.4 Windows — exactly what is and is not verified
+
+> **CROSS-DEBUG STATUS (2026-08-09): STALE, RE-VERIFY.** Everything below was true
+> BEFORE this session wired segmentation into `ExporterSession`/`RemoteDevicePort`
+> and added the async `ImporterDataPlane`. The Windows client (`airusb-net`) links
+> `airusb_session`, so it inherits those changes. What HAS been re-checked since:
+> the strict-MinGW compile of the changed TUs is clean. What has NOT: no MSVC build
+> and no run (single-machine or two-machine) since the change. **First Windows task
+> next session: rebuild under MSVC and re-run the two-machine `airusb-net` BOT
+> exchange, with a transfer >16 640 B so segmentation actually fires on the Windows
+> path.** The Linux side proved the same protocol changes correct on a real kernel
+> (§3.7), so a Windows regression would be a platform detail, not a design flaw.
 
 `mingw-w64` is installed via Homebrew. `scripts/cross-build-windows.sh` produces a
 statically linked `airusb-net.exe` (PE32+ x86-64).
@@ -611,15 +654,43 @@ Apple's answer has no timeline and may be "no". **Nothing in this section waits 
 it.** The order below is deliberate; §4.3 in particular is scheduled where it is
 for a reason, not by accident.
 
-### 4.1 NEXT — macOS × Linux, on real hardware
+### 4.1 DONE — macOS × Linux, on real hardware (full L6 + L8, 2026-08-09)
 
-**Goal.** A real USB drive plugged into the Mac, enumerated by Linux as a real USB
-device, across the encrypted session. That is the entire product working end to
-end, with the only blocked half (the macOS importer) simply not participating.
+**This is finished.** A real USB drive on the Mac, enumerated by Linux as a real USB
+device across the encrypted session — the entire product, minus only the
+Apple-blocked macOS importer. The narrative and gate evidence are in §0 and
+`LINUX_IMPORTER_PLAN.md` §7 (L5–L8). Kept here: **how to reproduce it.**
 
-Both halves already exist and are proven separately: the macOS exporter drives
-real hardware (P2.8, 058f:6387), and `platform/linux/airusb-vhci` makes the Linux
-kernel enumerate a device (§3.6). What is missing is between them.
+**Build (in the Lima `airusb` VM; `/Users/mba` is read-only, so build into /tmp):**
+```bash
+limactl shell airusb
+cmake -S "/Users/mba/Desktop/AirUSB Hub/airusb" -B /tmp/vhci-build -DCMAKE_BUILD_TYPE=Release
+cmake --build /tmp/vhci-build --target airusb-vhci airusb-net -j4
+```
+On the Mac, `cmake --build build --target airusb-exportd airusb-agent`.
+
+**Simulated device, all in the VM (no Mac, no hardware, no user):**
+```bash
+/tmp/vhci-build/airusb-net serve --port 7714 &                      # exporter (fake device)
+sudo /tmp/vhci-build/airusb-vhci --host 127.0.0.1 --port 7714       # run TWICE: 1st pairs, 2nd mounts
+```
+
+**Real drive, Mac → VM (READ-ONLY on the Linux side, or you WRITE the drive):**
+```bash
+# Mac, terminal 1 (root): sudo ./airusb-exportd --device 058f:6387 --serve --port 7714
+# Mac, terminal 2 (console user, no sudo): ./airusb-agent
+# VM: sudo /tmp/vhci-build/airusb-vhci --host host.lima.internal --port 7714   # twice (pair, mount)
+# VM: sudo mount -o ro /dev/sdX1 /mnt   ← READ-ONLY. mkfs/write DESTROYS real data.
+# Release: Ctrl-C the agent (terminal 2) → exportd frees the drive in §7.6 order and exits.
+```
+Gotchas: fresh pairing needs `rm airusb-vhci.id airusb-vhci.peers` on the importer;
+the importer's background process holds the SSH channel unless launched
+`setsid … </dev/null >log 2>&1 &` (poll a result file instead of reading its output);
+`timeout(1)` exists in the VM but NOT on the Mac.
+
+**Both halves also existed separately first:** the macOS exporter drives real
+hardware (P2.8, 058f:6387), and `airusb-vhci` (no `--host`) makes the kernel
+enumerate a LOCAL simulated device (§3.6).
 
 **Two pieces of work, both ours, neither blocked:**
 
@@ -843,7 +914,10 @@ airusb/
   transport/   RecordLayer, FrameScheduler, TcpTransport, FaultTransport,
                NoiseCipher
   session/     SecureSession, PeerStore, PairingGate (the SAS attempt budget),
-               ExporterSession, ImporterClient, RemoteDevicePort
+               ExporterSession (now reassembles/segments — L5), ImporterClient
+               (+ attachForBridge for the async path), RemoteDevicePort (sync,
+               BotProbe's instrument), ImporterDataPlane (NEW — the async,
+               non-blocking importer data plane the vhci bridge needs)
   diag/        BotProbe — read-only BOT prober, and its header promises WITHOUT
                QUALIFICATION that it cannot damage a drive. WriteProbe is a
                SEPARATE type so that promise stays absolute rather than becoming
@@ -851,12 +925,15 @@ airusb/
                nothing in core/protocol/transport includes them
   tools/       airusb_net_main — serve/connect over a real socket
   platform/macos/  StatusMapMacos, MacUsbCommon, DiskGuard, AgentUsbIo,
-               HostDeviceExporter, airusb_exportd_main, airusb_agent_main,
-               AgentProtocol (portable) + AgentLink (POSIX only)
+               HostDeviceExporter (an IUsbDevicePort), airusb_exportd_main
+               (+ NEW `--serve`: TCP ExporterSession over the captured real drive),
+               airusb_agent_main, AgentProtocol (portable) + AgentLink (POSIX only)
   platform/linux/  UsbipCodec (the USB/IP byte layer, built and fuzzed on EVERY
                platform), LinuxUsb (the speed and errno tables), VhciBridge (the
-               translation), FdStream, vhci_probe_main (the L1 gate),
-               airusb_vhci_main (L4 — makes Linux enumerate a device)
+               SYNCHRONOUS translation, L4/local), VhciNetBridge (NEW — the
+               event-driven, non-blocking bridge for the NETWORKED importer, L6),
+               FdStream, vhci_probe_main (the L1 gate), airusb_vhci_main
+               (L4 local, AND `--host` = the real network importer, L6)
   third_party/ Monocypher 4.0.3, BLAKE2s reference — pinned, checksummed
   scripts/     cross-build-windows.sh
 apple/         SwiftUI app (device list, detail, eject) + the entitlement probe
