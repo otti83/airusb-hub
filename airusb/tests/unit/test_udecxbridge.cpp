@@ -306,6 +306,13 @@ void testForwarding()
         CHECK(r.driver.next(c));
         CHECK_EQ(static_cast<long long>(c.requestId), 7LL);
         CHECK(c.result == ipc::Result::Ok);
+        // The length, which the original test did not check and which was
+        // therefore wrong: an OUT completion carries no payload, and a version
+        // of completeToDriver that "let the payload win" reported every
+        // successful write as having moved 0 bytes. A filesystem told its write
+        // transferred nothing does not retry politely.
+        CHECK_EQ(c.actualLength, 31u);
+        CHECK(c.payload.empty());
         CHECK_EQ(static_cast<long long>(r.bridge.stats().forwarded), 1LL);
         CHECK(r.peer.exporter.transfersServed() > 0);
     }
@@ -385,6 +392,37 @@ void testCancellation()
         CHECK_EQ(static_cast<long long>(r.bridge.outstanding()), 0LL);
     }
 
+    TEST_CASE("cancelling frees the plane's slot, not just the bridge's bookkeeping") {
+        // The bug this pins: the bridge stored only the DRIVER's request id and
+        // handed that to ImporterDataPlane::cancel(). The plane names transfers
+        // by its own id, never found it, and kept the admission slot occupied —
+        // so at depth 1 every later URB queued behind a transfer nobody was
+        // waiting for. The bridge looked fine; throughput went to zero.
+        //
+        // The ids are deliberately far apart so one cannot pass for the other.
+        Rig r;
+        ipc::UrbRequest w = urb(9000, 0x02, ipc::Direction::Out, 31);
+        w.payload = cbw(1);
+        r.driver.push(w);
+        (void)r.bridge.poll();
+        CHECK_EQ(static_cast<long long>(r.bridge.outstanding()), 1LL);
+
+        ipc::CancelRequest cq;
+        cq.requestId = 9000; cq.sessionIncarnation = kSession; cq.deviceIncarnation = kDevice;
+        r.driver.push(cq);
+        (void)r.bridge.poll();
+        r.driver.fromBridge.clear();
+
+        // The slot must be free NOW, so the next URB goes straight out rather
+        // than queueing behind the cancelled one.
+        ipc::UrbRequest w2 = urb(9001, 0x02, ipc::Direction::Out, 31);
+        w2.payload = cbw(2);
+        r.driver.push(w2);
+        (void)r.bridge.poll();
+        CHECK_EQ(static_cast<long long>(r.bridge.queued()), 0LL);
+        CHECK_EQ(static_cast<long long>(r.bridge.outstanding()), 1LL);
+    }
+
     TEST_CASE("cancelling something still in the queue also answers at once") {
         Rig r;
         r.driver.push(urb(1, 0x02, ipc::Direction::Out, 31));
@@ -437,6 +475,40 @@ void testConfigure()
         ipc::ConfigureResult res;
         CHECK(r.driver.next(res));
         CHECK(res.result == ipc::Result::Unsupported);
+    }
+
+    TEST_CASE("releasing an endpoint retires transfers already ON THE WIRE") {
+        // The interesting half, and the one an earlier version missed: it
+        // drained the queue and left the in-flight transfer alone. The driver
+        // then destroys the endpoint object, and the completion for the
+        // in-flight transfer arrives for something freed.
+        Rig r;
+        ipc::UrbRequest w = urb(1, 0x02, ipc::Direction::Out, 31);
+        w.payload = cbw(1);
+        r.driver.push(w);
+        (void)r.bridge.poll();
+        CHECK_EQ(static_cast<long long>(r.bridge.outstanding()), 1LL);
+        r.driver.fromBridge.clear();
+
+        ipc::Configure cfg;
+        cfg.ticketId = 11; cfg.sessionIncarnation = kSession; cfg.deviceIncarnation = kDevice;
+        cfg.isConfiguration = false; cfg.interfaceNumber = 0; cfg.alternateSetting = 0;
+        cfg.release = { 0x02 };
+        r.driver.push(cfg);
+        (void)r.bridge.poll();
+
+        CHECK_EQ(static_cast<long long>(r.bridge.outstanding()), 0LL);
+        ipc::UrbCompletion c;
+        CHECK(r.driver.next(c));
+        CHECK_EQ(static_cast<long long>(c.requestId), 1LL);
+        CHECK(c.result == ipc::Result::Canceled);
+
+        // And the exporter's late answer must not be delivered afterwards.
+        r.step();
+        ipc::ConfigureResult res;
+        (void)r.driver.next(res);
+        ipc::UrbCompletion late;
+        CHECK(!r.driver.next(late));
     }
 
     TEST_CASE("releasing an endpoint completes its queued transfers at once") {
@@ -506,6 +578,30 @@ void testFailureModes()
         CHECK(r.driver.next(c));
         CHECK(c.result == ipc::Result::Disconnected);
         CHECK_EQ(static_cast<long long>(r.bridge.stats().forwarded), 0LL);
+    }
+
+    TEST_CASE("the retired set does not grow without bound") {
+        // It is the SECOND lock — the data plane already guarantees one terminal
+        // outcome per submit — and an unbounded second lock is a leak charged to
+        // the service's uptime. 6000 answered requests must not leave 6000
+        // entries behind.
+        // Cancellations, not descriptor reads: a request answered from the
+        // manifest never reaches the plane, so it can never produce a late
+        // completion and is never retired at all. Only the paths that CAN be
+        // raced put anything in this set — which is itself the right design and
+        // is why a first version of this test measured zero.
+        Rig r;
+        for (std::uint64_t i = 0; i < 6000; ++i) {
+            ipc::CancelRequest cq;
+            cq.requestId = 500000 + i;
+            cq.sessionIncarnation = kSession;
+            cq.deviceIncarnation  = kDevice;
+            r.driver.push(cq);
+        }
+        (void)r.bridge.poll();
+        r.driver.fromBridge.clear();
+        CHECK(r.bridge.retiredForTest() > 0u);
+        CHECK(r.bridge.retiredForTest() <= 4096u);
     }
 
     TEST_CASE("a malformed record is counted and skipped, not fatal") {

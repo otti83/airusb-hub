@@ -31,11 +31,12 @@ records this line).
 | Receiving on Windows | UdeCx driver not written. **Not blocked by anyone** |
 
 ```
-24 test suites / 0 failures  (was 22; +test_control 154 checks, +test_hub_e2e 62)
-3 fuzz targets / 0 crashes / 0 UB findings
+27 test suites / 0 failures  (+test_control, test_hub_e2e, test_windowsusb,
+                              test_udecxipc, test_udecxbridge)
+4 fuzz targets / 0 crashes / 0 UB findings  (+fuzz_udecxipc, round-trip enforced)
 Zero warnings: macOS (Clang, full set), Linux (GCC, ASan+UBSan),
                Windows (MinGW, full set), Windows (MSVC 19.51, /W4 /permissive-)
-~32,000 lines ours + 10 vendored files
+~36,000 lines ours + 10 vendored files
 ```
 
 ### What the previous handoff asked for, and what came of it
@@ -826,6 +827,43 @@ segmentation path proven between two operating systems on a real network, which
 is the strongest evidence for it anywhere in this project — loopback never fills
 a socket, and that is precisely why loopback never found this.
 
+### 3.10 Four bugs an adversarial review found in code written the same day
+
+Worth its own section because of what it says about the tests that passed.
+`test_udecxbridge` was green with 64 checks while all four of these were live —
+every one of them is a case the tests did not think to ask about.
+
+**1. Every successful OUT reported that it moved zero bytes.**
+`completeToDriver` read "if the payload and the length disagree, the payload
+wins". That is right for an IN and catastrophic for an OUT, which carries no
+payload by definition — so `actualLength` became 0 on every write. A filesystem
+told its 128 KiB write transferred nothing does not retry politely. The rule is
+directional and now says so; the test checks the length, which it did not.
+
+**2. Cancellation freed the bridge's bookkeeping and not the plane's.** The
+bridge stored only the DRIVER's request id and handed it to
+`ImporterDataPlane::cancel()`, which names transfers by its own id. The plane
+never found it, the admission slot stayed occupied, and at depth 1 every later
+URB queued behind a transfer nobody was waiting for. Throughput would have gone
+to zero with nothing looking broken. Both ids are stored now, and the test uses
+deliberately distant values so one cannot pass for the other.
+
+**3. Releasing an endpoint drained the queue and left the wire alone.** The
+driver destroys the endpoint object next; the completion for a transfer still in
+flight then arrives for something freed. `Outstanding` now carries its endpoint
+id so those can be retired too.
+
+**4. The retired-id set grew without bound** — a leak charged to the service's
+uptime, paid for a redundancy: the data plane already guarantees one terminal
+outcome per submit. It is a bounded FIFO now.
+
+**And a fifth thing, which is the reason this section exists.** All four were
+written, tested, reviewed by me and committed on the same day. The tests were
+not weak in an obvious way — they covered cancellation, endpoint release and
+forwarding. They just never asked "and what was the length?" or "and is the
+slot free now?". A test that checks a verdict without checking the number
+beside it is the shape of test that lets this class of bug through.
+
 ### The routing asymmetry is GONE — macOS → Windows, 2026-08-09
 
 Every two-machine run in this file until now had to put **Windows on the sharing
@@ -1121,6 +1159,84 @@ anyone's decision.**
 Much of the work is now cheaper than it was: `VhciBridge` proved that the
 translation layer can be written against `IUsbDevicePort` and tested with no
 kernel in the loop, and the same split applies to UdeCx.
+
+### 4.6 THE GAP LIST — an adversarial review, 2026-08-09, ordered by what breaks a user first
+
+GPT-5.6 was asked to read the whole repository and find what is missing rather
+than summarise what is here. Most of what follows is its finding; the ordering
+is by "what breaks a real user first", not by effort. **Four of its findings
+were bugs I had written that same day and are already fixed** (§3.10); these are
+the ones that remain.
+
+**The overstated claims are corrected in the tree already** — the README no
+longer says a person compares six digits "before anything is trusted", because
+that is true of the window and false of the command-line pair that actually
+enumerates a device. Leaving that sentence up was the single worst thing in the
+repository, and it was mine.
+
+**1. The real path does not do the pairing ceremony.** `airusb-vhci` and
+`airusb-exportd --serve` both call `trustPeerWithoutConfirmation` and print the
+SAS without asking anyone. The six-digit check exists, is tested, and is used by
+a different pair of processes with different identities and a different pin
+store. Until the privileged tools use it, first-use security on the only
+OS-enumerating path is trust-on-first-use.
+
+**2. The window is a diagnostic front end, not the control plane.** `hubd`
+attaches a `RemoteDevicePort` and runs `BotProbe`; it never tells `airusb-vhci`
+or a Windows service to present anything to the local USB stack, and it only
+offers a simulated device source. "Attach" in the window and "attach" in the
+product are different verbs. This is stated in `GUI.md` but the architecture
+needs a privileged broker the window drives.
+
+**3. Linux cannot recover from a stall.** `VhciNetBridge` STALLS
+`EP_CLEAR_HALT` rather than forwarding it, so one endpoint halt makes a real
+mass-storage device permanently unusable — BOT recovery needs a class reset plus
+clearing both bulk halts. `DeviceReset` is defined in `Wire.h` and advertised by
+the exporter with no handler behind it, which is worse than not advertising it.
+
+**4. The exporter is synchronous, which is wrong for interrupt endpoints.**
+`ExporterSession` performs the device transfer inline. An interrupt IN that
+legitimately idles blocks cancellation, detach and keepalive for the whole
+session. There is also no `CANCEL` handler: Linux cancellation retires the local
+request and the physical transfer continues.
+
+**5. Control OUT reports the wrong length.** The exporter does not set
+`actualLen` for a control OUT, so a class or vendor request with data can
+succeed physically and be reported as zero. Drivers that check the count break.
+
+**6. HELLO is never exchanged.** Roles, capabilities, max transfer and keepalive
+are defined in `Wire.h` and negotiated by nobody; `SecureSession` adopts its own
+configured record size. Two builds that disagree complete the handshake and fail
+later, obscurely. Noise IK is implemented and vector-tested but production only
+ever runs XX — "Noise_XX / Noise_IK done" should read "implemented and tested".
+
+**7. Keepalive and lease constants have no loop.** `_lastHeardNs` is written and
+never swept; the "orphaned until the lease expires" comment describes an expiry
+that does not exist. A network blip is undefined behaviour rather than a
+controlled recovery, and there is no session resumption at all.
+
+**8. Alternate settings are refused unless they already match.** Audio, cameras
+and most composite devices need `SET_INTERFACE`. Endpoint lookup also scans only
+interface numbers 0–31 for an 8-bit field.
+
+**9. `kXfZeroPacket` has no consumer.** Dropped, a device waits for ever for the
+terminating ZLP after an OUT that ends on an exact multiple of wMaxPacketSize.
+It does not affect the one flash drive tested, and it will affect real
+protocols.
+
+**10. Bounds under sustained load are unproven.** Outstanding requests,
+reassembly arenas, queued replies and manifest sizes have caps but no
+sustained-load gate.
+
+**11. The compatibility envelope is one device.** Every hardware claim in this
+repository rests on a single SuperSpeed BOT flash drive on a clean LAN. No USB 2
+speeds, no HID, no CDC, no composite, no multilingual strings, no hub topology,
+no unplug, no sleep, no impaired network.
+
+**Where the review was wrong**, recorded so it is not re-litigated: it reports
+`fuzz_usbip.cpp` as referenced-but-absent — no reference exists in this tree. It
+also cites `airusb/exporter/` and `airusb/importer/` paths that are actually
+`airusb/session/`.
 
 ### 4.5 Smaller, fully unblocked
 

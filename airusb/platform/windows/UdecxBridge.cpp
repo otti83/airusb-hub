@@ -199,7 +199,7 @@ void UdecxBridge::onCancel(const ipc::CancelRequest& r)
     ipc::encode(ack, out);
     sendRecord(out);
 
-    _retired[r.requestId] = true;
+    retire(r.requestId);
 
     // Drop it from the queue if it never reached the wire.
     for (auto it = _queued.begin(); it != _queued.end(); ++it) {
@@ -210,10 +210,13 @@ void UdecxBridge::onCancel(const ipc::CancelRequest& r)
     // `_retired` is what makes it disappear quietly instead of being delivered
     // to a request the driver has finished with.
     for (auto it = _outstanding.begin(); it != _outstanding.end(); ++it) {
-        if (it->second.requestId != r.requestId) continue;
-        const std::uint64_t key = it->first;
-        const std::uint16_t ch  = static_cast<std::uint16_t>(key >> 48);
-        (void)_plane.cancel(ch, it->second.requestId);
+        if (it->second.driverRequestId != r.requestId) continue;
+        // The PLANE's id, not the driver's. They are different namespaces, and
+        // passing the wrong one means the plane never cancels: the bridge
+        // forgets the transfer while the admission slot stays occupied, and at
+        // depth 1 every later URB queues behind a transfer nobody is waiting
+        // for any more.
+        (void)_plane.cancel(it->second.channel, it->second.planeRequestId);
         _outstanding.erase(it);
         return;
     }
@@ -258,14 +261,27 @@ void UdecxBridge::onConfigure(const ipc::Configure& r)
         }
     }
 
-    // Every endpoint being RELEASED loses its transfers here, locally and now.
-    // The driver is about to destroy those endpoint objects, and a completion
-    // arriving for one afterwards would be delivered to a freed kernel object.
+    // Every endpoint being RELEASED loses its transfers here, locally and now —
+    // the ones still queued AND the ones already on the wire. An earlier
+    // version drained only the queue, which left the interesting case
+    // unhandled: the driver destroys the endpoint object, and the completion
+    // for a transfer still in flight then arrives for something freed.
     for (std::uint32_t endpointId : r.release) {
         for (auto it = _queued.begin(); it != _queued.end();) {
             if (it->req.endpointId == endpointId) {
                 completeToDriver(it->req.requestId, ipc::Result::Canceled, 0, {});
+                retire(it->req.requestId);
                 it = _queued.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        for (auto it = _outstanding.begin(); it != _outstanding.end();) {
+            if (it->second.endpointId == endpointId) {
+                (void)_plane.cancel(it->second.channel, it->second.planeRequestId);
+                completeToDriver(it->second.driverRequestId, ipc::Result::Canceled, 0, {});
+                retire(it->second.driverRequestId);
+                it = _outstanding.erase(it);
             } else {
                 ++it;
             }
@@ -287,7 +303,7 @@ void UdecxBridge::sweepQueued()
         if (it->deadlineNs != 0 && now >= it->deadlineNs) {
             ++_stats.timedOut;
             completeToDriver(it->req.requestId, ipc::Result::Timeout, 0, {});
-            _retired[it->req.requestId] = true;
+            retire(it->req.requestId);
             it = _queued.erase(it);
         } else {
             ++it;
@@ -317,15 +333,18 @@ void UdecxBridge::admitQueued()
             // waiting for a deadline that belongs to a transfer that never was.
             ++_stats.refused;
             completeToDriver(q.req.requestId, ipc::fromStatus(s), 0, {});
-            _retired[q.req.requestId] = true;
+            retire(q.req.requestId);
             if (s == Status::TransportLost) { _linkDead = true; return; }
             continue;
         }
 
         Outstanding o;
-        o.requestId = q.req.requestId;
-        o.offered   = q.req.offeredLength;
-        o.dir       = q.req.direction;
+        o.driverRequestId = q.req.requestId;
+        o.channel         = channel;
+        o.planeRequestId  = planeId;
+        o.endpointId      = q.req.endpointId;
+        o.offered         = q.req.offeredLength;
+        o.dir             = q.req.direction;
         _outstanding[planeKey(channel, planeId)] = o;
         ++_stats.forwarded;
     }
@@ -361,8 +380,8 @@ void UdecxBridge::onCompletion(const session::DataCompletion& c)
     const Outstanding o = it->second;
     _outstanding.erase(it);
 
-    if (_retired.find(o.requestId) != _retired.end()) return;
-    _retired[o.requestId] = true;
+    if (isRetired(o.driverRequestId)) return;
+    retire(o.driverRequestId);
     ++_stats.completed;
 
     // The short-transfer question is NOT answered here. `fromStatus` maps a
@@ -370,7 +389,7 @@ void UdecxBridge::onCompletion(const session::DataCompletion& c)
     // USBD_SHORT_TRANSFER_OK, so only the driver can decide whether short is an
     // error for this particular URB. Deciding it here would take that away from
     // the side that has the information.
-    completeToDriver(o.requestId, ipc::fromStatus(c.status), c.actualLen, c.data);
+    completeToDriver(o.driverRequestId, ipc::fromStatus(c.status), c.actualLen, c.data);
 }
 
 void UdecxBridge::failAll(Status with)
@@ -379,15 +398,15 @@ void UdecxBridge::failAll(Status with)
 
     for (auto& [key, o] : _outstanding) {
         (void)key;
-        if (_retired.find(o.requestId) != _retired.end()) continue;
-        _retired[o.requestId] = true;
-        completeToDriver(o.requestId, r, 0, {});
+        if (isRetired(o.driverRequestId)) continue;
+        retire(o.driverRequestId);
+        completeToDriver(o.driverRequestId, r, 0, {});
     }
     _outstanding.clear();
 
     for (Queued& q : _queued) {
-        if (_retired.find(q.req.requestId) != _retired.end()) continue;
-        _retired[q.req.requestId] = true;
+        if (isRetired(q.req.requestId)) continue;
+        retire(q.req.requestId);
         completeToDriver(q.req.requestId, r, 0, {});
     }
     _queued.clear();
@@ -408,16 +427,44 @@ void UdecxBridge::completeToDriver(std::uint64_t requestId, ipc::Result result,
     c.actualLength       = actualLength;
     c.payload.assign(payload.begin(), payload.end());
 
-    // The format's single-length rule, upheld at the only place that can break
-    // it: the payload IS the actual length, or there is none. An IN transfer
-    // that moved fewer bytes than it claims would be rejected by our own
-    // decoder, which is the point of the decoder being shared.
-    if (c.payload.size() != actualLength) c.actualLength =
-        static_cast<std::uint32_t>(c.payload.size());
+    // The single-length rule, and the bug an earlier version had here.
+    //
+    // It read "if they differ, the payload wins" — which is right for an IN
+    // transfer and CATASTROPHIC for an OUT. An OUT completion carries no
+    // payload by definition, so `payload.size()` is 0 and every successful
+    // write was reported to the guest as having moved nothing. A filesystem
+    // told that its 128 KiB write transferred 0 bytes does not retry politely.
+    //
+    // The rule is directional: an IN's length IS its payload; an OUT's length
+    // is what the device accepted, and there is no payload to check it against.
+    if (!c.payload.empty())
+        c.actualLength = static_cast<std::uint32_t>(c.payload.size());
 
     std::vector<std::uint8_t> out;
     ipc::encode(c, out);
     sendRecord(out);
+}
+
+void UdecxBridge::retire(std::uint64_t driverRequestId)
+{
+    // A fixed cap, because a redundancy that grows without bound is a leak
+    // charged to the service's uptime. The plane already guarantees one
+    // terminal outcome per submit; this is the second lock, and 4096 is far
+    // more than the number of ids that can still produce a late completion at
+    // any admission depth this project will ship.
+    constexpr std::size_t kMaxRetired = 4096;
+    if (_retired.emplace(driverRequestId, true).second) {
+        _retiredOrder.push_back(driverRequestId);
+        while (_retiredOrder.size() > kMaxRetired) {
+            _retired.erase(_retiredOrder.front());
+            _retiredOrder.pop_front();
+        }
+    }
+}
+
+bool UdecxBridge::isRetired(std::uint64_t driverRequestId) const
+{
+    return _retired.find(driverRequestId) != _retired.end();
 }
 
 void UdecxBridge::sendRecord(std::span<const std::uint8_t> bytes)

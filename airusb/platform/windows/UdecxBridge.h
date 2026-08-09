@@ -131,6 +131,9 @@ public:
     std::size_t queued()      const noexcept { return _queued.size(); }
     const UdecxBridgeStats& stats() const noexcept { return _stats; }
     const std::string& lastError() const noexcept { return _lastError; }
+    /// For the test that pins the retired set's bound. Exposed rather than
+    /// inferred, because "it does not leak" is not observable from outside.
+    std::size_t retiredForTest() const noexcept { return _retired.size(); }
 
 private:
     /// A URB accepted from the driver but not yet on the wire. It carries its
@@ -142,10 +145,27 @@ private:
         ContinuousNs    deadlineNs = 0;
     };
 
+    /// A transfer on the wire.
+    ///
+    /// It carries BOTH ids, and that is not redundancy. The driver's id and the
+    /// data plane's id are different namespaces — one is a kernel's, one is
+    /// ours — and an early version stored only the driver's, then handed it to
+    /// `ImporterDataPlane::cancel()`. The plane never found it, so cancelling
+    /// freed the bridge's bookkeeping and left the plane's admission slot
+    /// occupied until the original transfer finished on its own. At depth 1
+    /// that stalls every subsequent URB.
+    ///
+    /// The endpoint id is here for the same class of reason: a configure
+    /// transaction that RELEASES an endpoint has to retire the transfers
+    /// already on the wire for it, not just the queued ones, because the driver
+    /// is about to destroy the object their completions would land on.
     struct Outstanding {
-        std::uint64_t requestId = 0;   ///< the DRIVER's id
-        std::uint32_t offered   = 0;
-        ipc::Direction dir      = ipc::Direction::Out;
+        std::uint64_t driverRequestId = 0;
+        std::uint16_t channel         = 0;   ///< the plane's
+        std::uint64_t planeRequestId  = 0;   ///< the plane's
+        std::uint32_t endpointId      = 0;
+        std::uint32_t offered         = 0;
+        ipc::Direction dir            = ipc::Direction::Out;
     };
 
     Status drainDriver();
@@ -182,9 +202,19 @@ private:
     /// one is ours, one is a kernel's.
     std::unordered_map<std::uint64_t, Outstanding> _outstanding;
     /// The driver's ids we have already answered. A late completion for one of
-    /// these is dropped in silence — it is normal after a cancellation, not a
+    /// these is dropped in silence — normal after a cancellation, not a
     /// protocol violation.
+    ///
+    /// BOUNDED, and the bound is the point. `ImporterDataPlane` already
+    /// guarantees exactly one terminal outcome per submit and drops the late
+    /// completion for anything cancelled, so this set is the SECOND lock, not
+    /// the mechanism. An unbounded second lock is a leak that grows for the
+    /// life of the service — which is a real cost paid for a redundancy — so it
+    /// is a fixed-size FIFO and the oldest entry is evicted.
+    void retire(std::uint64_t driverRequestId);
+    bool isRetired(std::uint64_t driverRequestId) const;
     std::unordered_map<std::uint64_t, bool> _retired;
+    std::deque<std::uint64_t>               _retiredOrder;
 
     UdecxBridgeStats _stats;
     Trace            _trace;

@@ -8,9 +8,18 @@ its own drivers — a flash drive appears as a normal volume, because as far as
 that operating system can tell, it really is attached. Not file sharing. The
 device itself is forwarded.
 
-Peer to peer, LAN only. No cloud, no account, no server. Mutually authenticated
-and encrypted (Noise), with a six-digit number you compare on both screens
-before anything is trusted.
+Peer to peer, LAN only. No cloud, no account, no server. Every session is
+encrypted and mutually authenticated (Noise).
+
+> **Pairing is not yet uniform, and this is the honest version.** The window
+> (`airusb-hubd`) shows a six-digit number on both machines and waits for a
+> person to say they match. The command-line tools — including
+> `airusb-exportd --serve` and `airusb-vhci`, which are the pair that actually
+> makes Linux enumerate a device — **trust the first peer that connects** and
+> print the number without asking. That is trust-on-first-use, and on a shared
+> LAN the first connector is not guaranteed to be you. Making the real path use
+> the ceremony the window already implements is the top item in
+> [`docs/HANDOFF.md`](docs/HANDOFF.md) §4.6.
 
 ---
 
@@ -87,7 +96,10 @@ three. Details and the security model: [`docs/GUI.md`](docs/GUI.md).
                                               macOS: blocked on an Apple entitlement
 ```
 
-Every peer can share and receive; there is no dedicated server.
+There is no dedicated server; the protocol is symmetric. What is NOT yet
+symmetric is the platform support: real hardware can only be shared **from
+macOS**, and a forwarded device can only be enumerated **on Linux**. The
+protocol, the window and the command-line client run everywhere.
 
 **The sharing side is two processes, because macOS requires it.** Capturing a
 device and unmounting its disks need root; opening a USB interface needs
