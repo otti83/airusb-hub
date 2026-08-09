@@ -181,9 +181,20 @@ Status LocalListener::open(const std::string& path, unsigned, std::string* why)
         return Status::Internal;
     }
 
+    // FILE_FLAG_FIRST_PIPE_INSTANCE on the FIRST instance only.
+    //
+    // Every instance used to claim to be the first, so the replacement listener
+    // created after accepting a client failed — the connected first instance
+    // still existed — and the error was ignored. The broker served exactly one
+    // window per run: close the page and reopen it, or start a second one, and
+    // nothing could reach the daemon until it was restarted. Found by an
+    // adversarial read of this session's own code.
+    DWORD openMode = PIPE_ACCESS_DUPLEX;
+    if (_first) openMode |= FILE_FLAG_FIRST_PIPE_INSTANCE;
+
     const HANDLE h = ::CreateNamedPipeA(
         path.c_str(),
-        PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
+        openMode,
         PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_NOWAIT,
         PIPE_UNLIMITED_INSTANCES, 64 * 1024, 64 * 1024, 0, &sa);
     ::LocalFree(sa.lpSecurityDescriptor);
@@ -194,6 +205,7 @@ Status LocalListener::open(const std::string& path, unsigned, std::string* why)
     }
     _handle = reinterpret_cast<std::uintptr_t>(h);
     _bound  = true;
+    _first  = false;
     return Status::Ok;
 }
 
@@ -227,10 +239,16 @@ std::unique_ptr<transport::IByteStream> LocalListener::accept(PeerCredentials* c
     if (credsOut) *credsOut = c;
 
     // Hand the connected instance out and create a fresh one to keep listening.
+    // The failure is NOT ignored: a broker that has silently stopped listening
+    // looks exactly like one that is running.
     auto stream = std::make_unique<PipeStream>(h);
     _handle = static_cast<std::uintptr_t>(-1);
-    std::string ignored;
-    (void)open(_path, 0, &ignored);
+    std::string why;
+    if (open(_path, 0, &why) != Status::Ok) {
+        // Nothing can reach us now, and saying so on stderr is the only channel
+        // left — the control channel is the thing that just died.
+        ::OutputDebugStringA("airusb: could not re-arm the broker pipe\n");
+    }
     return stream;
 }
 
@@ -243,6 +261,7 @@ void LocalListener::close()
     }
     _handle = static_cast<std::uintptr_t>(-1);
     _bound  = false;
+    _first  = true;
 }
 
 std::unique_ptr<transport::IByteStream> connectLocal(const std::string& path,

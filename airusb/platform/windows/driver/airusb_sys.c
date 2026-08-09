@@ -115,14 +115,22 @@ AirUsbRetireAllLocked(
 {
     InitializeListHead(Detached);
 
+    /* Each entry is CLAIMED as it is detached. The detached list is walked
+     * without the lock — it has to be, because WdfRequestUnmarkCancelable must
+     * not be called under a lock the cancel routine also takes — so a cancel
+     * that arrives meanwhile must not still believe the entry is linked. */
     while (!IsListEmpty(&Ctx->PendingWork)) {
         PLIST_ENTRY e = RemoveHeadList(&Ctx->PendingWork);
+        PAIRUSB_REQUEST_CONTEXT rc = CONTAINING_RECORD(e, AIRUSB_REQUEST_CONTEXT, Link);
+        rc->State = AirUsbReqCompleting;
         InsertTailList(Detached, e);
     }
     Ctx->PendingCount = 0;
 
     while (!IsListEmpty(&Ctx->Exported)) {
         PLIST_ENTRY e = RemoveHeadList(&Ctx->Exported);
+        PAIRUSB_REQUEST_CONTEXT rc = CONTAINING_RECORD(e, AIRUSB_REQUEST_CONTEXT, Link);
+        rc->State = AirUsbReqCompleting;
         InsertTailList(Detached, e);
     }
     Ctx->Outstanding = 0;
@@ -227,6 +235,44 @@ AirUsbWriteUrbRecord(
     return STATUS_SUCCESS;
 }
 
+/* Writes one endpoint-reset record into a FETCH's output buffer.
+ *
+ * Opcode 0x0007 is deliberately NOT the cancel opcode: the host has to tell a
+ * reset from a cancel, because one is "stop caring about this id" and the other
+ * is "clear the halt on this endpoint and tell me whether it worked". They
+ * share a shape and mean opposite things.
+ */
+static NTSTATUS
+AirUsbWriteResetRecord(
+    _In_ PAIRUSB_RESET_CONTEXT Rst,
+    _In_ ULONG SessionIncarnation,
+    _In_ ULONG DeviceIncarnation,
+    _Out_writes_bytes_(BufferLength) PUCHAR Buffer,
+    _In_ size_t BufferLength,
+    _Out_ size_t* Written
+    )
+{
+    const size_t need = 8u + 24u;
+
+    *Written = 0;
+    if (BufferLength < need) return STATUS_BUFFER_TOO_SMALL;
+    RtlZeroMemory(Buffer, need);
+
+    Buffer[0] = (UCHAR)(AIRUSB_IPC_VERSION & 0xFF);
+    Buffer[1] = (UCHAR)((AIRUSB_IPC_VERSION >> 8) & 0xFF);
+    Buffer[2] = 0x07;                       /* Opcode::EndpointReset */
+    Buffer[3] = 0x00;
+    *(ULONG UNALIGNED*)(Buffer + 4) = (ULONG)(need - 8u);
+
+    *(ULONGLONG UNALIGNED*)(Buffer + 8)  = Rst->TicketId;
+    *(ULONG UNALIGNED*)(Buffer + 16)     = SessionIncarnation;
+    *(ULONG UNALIGNED*)(Buffer + 20)     = DeviceIncarnation;
+    *(ULONG UNALIGNED*)(Buffer + 24)     = Rst->EndpointId;
+
+    *Written = need;
+    return STATUS_SUCCESS;
+}
+
 /* Hands one queued request to a parked FETCH, if both exist.
  *
  * Called with the lock NOT held: WdfIoQueueRetrieveNextRequest takes the
@@ -262,7 +308,55 @@ AirUsbPumpFetch(_In_ PAIRUSB_CONTROLLER_CONTEXT Ctx)
         }
         WdfSpinLockRelease(Ctx->Lock);
 
-        if (rc == NULL) return;               /* nothing to hand over */
+        if (rc == NULL) {
+            /* No URB — but a parked endpoint RESET is work too, and it used to
+             * be invisible here. `AirUsbEvtEndpointReset` put it on `Resets`
+             * and called this function, which only ever looked at
+             * `PendingWork`, so every reset sat for five seconds and failed. A
+             * stalled mass-storage endpoint could not recover, which is the
+             * ordinary way a BOT device reports a bad command. */
+            PAIRUSB_RESET_CONTEXT rst = NULL;
+            ULONG sess = 0, dev = 0;
+
+            WdfSpinLockAcquire(Ctx->Lock);
+            if (Ctx->Life == AirUsbRunning) {
+                PLIST_ENTRY cur = Ctx->Resets.Flink;
+                while (cur != &Ctx->Resets) {
+                    PAIRUSB_RESET_CONTEXT r =
+                        CONTAINING_RECORD(cur, AIRUSB_RESET_CONTEXT, Link);
+                    if (!r->Sent) { rst = r; r->Sent = TRUE; break; }
+                    cur = cur->Flink;
+                }
+                sess = Ctx->SessionIncarnation;
+                dev  = Ctx->DeviceIncarnation;
+            }
+            WdfSpinLockRelease(Ctx->Lock);
+
+            if (rst == NULL) return;          /* nothing to hand over at all */
+
+            status = WdfIoQueueRetrieveNextRequest(Ctx->FetchQueue, &fetch);
+            if (!NT_SUCCESS(status)) {
+                WdfSpinLockAcquire(Ctx->Lock);
+                rst->Sent = FALSE;            /* try again on the next fetch */
+                WdfSpinLockRelease(Ctx->Lock);
+                return;
+            }
+
+            status = WdfRequestRetrieveOutputBuffer(fetch, 8u + 24u,
+                                                    (PVOID*)&outBuf, &outLen);
+            if (NT_SUCCESS(status))
+                status = AirUsbWriteResetRecord(rst, sess, dev, outBuf, outLen, &written);
+            if (!NT_SUCCESS(status)) {
+                WdfSpinLockAcquire(Ctx->Lock);
+                rst->Sent = FALSE;
+                WdfSpinLockRelease(Ctx->Lock);
+                WdfRequestComplete(fetch, status);
+                return;
+            }
+            WdfRequestSetInformation(fetch, written);
+            WdfRequestComplete(fetch, STATUS_SUCCESS);
+            continue;
+        }
 
         status = WdfIoQueueRetrieveNextRequest(Ctx->FetchQueue, &fetch);
         if (!NT_SUCCESS(status)) {
@@ -352,6 +446,9 @@ AirUsbEvtRequestCancel(
     if (rc != NULL && rc->Controller != NULL) {
         PAIRUSB_CONTROLLER_CONTEXT ctx = rc->Controller;
         WdfSpinLockAcquire(ctx->Lock);
+        /* `Completing` and `Retired` mean somebody else already took it off its
+         * list. Unlinking again would be a second RemoveEntryList on the same
+         * entry, which corrupts the list it is no longer on. */
         if (rc->State == AirUsbReqQueued) {
             RemoveEntryList(&rc->Link);
             if (ctx->PendingCount != 0) ctx->PendingCount--;
@@ -727,20 +824,32 @@ AirUsbEvtIoInternalDeviceControl(
     rc->DeviceIncarnation  = ctx->DeviceIncarnation;
     WdfSpinLockRelease(ctx->Lock);
 
-    status = WdfRequestMarkCancelableEx(Request, AirUsbEvtRequestCancel);
-    if (!NT_SUCCESS(status)) {
-        /* Already cancelled before we could mark it. KMDF has NOT called the
-         * cancel routine in this case, so completing it here is correct and is
-         * the only completion. */
-        UdecxUrbSetBytesCompleted(Request, 0);
-        UdecxUrbComplete(Request, (USBD_STATUS)AIRUSB_USBD_CANCELED);
-        return;
-    }
-
+    /* LINKED FIRST, THEN MARKED CANCELABLE. The other order is a race the
+     * build cannot see: a cancel arriving between the mark and the insert runs
+     * `AirUsbEvtRequestCancel`, which sees state `Queued` and calls
+     * `RemoveEntryList` on a LIST_ENTRY that was never linked — corrupting
+     * whatever the uninitialised pointers happen to address. */
     WdfSpinLockAcquire(ctx->Lock);
     InsertTailList(&ctx->PendingWork, &rc->Link);
     ctx->PendingCount++;
     WdfSpinLockRelease(ctx->Lock);
+
+    status = WdfRequestMarkCancelableEx(Request, AirUsbEvtRequestCancel);
+    if (!NT_SUCCESS(status)) {
+        /* Already cancelled before we could mark it. KMDF has NOT called the
+         * cancel routine in this case, so unlinking and completing here is
+         * correct and is the only completion. */
+        WdfSpinLockAcquire(ctx->Lock);
+        if (rc->State == AirUsbReqQueued) {
+            RemoveEntryList(&rc->Link);
+            if (ctx->PendingCount != 0) ctx->PendingCount--;
+            rc->State = AirUsbReqRetired;
+        }
+        WdfSpinLockRelease(ctx->Lock);
+        UdecxUrbSetBytesCompleted(Request, 0);
+        UdecxUrbComplete(Request, (USBD_STATUS)AIRUSB_USBD_CANCELED);
+        return;
+    }
 
     AirUsbPumpFetch(ctx);
 }
@@ -1098,6 +1207,27 @@ AirUsbHandleCompletion(
     if (Length < 8u + 32u + 4u + payloadLen) return STATUS_INVALID_PARAMETER;
     payload = Buffer + 8u + 36u;
 
+    /* ONE LENGTH, NOT TWO — rule 4 of the ABI, which this parser did not
+     * enforce.
+     *
+     * `actualLength` says how many bytes moved on the bus and `payloadLen` says
+     * how many are in this record. For an IN transfer they must be the same
+     * number. Without the check a host could report success for N bytes while
+     * supplying fewer, and the guest would consume whatever was already in its
+     * buffer as if the device had sent it — stale data presented as a
+     * successful read, which for a filesystem is silent corruption.
+     *
+     * The C++ decoder enforces this and is fuzzed for it; the driver's
+     * hand-written parser is the copy that did not. That is the cost of two
+     * spellings of one format, and it is why the constants they share live in
+     * one header. */
+    if (result == 0 && actualLength != payloadLen) {
+        /* Direction is checked below, once the request is found: an OUT
+         * completion legitimately carries no payload. Recorded here so the
+         * check is impossible to miss when reading the parse. */
+        (void)0;
+    }
+
     WdfSpinLockAcquire(Ctx->Lock);
     cur = Ctx->Exported.Flink;
     while (cur != &Ctx->Exported) {
@@ -1110,6 +1240,12 @@ AirUsbHandleCompletion(
                 rc->DeviceIncarnation  != deviceInc) break;
             RemoveEntryList(cur);
             Ctx->Outstanding--;
+            /* Claimed UNDER THE LOCK. Leaving the state at `Exported` while the
+             * lock is dropped lets a concurrent cancel callback find it and
+             * unlink it a second time. `Completing` is what says "this one is
+             * mine now", and it is the state the header declared and the first
+             * version never assigned. */
+            rc->State = AirUsbReqCompleting;
             found = rc;
             break;
         }
@@ -1138,6 +1274,25 @@ AirUsbHandleCompletion(
         found->State = AirUsbReqRetired;
         UdecxUrbSetBytesCompleted(found->Request, 0);
         UdecxUrbComplete(found->Request, (USBD_STATUS)AIRUSB_USBD_BUFFER_OVERRUN);
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    /* An IN completion must carry exactly what it claims, and an OUT must
+     * carry nothing. Anything else RETIRES the request with a failure rather
+     * than merely rejecting the IOCTL — a malformed completion that names a
+     * live request and is only refused leaves the guest's URB hanging for
+     * ever. */
+    if (found->Direction == 1) {
+        if (payloadLen != actualLength) {
+            found->State = AirUsbReqRetired;
+            UdecxUrbSetBytesCompleted(found->Request, 0);
+            UdecxUrbComplete(found->Request, (USBD_STATUS)AIRUSB_USBD_INVALID_PARAMETER);
+            return STATUS_INVALID_PARAMETER;
+        }
+    } else if (payloadLen != 0) {
+        found->State = AirUsbReqRetired;
+        UdecxUrbSetBytesCompleted(found->Request, 0);
+        UdecxUrbComplete(found->Request, (USBD_STATUS)AIRUSB_USBD_INVALID_PARAMETER);
         return STATUS_INVALID_PARAMETER;
     }
 
@@ -1184,10 +1339,20 @@ AirUsbEvtIoDeviceControl(
 
     switch (IoControlCode) {
 
-    case AIRUSB_IOCTL_BIND:
-        /* Claims the controller for this handle. Refused if somebody already
-         * has it — a second binder is a bug in the caller, not a takeover to be
-         * silently permitted. */
+    case AIRUSB_IOCTL_BIND: {
+        /* Claims the controller for this handle, and TELLS THE HOST WHICH
+         * SESSION IT GOT.
+         *
+         * The incarnations are the DRIVER'S. The host used to invent its own —
+         * random values, for good reasons that do not apply — so every record
+         * the two exchanged disagreed: the bridge rejected each URB as stale
+         * and stamped its replies with numbers the driver then discarded. The
+         * first enumeration URB would have waited for ever, and the hosted
+         * bridge test could not see it because it configures both sides with
+         * the same constants. There is exactly one source of these numbers now,
+         * and it is the side that owns the objects they identify. */
+        ULONG* out = NULL;
+        size_t outLen = 0;
         WdfSpinLockAcquire(ctx->Lock);
         if (ctx->Life != AirUsbRunning) {
             status = STATUS_DEVICE_NOT_READY;
@@ -1200,7 +1365,18 @@ AirUsbEvtIoDeviceControl(
             status = STATUS_SUCCESS;
         }
         WdfSpinLockRelease(ctx->Lock);
+        if (NT_SUCCESS(status) &&
+            NT_SUCCESS(WdfRequestRetrieveOutputBuffer(Request, sizeof(ULONG) * 2,
+                                                      (PVOID*)&out, &outLen)) &&
+            outLen >= sizeof(ULONG) * 2) {
+            WdfSpinLockAcquire(ctx->Lock);
+            out[0] = ctx->SessionIncarnation;
+            out[1] = ctx->DeviceIncarnation;
+            WdfSpinLockRelease(ctx->Lock);
+            WdfRequestSetInformation(Request, sizeof(ULONG) * 2);
+        }
         break;
+    }
 
     case AIRUSB_IOCTL_PLUG_IN: {
         BOOLEAN mine;
@@ -1214,6 +1390,22 @@ AirUsbEvtIoDeviceControl(
                                                &inBuf, &inLen);
         if (!NT_SUCCESS(status)) break;
         status = AirUsbPlugIn(ctx, (PUCHAR)inBuf, inLen);
+
+        /* The device incarnation the host must stamp on every record from now
+         * on. Plug-in bumps it, so a host that kept the value BIND returned
+         * would be one incarnation behind and every URB would be refused. */
+        if (NT_SUCCESS(status)) {
+            ULONG* out = NULL;
+            size_t outLen = 0;
+            if (NT_SUCCESS(WdfRequestRetrieveOutputBuffer(Request, sizeof(ULONG),
+                                                          (PVOID*)&out, &outLen)) &&
+                outLen >= sizeof(ULONG)) {
+                WdfSpinLockAcquire(ctx->Lock);
+                out[0] = ctx->DeviceIncarnation;
+                WdfSpinLockRelease(ctx->Lock);
+                WdfRequestSetInformation(Request, sizeof(ULONG));
+            }
+        }
         break;
     }
 

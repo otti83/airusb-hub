@@ -465,8 +465,14 @@ Status ExporterSession::handleAttach(const Header& h, std::span<const std::uint8
     // The attach id comes from the authority, not from a per-session counter.
     // Two sessions against the same device must never mint the same one, and a
     // counter that resets when a session object is destroyed does exactly that.
-    RecoveryToken token{};
-    _attachId = _leases->grant(_secure->peerIdentity().identityKey, _uid, &token);
+    // No token is asked for, because there is nowhere to send one.
+    //
+    // `LeaseAuthority::tryRecover` is written and tested, and ATTACH_OK has no
+    // field for a recovery token — so minting one here and dropping it, which
+    // the first version did, is a feature the code implies and does not have.
+    // The honest state is: a quarantined lease is recovered by a person at the
+    // exporting machine, and RESUME (0x28, reserved) is the next session's job.
+    _attachId = _leases->grant(_secure->peerIdentity().identityKey, _uid, nullptr);
     _leaseEpoch = _leases->snapshot().leaseEpoch;
 
     // The manifest is built and validated BEFORE anything is announced. §7.2
@@ -485,8 +491,8 @@ Status ExporterSession::handleAttach(const Header& h, std::span<const std::uint8
 
     AttachOkBody ok;
     ok.attachId          = _attachId;
-    ok.creditUrbs        = 64;
-    ok.creditBytes       = 4u * 1024 * 1024;
+    ok.creditUrbs        = static_cast<std::uint32_t>(kCreditUrbs);
+    ok.creditBytes       = static_cast<std::uint32_t>(kCreditBytes);
     ok.speed             = static_cast<std::uint16_t>(_manifest.speed());
     // ENDPOINT scope only, and now that is a measured statement rather than a
     // guess: `InlineAsyncPort::cancel()` returns false because a synchronous
@@ -657,8 +663,16 @@ Status ExporterSession::handleDeviceReset(const Header& h)
     if (endpoints.empty())
         return sendSimple(wire::Type::CtrlAck, Status::Ok, h.requestId, {});
 
-    // Only the LAST one carries the request id, so exactly one CTRL_ACK is sent.
-    // The others are fire-and-collect verbs whose outcomes are folded into it.
+    // Only the LAST leg carries the request id, so exactly one CTRL_ACK is
+    // sent — and it must report the WORST result, not the last one.
+    //
+    // The first version discarded every earlier leg's status, so a reset whose
+    // bulk OUT failed and whose bulk IN succeeded reported success. Half of a
+    // BOT recovery is not a recovery: the guest would resume writing to an
+    // endpoint that is still halted, and its next command would fail for a
+    // reason it had just been told did not exist.
+    _resetWorst   = Status::Ok;
+    _resetPending = 0;
     for (std::size_t i = 0; i < endpoints.size(); ++i) {
         const std::uint64_t token = _nextToken++;
         PendingVerb v;
@@ -668,8 +682,11 @@ Status ExporterSession::handleDeviceReset(const Header& h)
         _verbs[token] = v;
         if (const Status s = _port->clearHalt(token, endpoints[i]); s != Status::Ok) {
             _verbs.erase(token);
+            if (_resetWorst == Status::Ok) _resetWorst = s;
             if (v.requestId != 0)
-                return sendSimple(wire::Type::CtrlAck, s, h.requestId, {});
+                return sendSimple(wire::Type::CtrlAck, _resetWorst, h.requestId, {});
+        } else {
+            ++_resetPending;
         }
     }
     return Status::Ok;
@@ -752,7 +769,13 @@ Status ExporterSession::handleCancel(const Header& h, std::span<const std::uint8
             //    running is how a Bulk-Only Transport phase machine
             //    desynchronises, so the endpoint stays busy until the device
             //    finishes on its own or the deadline sweep fires.
-            it->second.cancelRequested = true;
+            //
+            // AND ITS DEADLINE IS LEFT ALONE. Setting `cancelRequested` here —
+            // which the first version did — made `sweepDeadlines()` skip it, so
+            // a transfer stuck in a backend that cannot abort got a
+            // CANCEL_ACK saying "0 stopped" and then NO terminal outcome ever:
+            // the one thing invariant I1 forbids. The deadline sweep is the only
+            // thing that can end it, so the cancel must not disarm it.
         }
     }
 
@@ -868,6 +891,33 @@ Status ExporterSession::handleData(const Header& h, std::span<const std::uint8_t
 Status ExporterSession::enqueueTransfer(const Header& reqHeader, const SubmitBody& sb,
                                         std::span<const std::uint8_t> dataOut)
 {
+    // BOUNDED, and the bound is the credit ATTACH_OK advertised.
+    //
+    // The queue used to just append. ATTACH_OK told the importer 64 URBs and
+    // 4 MiB and nothing enforced either, so a peer that submitted faster than
+    // the device drains grew this without limit — and because `pump()` reads
+    // until the transport says Busy BEFORE collecting outcomes, a continuously
+    // readable peer could postpone collection while doing it.
+    //
+    // Refused honestly rather than dropped: the importer gets a COMPLETE with
+    // NoResources for the transfer it could not have, which is a terminal
+    // outcome like any other and keeps invariant I1.
+    std::size_t queued = 0;
+    std::size_t bytes  = 0;
+    for (const auto& [ep, q] : _queues) {
+        queued += q.size();
+        for (const Pending& e : q) bytes += e.dataOut.size();
+    }
+    if (queued + _inFlight.size() >= kCreditUrbs ||
+        bytes + dataOut.size() > kCreditBytes) {
+        InFlight f;
+        f.channel   = reqHeader.channel;
+        f.requestId = reqHeader.requestId;
+        f.epAddr    = sb.epAddr;
+        f.sb        = sb;
+        return emitComplete(f, Status::NoResources, 0, false, false, {});
+    }
+
     Pending p;
     p.channel   = reqHeader.channel;
     p.requestId = reqHeader.requestId;
@@ -974,10 +1024,17 @@ Status ExporterSession::collect()
         if (auto v = _verbs.find(o.token); v != _verbs.end()) {
             const PendingVerb pv = v->second;
             _verbs.erase(v);
-            // requestId 0 marks the non-final legs of a DEVICE_RESET, whose
-            // outcomes are absorbed rather than each producing a CTRL_ACK.
-            if (pv.requestId != 0)
+            if (pv.isReset) {
+                // Every leg's status counts. requestId 0 marks a non-final leg,
+                // whose result is REMEMBERED rather than discarded.
+                if (_resetPending != 0) --_resetPending;
+                if (o.status != Status::Ok && _resetWorst == Status::Ok)
+                    _resetWorst = o.status;
+                if (pv.requestId != 0)
+                    (void)sendSimple(wire::Type::CtrlAck, _resetWorst, pv.requestId, {});
+            } else if (pv.requestId != 0) {
                 (void)sendSimple(wire::Type::CtrlAck, o.status, pv.requestId, {});
+            }
             return;
         }
 
@@ -1047,6 +1104,10 @@ Status ExporterSession::sweepDeadlines()
     // In flight: the device still owns it. Tell the port to stop, and only
     // retire our own record once it reports back — a transfer answered here AND
     // again by the port's eventual outcome is answered twice.
+    // `cancelRequested` marks a transfer the PORT accepted a cancel for and
+    // will report through `poll()`. Those are skipped because their outcome is
+    // already on its way. A cancel the port REFUSED never sets the flag, so its
+    // deadline still fires — which is the only terminal outcome it can get.
     std::vector<std::uint64_t> expired;
     for (auto& [token, f] : _inFlight)
         if (f.deadline.expired(*_clock) && !f.cancelRequested) expired.push_back(token);
@@ -1186,8 +1247,23 @@ void ExporterSession::close()
     // Transfers are retired before the port is dropped, so the device is told to
     // stop rather than being abandoned with work outstanding.
     if (_port) failAllTransfers(Status::Detaching);
+
     if (_port) {
-        _devices->release(_uid);
+        // THE CAPTURE IS ONLY RELEASED IF NOBODY STILL OWNS IT.
+        //
+        // This unconditionally called `release()`, and that put the original bug
+        // back one level up. `HubState` drops a peer that vanished by calling
+        // close(), the lease is Quarantined at that moment by design, and
+        // releasing the device source ends the capture — handing a possibly
+        // dirty drive back to the local OS while the vanished peer still owns
+        // it. The lease said "held for that machine" and the device source was
+        // told otherwise in the same breath.
+        //
+        // Found by an adversarial read of this session's own code (GPT-5.6,
+        // 2026-08-09), which is the whole argument for asking.
+        const bool stillOwned = _leases != nullptr &&
+                                _leases->state() != LeaseState::Free;
+        if (!stillOwned) _devices->release(_uid);
         _port = nullptr;
     }
     _attachId = 0;

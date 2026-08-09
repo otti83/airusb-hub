@@ -14,8 +14,9 @@ encrypted and mutually authenticated (Noise).
 > **One identity per machine, and one ceremony.** `airusb-brokerd` owns the
 > machine's identity, its pinned peers and its leases, and it is the process
 > that hands a device to your operating system. The window is a client of it: it
-> holds no key, and it cannot pin a peer the broker did not itself put a
-> question about. So the six digits you compare belong to the session that
+> never holds the machine's key, and it cannot pin a peer the broker did not
+> itself put a question about. (Run standalone it does have an identity — its
+> own, for the diagnostic half — and it says so on startup.) So the six digits you compare belong to the session that
 > really moves a filesystem — which was not true before 2026-08-09, when the
 > window had an identity of its own and the command-line tools had another.
 >
@@ -33,8 +34,8 @@ encrypted and mutually authenticated (Noise).
 | **Share a device from a Mac** | **works, on real hardware** — a 31.5 GB SuperSpeed drive, captured from macOS and handed back cleanly |
 | **Receive a device on Linux** | **works** — the Linux kernel enumerates it, binds `usb-storage`, and mounts the filesystem |
 | **The window** | **works on macOS, Linux and Windows** — one interface, one binary, no toolkit to install ([`docs/GUI.md`](docs/GUI.md)). On Linux its **Attach** really enumerates the device; where it cannot, it says so instead of doing something smaller |
-| Encryption, authentication, pairing | done — Noise_XX, checked against the official test vectors, with limits negotiated at HELLO before either side can act. Noise_IK is implemented and vector-tested; production runs XX |
-| Receive a device on **Windows** | **the driver is written, builds, and analyses clean — and has never been loaded.** Nobody's permission required; it needs a spare machine and a person at the keyboard |
+| Encryption, authentication, pairing | done — Noise_XX, checked against the official test vectors. The two ends agree their record size at HELLO before either can act; the other negotiated numbers are exchanged and not yet acted on. Noise_IK is implemented and vector-tested; production runs XX |
+| Receive a device on **Windows** | **written, and never run.** The driver builds and passes Code Analysis; the host half builds. Neither has been loaded or executed against a kernel. Nobody's permission required; it needs a spare machine and a person at the keyboard |
 | Receive a device on **macOS** | **blocked on Apple** — see below |
 
 So there is a working product today: **a Mac shares a drive, a Linux machine
@@ -85,12 +86,17 @@ machine and read a device from it, and it cannot add one to this computer. To
 actually receive a device, run the broker as well; on Linux that is:
 
 ```bash
-sudo ./build/airusb-brokerd --share            # owns the identity and the vhci port
-./build/airusb-hubd --broker /run/airusb-broker.sock
+# The broker owns the identity and the vhci port, so it is root. Its socket is
+# 0600 by design, which means the window has to be able to read it — run both
+# as the same user, or relax the socket deliberately.
+sudo ./build/airusb-brokerd --socket /tmp/airusb.sock --simulated --share
+sudo ./build/airusb-hubd --broker /tmp/airusb.sock --no-open
 ```
 
-The window then shows **this machine's** identity rather than one of its own,
-and Attach means what it says.
+`--simulated` is what gives the broker something to share; without it there is
+no capture backend wired in yet and `--share` offers nothing. The window then
+shows **this machine's** identity rather than one of its own, and Attach means
+what it says.
 
 The window is a page served to `127.0.0.1` only, behind a token, because the
 browser is the one interface toolkit that is already installed on all three
@@ -192,7 +198,7 @@ implementation that only talks to itself can be perfectly self-consistent and
 completely wrong.
 
 ```
-27 test suites, 0 failures      4 fuzz targets, 0 crashes
+29 suites, 0 failures      6 fuzz targets, 0 crashes
 CI on every commit: macOS/Clang · Linux/GCC+ASan+UBSan · Windows/MSVC · MinGW cross-build
 zero warnings under -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow,
 and under MSVC /W4 /permissive-
@@ -200,7 +206,9 @@ and under MSVC /W4 /permissive-
 
 The Windows and Linux CI jobs do not merely compile: each starts two daemons,
 makes them pair, and requires a USB Mass Storage exchange to complete through
-the control API before the job passes.
+the control API before the job passes. Both first check that an approval which
+does not name the question it is answering is REFUSED — a pairing ceremony
+whose refusals have quietly stopped working looks exactly like one that works.
 
 ---
 

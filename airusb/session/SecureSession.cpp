@@ -180,6 +180,32 @@ Status SecureSession::readPeerPreamble()
 
 Status SecureSession::driveHandshake()
 {
+    // PUSH WHATEVER THE SOCKET WOULD NOT TAKE, BEFORE ANYTHING ELSE.
+    //
+    // This is older than the greeting and has the same shape. `flush()` returns
+    // Ok when the socket accepted only part of a record and leaves the rest
+    // buffered — a short write is not an error. The loop below sends a
+    // handshake message, flushes ONCE, advances, and then waits for a reply. If
+    // that flush left a tail, the peer never receives the message and both ends
+    // wait for each other for ever.
+    //
+    // Unreachable with a generous socket buffer, which is why it survived every
+    // test: a Noise message is a few hundred bytes and fits. It appears the
+    // moment the window is small — a memory pipe capped below ~256 bytes stalls
+    // here every time, which is how it was finally found (GPT-5.6 named the
+    // greeting; the handshake underneath it had the same hole).
+    // Flush, and then CARRY ON — do not return early because a tail remains.
+    //
+    // Returning Busy here looks careful and is a deadlock: both peers can hold
+    // a partially written record at once, and if each refuses to read until its
+    // own has drained, neither ever drains the other. The buffer preserves
+    // order on its own, so the only thing that matters is that we keep flushing
+    // AND keep reading.
+    if (_record->pendingTxBytes() != 0) {
+        if (const Status s = _record->flush(); s != Status::Ok)
+            return fail(s, "could not finish sending a handshake message");
+    }
+
     const std::uint8_t total = messageCount(_pattern);
 
     while (_msgIndex < total) {
@@ -231,6 +257,19 @@ Status SecureSession::driveHandshake()
 
         ++_msgIndex;
     }
+
+    // THE LAST HANDSHAKE RECORD MUST BE ON THE WIRE BEFORE THE KEYS CHANGE.
+    //
+    // `adoptCipher` already refuses while anything is buffered — sealing the
+    // tail under a cipher the peer does not have yet would be unrecoverable —
+    // and it says so in its own header. What was missing is that `finish()` was
+    // called anyway, so a partial write turned a retryable "not yet" into a
+    // FAILED session: "could not install the transport cipher", from a link
+    // that was perfectly healthy and merely slow.
+    //
+    // Invisible with a generous socket buffer, which is every test this project
+    // had. A pipe with a 64-byte window reproduces it every time.
+    if (_record->pendingTxBytes() != 0) return Status::Busy;
 
     return finish();
 }
@@ -352,6 +391,20 @@ Status SecureSession::applyNegotiated()
 
 Status SecureSession::driveGreeting()
 {
+    // PUSH WHATEVER THE SOCKET WOULD NOT TAKE, EVERY TIME, BEFORE ANYTHING ELSE.
+    //
+    // `flush()` returns Ok on a would-block short write and leaves the rest
+    // buffered — a reply that did not fit is not an error, it is a reply that
+    // has not been sent yet. The first version of this function sent HELLO,
+    // set `_helloSent`, and thereafter only ever READ, so a HELLO whose tail did
+    // not fit sat in the buffer while both ends waited for each other. Exactly
+    // the defect the exporter's `pump()` was fixed for, reintroduced in a new
+    // function three sections away from the comment warning about it.
+    if (_record->pendingTxBytes() != 0) {
+        if (const Status s = _record->flush(); s != Status::Ok)
+            return fail(s, "could not finish sending the greeting");
+    }
+
     // The INITIATOR speaks first and adopts what comes back. The RESPONDER
     // computes the agreement. One side deciding removes the tie-break question
     // entirely, and the alternative — both computing it — is two
@@ -360,6 +413,13 @@ Status SecureSession::driveGreeting()
         if (const Status s = sendHello(wire::Type::Hello, nullptr); s != Status::Ok)
             return fail(s, "could not send HELLO");
         _helloSent = true;
+    }
+
+    // The responder has already agreed and is only waiting for its answer to
+    // drain. Nothing more will arrive; finish once it has.
+    if (_greetSent) {
+        if (_record->pendingTxBytes() != 0) return Status::Busy;
+        return applyNegotiated();
     }
 
     std::vector<std::uint8_t> rec;
@@ -434,6 +494,14 @@ Status SecureSession::driveGreeting()
 
     if (const Status s = sendHello(wire::Type::HelloOk, &_negotiated); s != Status::Ok)
         return fail(s, "could not send HELLO_OK");
+
+    // The responder does NOT become established while its HELLO_OK is still in
+    // the buffer. Changing the record size out from under bytes the peer has
+    // not received would frame them at one size and read them at another; and
+    // reporting `established()` while the initiator is still in Greeting lets a
+    // caller act on an agreement the other end has not seen.
+    _greetSent = true;
+    if (_record->pendingTxBytes() != 0) return Status::Busy;
 
     return applyNegotiated();
 }

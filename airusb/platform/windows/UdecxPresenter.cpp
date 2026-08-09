@@ -1,7 +1,5 @@
 #include "UdecxPresenter.h"
 
-#include "../../crypto/Primitives.h"
-
 namespace airusb::windows {
 
 UdecxPresenter::~UdecxPresenter() { withdraw(); }
@@ -50,9 +48,18 @@ Status UdecxPresenter::present(session::ImporterClient& client,
     if (const Status s = _channel->open(&openWhy); s != Status::Ok)
         return fail(s, openWhy);
 
-    // The plane FIRST, then the bridge, then the plug-in. Ordering matters: the
-    // driver starts handing over URBs the instant the device is plugged in, and
-    // a URB that arrives before the bridge exists has nowhere to go.
+    // PLUG IN FIRST, so the driver's device incarnation is known before the
+    // bridge is built with it. The other order — bridge, then plug-in — is what
+    // forced the first version to invent the incarnations, and inventing them
+    // meant every record the two sides exchanged was rejected by the other as
+    // stale. No URB is lost by plugging in first: the driver queues them and
+    // the host only collects on FETCH, which nothing has issued yet.
+    std::string plugWhy;
+    if (const Status s = _channel->plugIn(attached.manifest, attached.capturedConfig,
+                                          &plugWhy); s != Status::Ok)
+        return fail(s, plugWhy);
+
+    // The plane, then the bridge.
     session::ImporterDataPlane::Config pc;
     pc.attachId         = attached.attachId;
     pc.attachSlot       = attached.slot;
@@ -66,23 +73,12 @@ Status UdecxPresenter::present(session::ImporterClient& client,
     bc.attachSlot       = attached.slot;
     bc.maxTransferBytes = attached.maxTransferBytes;
     bc.clock            = &_clock;
-    // The incarnations are the driver's and are echoed on every record. Random
-    // rather than counted, so a late completion from a previous session cannot
-    // match a fresh one by arithmetic.
-    {
-        std::uint8_t raw[8];
-        crypto::randomBytes(std::span<std::uint8_t>(raw, sizeof raw));
-        bc.sessionIncarnation = static_cast<std::uint32_t>(
-            raw[0] | (raw[1] << 8) | (raw[2] << 16) | (raw[3] << 24));
-        bc.deviceIncarnation = static_cast<std::uint32_t>(
-            raw[4] | (raw[5] << 8) | (raw[6] << 16) | (raw[7] << 24));
-    }
+    // THE DRIVER'S incarnations, read back from BIND and PLUG_IN. Not ours,
+    // and not random: they identify kernel objects this process does not own,
+    // and a value we chose would match nothing.
+    bc.sessionIncarnation = _channel->sessionIncarnation();
+    bc.deviceIncarnation  = _channel->deviceIncarnation();
     _bridge = std::make_unique<UdecxBridge>(*_channel, *_plane, bc);
-
-    std::string plugWhy;
-    if (const Status s = _channel->plugIn(attached.manifest, attached.capturedConfig,
-                                          &plugWhy); s != Status::Ok)
-        return fail(s, plugWhy);
 
     _last = "Presented to this computer as a USB device. It should appear in "
             "Device Manager and, for a drive, in File Explorer.";

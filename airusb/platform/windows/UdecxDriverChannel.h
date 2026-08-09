@@ -71,6 +71,17 @@ public:
                   std::string* why);
     Status plugOut(std::string* why);
 
+    /// The incarnations the DRIVER assigned, learned from BIND and PLUG_IN.
+    ///
+    /// They are not ours to choose, and choosing them was a stop-ship bug: the
+    /// presenter invented random values, the driver used its own counters, and
+    /// every record the two exchanged was rejected as stale by the other side.
+    /// The first enumeration URB would have waited for ever, and the hosted
+    /// bridge test could not have seen it because it configures both ends with
+    /// the same constants.
+    std::uint32_t sessionIncarnation() const noexcept;
+    std::uint32_t deviceIncarnation()  const noexcept;
+
     // --- IDriverChannel -----------------------------------------------------
     bool   tryReceive(std::vector<std::uint8_t>& out) override;
     Status send(std::span<const std::uint8_t> record) override;

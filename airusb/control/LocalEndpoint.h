@@ -90,6 +90,10 @@ private:
     /// A raw handle: an int fd on POSIX, a HANDLE-as-uintptr on Windows.
     std::uintptr_t _handle = static_cast<std::uintptr_t>(-1);
     bool _bound = false;
+    /// Windows only: FILE_FLAG_FIRST_PIPE_INSTANCE belongs to the first
+    /// instance and to no other. Claiming it on every instance makes the
+    /// replacement listener fail after the first client connects.
+    bool _first = true;
 };
 
 /// Connects to a broker's local endpoint. Blocks only for the connect itself.

@@ -213,6 +213,9 @@ private:
 
     Negotiated _negotiated;
     bool       _helloSent = false;
+    /// The responder has computed the agreement and sent HELLO_OK. It is not
+    /// established until those bytes have actually left.
+    bool       _greetSent = false;
 };
 
 /// The prologue: initiator preamble followed by responder preamble, always in

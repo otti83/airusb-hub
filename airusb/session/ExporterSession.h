@@ -99,6 +99,12 @@ public:
     virtual void release(const protocol::DeviceUid& uid) = 0;
 };
 
+/// What ATTACH_OK advertises, and what `enqueueTransfer` actually enforces.
+/// They are the same two constants on purpose: an advertised credit nothing
+/// checks is a promise to a peer that the peer can exceed without being told.
+inline constexpr std::size_t   kCreditUrbs  = 64;
+inline constexpr std::size_t   kCreditBytes = 4u * 1024 * 1024;
+
 class ExporterSession {
 public:
     enum class State : std::uint8_t {
@@ -267,6 +273,11 @@ private:
         bool          isReset   = false;
     };
     std::map<std::uint64_t, PendingVerb> _verbs;
+
+    /// A DEVICE_RESET is several CLEAR_HALTs and ONE acknowledgement, which must
+    /// carry the worst result rather than the last.
+    Status        _resetWorst   = Status::Ok;
+    std::size_t   _resetPending = 0;
 
     /// A segmented OUT transfer being reassembled. One at a time: segmentation
     /// is a property of the RECORD stream, which is serial, so two interleaved

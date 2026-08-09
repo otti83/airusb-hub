@@ -24,13 +24,14 @@ authenticated as `otti83`).
 |---|---|
 | Sharing a USB device from a Mac | **works on real hardware** (058f:6387 SuperSpeed) |
 | Encryption + authentication | **done** — Noise_XX matched against the official vectors. Noise_IK is implemented and vector-tested but production only ever runs XX |
+| A slow socket | **survives** — the handshake and the greeting both re-flush; before this session a 64-byte window failed the session with "could not install the transport cipher" |
 | Session layer | **done, and now actually negotiated** — HELLO/HELLO_OK is exchanged before `established()` is true (§3.15) |
 | Networking | **done** — real TCP; macOS↔macOS, macOS↔Linux, Windows↔macOS on two machines |
 | Windows client | **done** — MSVC 19.51, native suites, full BOT exchange with segmentation firing |
 | **The window** | **done, and it is now a CLIENT of the broker** — it holds no key and cannot pin a peer the broker did not ask about (§3.16) |
 | **Receiving on Linux** | **works on real hardware, over the network, AND through the window** — `airusb-brokerd` drives the vhci presenter; the Attach button produced `Attached SCSI removable disk` (§3.17) |
 | Receiving on a Mac | **blocked on Apple** — FB24214361, §2 |
-| Receiving on Windows | **W1–W5 done. `airusb.sys` builds, passes Code Analysis, and HAS NEVER BEEN LOADED** — §3.18. Not blocked by anyone; the first load needs a spare machine and a person at it |
+| Receiving on Windows | **W1–W5 are WRITTEN and none of it has run.** `airusb.sys` builds and passes Code Analysis; the host half builds and reports honestly that the driver is absent. "Builds and analyses clean" is evidence about compilation, not about a working importer — §3.18. Not blocked by anyone; the first load needs a spare machine and a person at it |
 | The exporter's data plane | **asynchronous** — per-endpoint queues, ep0 a barrier, real CANCEL (§3.19) |
 | Device ownership | **survives the session that made it** — `LeaseAuthority`, and the bug it closes (§3.19) |
 
@@ -1212,12 +1213,19 @@ BOT phase machine desynchronises.
 and is created OUTSIDE the accept loop, so it outlives every session. Quarantined
 is not a grace period before Free: a lease never decays into availability,
 because the exporter cannot know whether the silent importer has a dirty
-filesystem mounted. It leaves quarantine only by somebody's decision — the same
-peer recovers it with a single-use token bound to its identity, the same peer
-detaches, or a person at the exporting machine forces it back. Recovery mints a
-new attach id and bumps the incarnation: **ownership is recovered, execution
-history is not**, because after a loss nobody can say which physical transfers
-took effect and replaying an OUT is how a filesystem gets a duplicate write.
+filesystem mounted. It leaves quarantine only by somebody's decision: the same peer
+detaches explicitly, or a person at the exporting machine forces it back.
+
+**Token recovery is designed, implemented, tested — and NOT REACHABLE FROM THE
+WIRE.** `tryRecover` exists and is exercised by `test_lifecycle`; nothing sends
+a token. RESUME (0x28) is a reserved opcode with no handler, ATTACH_OK has no
+field for a token, and no importer keeps one across a lost session. An earlier
+draft of this section described it as though it worked, which an adversarial
+read of this session's own code caught. When it is wired, the design is already
+settled: a new attach id and a bumped incarnation, so **ownership is recovered
+and execution history is not** — after a loss nobody can say which physical
+transfers took effect, and replaying an OUT is how a filesystem gets a
+duplicate write.
 
 Evidence: `tests/unit/test_lifecycle.cpp`, 149 checks, every one written to fail
 against the previous code — an interrupt IN outstanding while PING is answered,
@@ -1511,6 +1519,93 @@ All but two of these are done; both survivors are here with the reason.
 
 ---
 
+### 4.8 The SECOND consultation, on this session's own code — 2026-08-09
+
+The first consultation (§4.6) was run before writing anything, as instructed.
+This one was run against what had just been written, because §3.10 exists: four
+bugs once survived 64 green checks on the day they were introduced. It found
+**twelve confirmed defects in code written that day**, and the exercise paid for
+itself several times over.
+
+**Fixed here.** Ordered by what breaks a real user first.
+
+1. **Windows would have received no usable URB completions.** `UdecxPresenter`
+   invented random session/device incarnations; the driver assigns its own. The
+   bridge would have rejected every kernel request as stale and stamped its
+   replies with numbers the driver then discarded — the first enumeration URB
+   waits for ever. **The hosted bridge test could not see it, because it
+   configures both sides with matching constants.** BIND and PLUG_IN report the
+   driver's values now, and the presenter plugs in before it builds the bridge
+   so it has them.
+2. **The driver's cancel/complete races.** The request was marked cancelable
+   BEFORE being linked, so a cancel in that window ran `RemoveEntryList` on an
+   entry that was never on a list. The completion path unlinked, dropped the
+   lock, and only then unmarked — leaving a window for a second unlink. And
+   teardown moved entries to a private list without changing their state.
+   `AirUsbReqCompleting` was declared in the header and never assigned; it is
+   the claim now, taken under the lock.
+3. **A vanished importer released the physical capture.** `ExporterSession::close()`
+   called `_devices->release()` unconditionally, and `HubState` calls `close()`
+   exactly when a peer disappears — so the lease said "held for that machine"
+   and the device source was told the opposite in the same breath. **This is the
+   session's headline bug, reappearing one level up.** It releases only when the
+   lease is Free.
+4. **CANCEL could suppress the only deadline for ever.** A cancel the port
+   REFUSED still set `cancelRequested`, and the deadline sweep skips those — so
+   a transfer stuck in a backend that cannot abort got "0 stopped" and then no
+   terminal outcome at all. Exactly what invariant I1 forbids.
+5. **Endpoint resets never reached user mode.** `AirUsbPumpFetch` drained only
+   the URB list, so every reset waited five seconds and failed, and a stalled
+   mass-storage endpoint could not recover.
+6. **The driver accepted completions claiming bytes nobody sent.** Rule 4 of the
+   ABI is "one length, not two"; the C++ decoder enforces it and is fuzzed for
+   it, and the driver's hand-written copy did not. A host could report success
+   for N bytes and supply fewer, and the guest would read whatever was already
+   in its buffer as device data.
+7. **DEVICE_RESET reported the last leg's result, not the worst.** A reset whose
+   bulk OUT failed and whose bulk IN succeeded reported success.
+8. **The greeting — and the HANDSHAKE — could strand on a short write.** This is
+   the best of the twelve, because chasing it found something older. `flush()`
+   returns Ok on a partial write; `driveHandshake` sent, flushed once, and moved
+   on. Worse, `finish()` then called `adoptCipher`, which correctly REFUSES
+   while anything is buffered — turning a retryable "not yet" into a FAILED
+   session reading *"could not install the transport cipher"* on a link that was
+   merely slow. A pipe with a 64-byte window reproduces it every time, and no
+   test had ever narrowed one.
+9. **The advertised credits were enforced nowhere.** ATTACH_OK promised 64 URBs
+   and 4 MiB; `enqueueTransfer` always appended. Both come from the same two
+   constants now, and an over-credit transfer gets a terminal `NoResources`
+   rather than growing the queue.
+10. **The Windows broker served exactly one window per run.** Every named-pipe
+    instance claimed `FILE_FLAG_FIRST_PIPE_INSTANCE`, so the replacement
+    listener failed after the first client and the error was ignored.
+11. **Every Windows overlapped operation leaked a kernel handle.** `memset` over
+    the whole `OVERLAPPED` destroys `hEvent` without closing it.
+12. **Lease recovery was implied and not wired.** A token was minted and
+    discarded; there is no RESUME handler, no field in ATTACH_OK, and no
+    importer that keeps one. The mint is gone and the headers say so.
+
+**And a mistake worth keeping, made while fixing 8.** The first attempt used
+`FaultStream::maxWriteChunk` to force short writes — and the test PASSED against
+the unfixed code, because a chunked stream never reports would-block, so
+`flush()`'s inner loop drains the record in one call and the buffered tail
+cannot exist. A capped `MemoryPipe`, which genuinely fills, is what reproduces
+it. **A test that cannot fail is worse than no test**, and this one was written,
+run, and believed for several minutes.
+
+The second attempt then deadlocked both peers, because each refused to READ
+while it had an unflushed tail. Flushing must never stop you draining the other
+side.
+
+**Still open from this review, honestly:**
+
+* **Input can still postpone device collection.** `pump()` reads until the
+  transport says Busy before collecting outcomes, so a continuously readable
+  peer delays them. Bounded now by the credit cap, not eliminated.
+* **The Windows named-pipe transport has no hosted test** — `test_broker`'s
+  Windows case is a deliberate skip and says so.
+* Everything in §4.6's "still open" list.
+
 ### 4.7 The GPT-5.6 consultation to run FIRST — paste this, do not improvise
 
 Three consultations, three times it paid for itself before a line was written.
@@ -1555,6 +1650,10 @@ the whole stack is single-threaded above the platform layer?
 and cannot get a program. Is XPC-with-a-code-requirement / polkit / Authenticode
 the right trio, and what does each of them actually buy against the threat that
 matters — another process of the same user driving the broker?
+
+**Then run it AGAIN at the end, against what you wrote.** §4.8 is what that
+produced this session: twelve confirmed defects in one day's code, two of them
+stop-ship, one of them a bug older than the session. Budget for it.
 
 **And the standing question:** what does this project claim that its evidence
 does not support? It found the README's pairing claim, then four live bugs, then

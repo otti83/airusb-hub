@@ -17,6 +17,7 @@
 #include "../TestHarness.h"
 #include "../../session/SecureSession.h"
 #include "../../session/PeerStore.h"
+#include "../../transport/FaultTransport.h"
 #include "../../transport/TcpTransport.h"
 
 #include <cstdio>
@@ -571,6 +572,46 @@ void testGreeting()
         }
         CHECK(converge(p));
         CHECK(p.bothEstablished());
+    }
+
+    TEST_CASE("a handshake and a greeting survive a socket with a 64-byte window") {
+        // The bug: `flush()` returns Ok on a would-block SHORT WRITE and leaves
+        // the rest buffered. The first version of `driveGreeting` sent HELLO,
+        // set a flag, and thereafter only READ — so a greeting whose tail did
+        // not fit sat in the buffer while both ends waited for each other.
+        // Exactly the defect `ExporterSession::pump()` was fixed for, three
+        // sections away from the comment warning about it.
+        //
+        // A CAPPED PIPE, not FaultStream::maxWriteChunk. The chunked stream
+        // never reports would-block, so `flush()`'s inner loop drains the whole
+        // record in one call and the buffered tail cannot exist — the first
+        // version of this case used it and passed against the unfixed code,
+        // which is worth more as a warning than the case itself. A pipe that
+        // FILLS is what a real socket does.
+        //
+        // 64 bytes stalls both the handshake and the greeting without the
+        // pre-flush; the handshake stall is the older of the two.
+        MemoryPipe pipe;
+        pipe.setCapacity(/*aToB=*/64, /*bToA=*/64);
+
+        SecureSession a, b;
+        CHECK(a.begin(pipe.endpointA(), cfgFor(idA, true))  == Status::Busy);
+        CHECK(b.begin(pipe.endpointB(), cfgFor(idB, false)) == Status::Busy);
+
+        bool ok = false;
+        for (int i = 0; i < 4000; ++i) {
+            (void)a.pump();
+            (void)b.pump();
+            if (a.state() == SecureSession::State::Failed) break;
+            if (b.state() == SecureSession::State::Failed) break;
+            if (a.established() && b.established()) { ok = true; break; }
+        }
+        CHECK(ok);
+        // BOTH sides, not just whichever one was looked at.
+        CHECK(a.established());
+        CHECK(b.established());
+        CHECK_EQ(static_cast<long long>(a.negotiated().maxRecordBytes),
+                 static_cast<long long>(b.negotiated().maxRecordBytes));
     }
 
     TEST_CASE("a peer proposing an illegal record size is refused") {

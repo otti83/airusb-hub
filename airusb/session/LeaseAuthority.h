@@ -40,14 +40,27 @@
 // dirty. It leaves quarantine in exactly three ways, all of them somebody's
 // decision rather than a timer's:
 //
-//   1. the SAME peer comes back and recovers it (`tryRecover`),
-//   2. the same peer detaches explicitly (`release`),
-//   3. a human at the exporting machine says take it back (`forceReclaim`),
+//   1. the same peer detaches explicitly (`release`),
+//   2. a human at the exporting machine says take it back (`forceReclaim`),
 //      which is the one that can lose data and therefore has to be asked for.
+//
+//   (`tryRecover` is a third, designed and tested and NOT wired — see below.)
 //
 // The lease timer still exists and still matters — it is what stops the
 // exporter forwarding transfers to a peer that is gone — but what it does at
 // expiry is QUARANTINE, never release. That is the whole difference.
+//
+// RECOVERY IS DESIGNED AND IS NOT YET REACHABLE FROM THE WIRE
+//
+// `tryRecover` below is implemented and tested, and NOTHING SENDS A TOKEN. The
+// RESUME opcode (0x28) is reserved in Wire.h and unhandled, ATTACH_OK has no
+// field for a token, and no importer keeps one across a lost session. So today
+// a quarantined lease leaves quarantine exactly two ways: the same peer
+// detaches explicitly, or a person at the exporting machine forces it back.
+//
+// That is written here, in the file that would otherwise imply otherwise,
+// because an earlier version of the handoff described token recovery as though
+// it worked. It is the mechanism, waiting for the three things above.
 //
 // RECOVERY IS OF OWNERSHIP, NOT OF EXECUTION HISTORY
 //

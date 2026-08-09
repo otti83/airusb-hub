@@ -26,6 +26,8 @@ Status UdecxDriverChannel::send(std::span<const std::uint8_t>) { return Status::
 std::size_t UdecxDriverChannel::pendingToDriver() const { return 0; }
 Status UdecxDriverChannel::flush() { return Status::Ok; }
 std::size_t UdecxDriverChannel::fetchesInFlight() const noexcept { return 0; }
+std::uint32_t UdecxDriverChannel::sessionIncarnation() const noexcept { return 0; }
+std::uint32_t UdecxDriverChannel::deviceIncarnation()  const noexcept { return 0; }
 } // namespace airusb::windows
 
 #else
@@ -68,10 +70,32 @@ constexpr std::size_t kFetchDepth      = 4;
 constexpr std::size_t kCompleteSlots   = 8;
 constexpr std::size_t kFetchBufferSize = (1u << 20) + 256u;   // AIRUSB_MAX_RECORD
 
+/// One overlapped operation.
+///
+/// The event is created ONCE and reused. Two earlier versions memset the whole
+/// OVERLAPPED before each operation — which destroys the handle field without
+/// closing it — and then created another. That leaks one kernel handle per I/O,
+/// so a Windows session leaks at transfer rate and eventually exhausts the
+/// process handle table. Only the last event per slot was ever closed.
 struct Slot {
     OVERLAPPED                ov{};
     std::vector<std::uint8_t> buf;
     bool                      busy = false;
+
+    bool arm()
+    {
+        if (ov.hEvent == nullptr) {
+            ov.hEvent = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
+            if (ov.hEvent == nullptr) return false;
+        }
+        // Everything EXCEPT hEvent is reset. The handle is the one field that
+        // must survive, which is exactly the field a memset destroys.
+        const HANDLE keep = ov.hEvent;
+        ov = OVERLAPPED{};
+        ov.hEvent = keep;
+        ::ResetEvent(ov.hEvent);
+        return true;
+    }
 };
 
 } // namespace
@@ -81,6 +105,9 @@ struct UdecxDriverChannel::Impl {
     Slot   fetch[kFetchDepth];
     Slot   done[kCompleteSlots];
     std::string lastError;
+    /// The driver's, never ours. See the header.
+    std::uint32_t sessionInc = 0;
+    std::uint32_t deviceInc  = 0;
 };
 
 UdecxDriverChannel::~UdecxDriverChannel() { close(); }
@@ -105,9 +132,7 @@ bool armFetch(HANDLE device, Slot& s)
 {
     if (s.busy) return true;
     if (s.buf.size() != kFetchBufferSize) s.buf.assign(kFetchBufferSize, 0);
-    std::memset(&s.ov, 0, sizeof s.ov);
-    if (s.ov.hEvent == nullptr) s.ov.hEvent = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
-    ::ResetEvent(s.ov.hEvent);
+    if (!s.arm()) return false;
 
     DWORD got = 0;
     const BOOL ok = ::DeviceIoControl(device, AIRUSB_UM_IOCTL_FETCH,
@@ -166,12 +191,22 @@ Status UdecxDriverChannel::open(std::string* why)
     }
 
     DWORD got = 0;
+    std::uint32_t inc[2] = { 0, 0 };
     if (!::DeviceIoControl(_impl->device, AIRUSB_UM_IOCTL_BIND,
-                           nullptr, 0, nullptr, 0, &got, nullptr)) {
+                           nullptr, 0, inc, sizeof inc, &got, nullptr)) {
         if (why) *why = "another process is already using the AirUSB driver";
         close();
         return Status::Busy;
     }
+    if (got < sizeof inc) {
+        // A driver that will not say which session we got is one we cannot
+        // stamp records for. Refused rather than guessed.
+        if (why) *why = "the AirUSB driver did not report its session";
+        close();
+        return Status::UnsupportedVersion;
+    }
+    _impl->sessionInc = inc[0];
+    _impl->deviceInc  = inc[1];
 
     for (Slot& s : _impl->fetch) {
         if (!armFetch(_impl->device, s)) {
@@ -255,12 +290,16 @@ Status UdecxDriverChannel::plugIn(const DeviceManifest& manifest,
     body.insert(body.end(), endpoints.begin(), endpoints.end());
 
     DWORD got = 0;
+    std::uint32_t devInc = 0;
     if (!::DeviceIoControl(_impl->device, AIRUSB_UM_IOCTL_PLUG_IN,
                            body.data(), static_cast<DWORD>(body.size()),
-                           nullptr, 0, &got, nullptr)) {
+                           &devInc, sizeof devInc, &got, nullptr)) {
         if (why) *why = "the driver refused to present this device";
         return Status::CaptureFailed;
     }
+    // Plug-in BUMPS the device incarnation, so the value BIND returned is now
+    // one behind and every record stamped with it would be refused.
+    if (got >= sizeof devInc) _impl->deviceInc = devInc;
     return Status::Ok;
 }
 
@@ -313,9 +352,7 @@ Status UdecxDriverChannel::send(std::span<const std::uint8_t> record)
     for (Slot& s : _impl->done) {
         if (s.busy) continue;
         s.buf.assign(record.begin(), record.end());
-        std::memset(&s.ov, 0, sizeof s.ov);
-        if (s.ov.hEvent == nullptr) s.ov.hEvent = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
-        ::ResetEvent(s.ov.hEvent);
+        if (!s.arm()) return Status::NoResources;
 
         DWORD got = 0;
         const BOOL ok = ::DeviceIoControl(_impl->device, AIRUSB_UM_IOCTL_COMPLETE,
@@ -336,6 +373,16 @@ std::size_t UdecxDriverChannel::pendingToDriver() const
     std::size_t n = 0;
     for (const Slot& s : _impl->done) if (s.busy) ++n;
     return n;
+}
+
+std::uint32_t UdecxDriverChannel::sessionIncarnation() const noexcept
+{
+    return _impl ? _impl->sessionInc : 0;
+}
+
+std::uint32_t UdecxDriverChannel::deviceIncarnation() const noexcept
+{
+    return _impl ? _impl->deviceInc : 0;
 }
 
 Status UdecxDriverChannel::flush()

@@ -206,6 +206,9 @@ typedef struct _AIRUSB_RESET_CONTEXT {
     WDFREQUEST  Request;
     ULONGLONG   TicketId;
     ULONG       EndpointId;
+    /* Handed to the host yet? Without this the same reset would be re-sent on
+     * every FETCH, and with the first version it was never sent at all. */
+    BOOLEAN     Sent;
     LARGE_INTEGER DeadlineQpc;
 } AIRUSB_RESET_CONTEXT, *PAIRUSB_RESET_CONTEXT;
 
