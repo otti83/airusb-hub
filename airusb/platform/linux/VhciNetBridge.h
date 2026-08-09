@@ -10,26 +10,22 @@
 // network while that window fills wedges both sides into an unkillable D-state and
 // a reboot (LINUX_IMPORTER_PLAN §4.2).
 //
-// So this bridge NEVER blocks. It owns no socket-spinning loop; one `poll()` step
-// does bounded, non-blocking work and returns:
+// So this bridge NEVER blocks, and does so STRUCTURALLY, not by trusting a fd to
+// be non-blocking. One `poll()` step:
 //
-//   1. drain the kernel socket FIRST and unconditionally (R-A) — parse every PDU
-//      available now, answer ep0 from the manifest locally, admit data/forwarded
-//      transfers to the async data plane (or queue them), and answer CMD_UNLINK
-//      IMMEDIATELY.
-//   2. admit anything queued while the plane has room.
-//   3. pump the data plane: each completion (or timeout, R-C) becomes a RET_SUBMIT
-//      buffered for the kernel.
-//   4. flush the kernel tx buffer, non-blocking (R-B) — a full kernel socket
-//      buffers here, it never blocks the loop.
+//   1. drain the kernel socket COMPLETELY first (R-A) — parse every PDU available
+//      now, answer ep0 from the manifest locally, ENQUEUE data/forwarded transfers
+//      (touching the network not at all here), and answer CMD_UNLINK IMMEDIATELY.
+//   2. sweep queued deadlines (a URB gets its clock the instant the kernel hands
+//      it to us, R-C — not when it later reaches the wire).
+//   3. admit queued transfers to the async data plane while it has room; only NOW
+//      is the network touched, and only after the kernel is fully drained.
+//   4. pump the plane: each completion or timeout becomes a buffered RET_SUBMIT.
+//   5. flush the kernel tx buffer, non-blocking (R-B).
 //
-// Nothing between "the kernel is readable" and "the kernel is drained" ever waits
-// on the network. That single property is what makes the §4.2 deadlock and the
-// D-state hang unreachable, and it is why CMD_UNLINK is always answerable.
-//
-// The real driver wraps `run()`/`poll()` in a `poll(2)` over sv[1] and the network
-// fd; the hosted tests feed PDUs through a `MemoryPipe` and call `poll()` by hand,
-// so every liveness rule is proven with no kernel in the loop.
+// Nothing between "the kernel is readable" and "the kernel is drained" touches the
+// network at all. That is what makes the §4.2 deadlock and the D-state hang
+// unreachable, and why CMD_UNLINK is always answerable.
 
 #ifndef AIRUSB_PLATFORM_LINUX_VHCINETBRIDGE_H
 #define AIRUSB_PLATFORM_LINUX_VHCINETBRIDGE_H
@@ -38,6 +34,7 @@
 #include "UsbipCodec.h"
 #include "VhciBridge.h"   // VhciBridgeStats
 
+#include "../../core/Clock.h"
 #include "../../core/DeviceManifest.h"
 #include "../../core/Ep0Arbiter.h"
 #include "../../core/Status.h"
@@ -63,28 +60,30 @@ public:
     struct Config {
         /// ep0 control transfers get a deadline STRICTLY below the kernel's own
         /// USB_CTRL_*_TIMEOUT of 5000 ms, or the kernel wins the race (§4.2 R-C).
-        /// The channel/slot is the data plane's business, not the bridge's — the
-        /// bridge only echoes the (channel, request_id) the plane hands back.
         std::uint32_t ctrlTimeoutMs = 4000;
         /// Bulk/interrupt: the importer safety net, always above the exporter's
         /// ceiling so the two never race to recover a BOT phase.
         std::uint32_t bulkTimeoutMs = static_cast<std::uint32_t>(watchdog::kUrbWatchdogImporter);
+        /// The configuration value the exporter CAPTURED the device in (from
+        /// ATTACH). SET_CONFIGURATION to this value is a no-op we can honestly
+        /// confirm locally; SET_CONFIGURATION to any other value is refused, because
+        /// we cannot reconfigure a remote device and must not lie to the guest that
+        /// we did (§5.4). The integration sets this from ATTACH_OK; 1 is the
+        /// near-universal single-configuration default.
+        std::uint8_t  capturedConfig = 1;
     };
 
     VhciNetBridge(transport::IByteStream& kernel, session::ImporterDataPlane& plane,
-                  const DeviceManifest& manifest, const Config& cfg) noexcept;
+                  const DeviceManifest& manifest, const Clock& clock, const Config& cfg) noexcept;
 
     void setTrace(Trace t) { _trace = std::move(t); }
 
-    /// One non-blocking iteration (the four steps above). Returns Ok normally, or
+    /// One non-blocking iteration (the five steps above). Returns Ok normally, or
     /// TransportLost once a side is gone — after completing every outstanding URB
     /// with -ENODEV so the kernel never waits on one forever. NEVER blocks.
     ///
     /// The real driver arms a `poll(2)` over sv[1] and the network fd and calls this
-    /// each time either is ready; the hosted tests call it by hand. There is
-    /// deliberately no built-in `run()` busy-loop: "nothing to do right now" and
-    /// "the session is over" are different, and only the fd layer can tell them
-    /// apart without spinning.
+    /// each time either is ready; the hosted tests call it by hand.
     Status poll();
 
     const VhciBridgeStats& stats() const noexcept { return _stats; }
@@ -99,33 +98,35 @@ private:
         UsbipPdu                  pdu;
         std::vector<std::uint8_t> out;         // OUT payload, copied out of the rx buffer
         std::uint8_t              xferType = 0;
-        std::uint32_t             timeoutMs = 0;
+        Deadline                  deadline;    // stamped at kernel-admission (R-C)
     };
 
     Status drainKernel();
-    bool   nextPdu(UsbipPdu& pdu, std::span<const std::uint8_t>& payload);
+    bool   nextPdu(UsbipPdu& pdu, std::span<const std::uint8_t>& payload,
+                   std::span<const std::uint8_t>& isoDescs);
     void   compactRx();
     Status flushKernel();
     void   queueToKernel(std::span<const std::uint8_t> bytes);
 
-    Status onSubmit(const UsbipPdu& pdu, std::span<const std::uint8_t> outData);
+    Status onSubmit(const UsbipPdu& pdu, std::span<const std::uint8_t> outData,
+                    std::span<const std::uint8_t> isoDescs);
     Status onUnlink(const UsbipPdu& pdu);
 
-    void admit(const UsbipPdu& pdu, std::uint8_t xferType, std::uint32_t timeoutMs,
-               std::span<const std::uint8_t> outData);
+    void enqueue(const UsbipPdu& pdu, std::uint8_t xferType, std::uint32_t timeoutMs,
+                 std::span<const std::uint8_t> outData);
     void doSubmit(const UsbipPdu& pdu, std::uint8_t xferType, std::uint32_t timeoutMs,
                   std::span<const std::uint8_t> outData);
-    void admitPending();
+    void sweepPending();       // R-C for URBs still queued behind a full plane
+    void admitPending();       // the ONLY place the network is touched from a submit
 
-    Status pumpPlane();                        // plane.pump + sweepDeadlines
+    void refuseIso(const UsbipPdu& pdu, std::span<const std::uint8_t> isoDescs);
+
+    Status pumpPlane();
     void   onCompletion(const session::DataCompletion& c);
     void   failAll(Status with);
 
-    // ep0 local answers (no network).
     void localData(const UsbipPdu& cmd, std::span<const std::uint8_t> data);
     void localStatus(const UsbipPdu& cmd, std::int32_t status, std::int32_t actualLength);
-
-    // RET_SUBMIT for a networked completion, clamped so we never over-report.
     void completeToKernel(const UsbipPdu& cmd, std::int32_t status,
                           std::int32_t actualLength, std::span<const std::uint8_t> payload);
 
@@ -136,6 +137,7 @@ private:
     transport::IByteStream&     _kernel;
     session::ImporterDataPlane& _plane;
     const DeviceManifest&       _manifest;
+    const Clock&                _clock;
     Ep0Arbiter                  _arbiter;
     Config                      _cfg;
 
@@ -144,9 +146,9 @@ private:
     std::vector<std::uint8_t> _tx;
     std::size_t               _txSent = 0;
 
-    std::map<Ref, UsbipPdu>                      _outstanding;   ///< (channel,rid) -> the CMD_SUBMIT
-    std::unordered_map<std::uint32_t, Ref>       _bySeqnum;      ///< seqnum -> (channel,rid)
-    std::deque<Pending>                          _pending;       ///< admission-blocked submits
+    std::map<Ref, UsbipPdu>                _outstanding;   ///< (channel,rid) -> the CMD_SUBMIT
+    std::unordered_map<std::uint32_t, Ref> _bySeqnum;      ///< seqnum -> (channel,rid)
+    std::deque<Pending>                    _pending;       ///< accepted, not yet on the wire
 
     VhciBridgeStats _stats;
     Trace           _trace;

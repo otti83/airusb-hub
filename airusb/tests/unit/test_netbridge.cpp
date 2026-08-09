@@ -22,6 +22,7 @@
 #include "../../transport/RecordLayer.h"
 #include "../../transport/TcpTransport.h"
 
+#include <array>
 #include <cstring>
 #include <memory>
 #include <span>
@@ -185,7 +186,7 @@ struct Rig {
         : planeLink(npipe.endpointA(), std::make_unique<NullCipher>())
         , peerLink(npipe.endpointB(), std::make_unique<NullCipher>())
         , plane(&planeLink, &clock, planeCfg())
-        , bridge(*kBridge, plane, proto.manifest(), VhciNetBridge::Config{})
+        , bridge(*kBridge, plane, proto.manifest(), clock, VhciNetBridge::Config{})
     {
         planeLink.setHandshakeComplete(wire::kRecordBytesDefault);
         peerLink.setHandshakeComplete(wire::kRecordBytesDefault);
@@ -374,6 +375,102 @@ void testAdmissionQueue()
     }
 }
 
+void testQueuedDeadline()
+{
+    std::printf("a URB queued behind a full plane still has a running deadline (R-C)\n");
+
+    TEST_CASE("both the admitted and the queued URB time out, not just the admitted one") {
+        Rig r;
+        kSubmit(*r.kSim, 9, 0, kDirIn, 1, kGetMaxLun);
+        kSubmit(*r.kSim, 10, 0, kDirIn, 1, kGetMaxLun);
+        CHECK(r.bridge.poll() == Status::Ok);
+        CHECK_EQ(r.bridge.pendingSubmits(), std::size_t{1});   // #10 waits behind depth-1
+
+        // Neither is ever completed; time passes the 4000 ms ctrl deadline. The
+        // queued URB's clock started when the kernel handed it to us, not when it
+        // would later reach the wire — so it must expire too.
+        r.clock.advanceMs(5000);
+        CHECK(r.bridge.poll() == Status::Ok);
+        CHECK_EQ(r.bridge.outstanding(), std::size_t{0});
+        CHECK_EQ(r.bridge.pendingSubmits(), std::size_t{0});
+
+        UsbipPdu a; std::vector<std::uint8_t> pa; CHECK(kReadPdu(*r.kSim, a, pa, true));
+        UsbipPdu b; std::vector<std::uint8_t> pb; CHECK(kReadPdu(*r.kSim, b, pb, true));
+        CHECK_EQ(a.status, -kETimedOut);
+        CHECK_EQ(b.status, -kETimedOut);
+        CHECK((a.seqnum == 9u && b.seqnum == 10u) || (a.seqnum == 10u && b.seqnum == 9u));
+    }
+}
+
+void testSetConfiguration()
+{
+    std::printf("SET_CONFIGURATION is accepted only for the captured value (no silent divergence)\n");
+
+    // SET_CONFIGURATION(wValue) — standard, host->device, no data.
+    auto setConfig = [](std::uint8_t value) {
+        std::array<std::uint8_t, 8> s{ 0x00, 0x09, value, 0x00, 0, 0, 0, 0 };
+        return s;
+    };
+
+    TEST_CASE("the captured configuration is confirmed locally; another is refused -EPIPE") {
+        Rig r;   // capturedConfig defaults to 1; the ScriptedDevice is configuration 1
+        const auto c1 = setConfig(1);
+        kSubmit(*r.kSim, 11, 0, kDirOut, 0, c1.data());
+        CHECK(r.bridge.poll() == Status::Ok);
+        Header h; SubmitBody sb;
+        CHECK(!peerReadSubmit(r.peerLink, h, sb));      // answered locally, no network
+        UsbipPdu ret; std::vector<std::uint8_t> pl;
+        CHECK(kReadPdu(*r.kSim, ret, pl, false));
+        CHECK_EQ(ret.seqnum, 11u);
+        CHECK_EQ(ret.status, 0);
+
+        const auto c2 = setConfig(2);
+        kSubmit(*r.kSim, 12, 0, kDirOut, 0, c2.data());
+        CHECK(r.bridge.poll() == Status::Ok);
+        CHECK(!peerReadSubmit(r.peerLink, h, sb));      // still no network — and refused
+        UsbipPdu ret2; std::vector<std::uint8_t> pl2;
+        CHECK(kReadPdu(*r.kSim, ret2, pl2, false));
+        CHECK_EQ(ret2.seqnum, 12u);
+        CHECK_EQ(ret2.status, -kEPipe);                 // we cannot reconfigure a remote device
+    }
+}
+
+void testFatalDrainTeardown()
+{
+    std::printf("a fatal kernel PDU still retires outstanding URBs (teardown drain, §5.7)\n");
+
+    TEST_CASE("an undecodable PDU completes the outstanding URB with -ENODEV, not a hang") {
+        Rig r;
+        kSubmit(*r.kSim, 13, 0, kDirIn, 1, kGetMaxLun);
+        CHECK(r.bridge.poll() == Status::Ok);
+        CHECK_EQ(r.bridge.outstanding(), std::size_t{1});
+        Header h; SubmitBody sb;
+        CHECK(peerReadSubmit(r.peerLink, h, sb));       // forwarded, never completed
+
+        // A PDU the decoder refuses (number_of_packets out of range): the stream is
+        // no longer trustworthy. poll() must retire #13 before it stops, not leave it.
+        UsbipPdu bad;
+        bad.command = kCmdSubmit;
+        bad.seqnum = 14;
+        bad.devid = kDevId;
+        bad.direction = kDirIn;
+        bad.ep = 3;
+        bad.numberOfPackets = 5000;                     // > kMaxIsoPackets -> clamped -> fatal
+        std::vector<std::uint8_t> b;
+        encodeCmdSubmit(bad, b);
+        kWriteRaw(*r.kSim, b);
+
+        const Status s = r.bridge.poll();
+        CHECK(s != Status::Ok && s != Status::TransportLost);   // a fatal parse status
+
+        UsbipPdu ret; std::vector<std::uint8_t> pl;
+        CHECK(kReadPdu(*r.kSim, ret, pl, true));
+        CHECK_EQ(ret.seqnum, 13u);
+        CHECK_EQ(ret.status, -kENoDev);
+        CHECK_EQ(r.bridge.outstanding(), std::size_t{0});
+    }
+}
+
 } // namespace
 
 int main()
@@ -383,5 +480,8 @@ int main()
     testUnlinkWhileOutstanding();
     testFailureModes();
     testAdmissionQueue();
+    testQueuedDeadline();
+    testSetConfiguration();
+    testFatalDrainTeardown();
     TEST_MAIN_END();
 }

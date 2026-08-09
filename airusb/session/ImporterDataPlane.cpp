@@ -147,28 +147,29 @@ Status ImporterDataPlane::handleComplete(const Header& h, const std::vector<std:
 
     // Is this for a transfer we still hold? A completion for an unknown request_id
     // is the EXPECTED outcome of a cancel racing a completion — drop it, not fatal.
-    if (!_table.isOutstanding(h.channel, h.requestId)) return Status::Ok;
+    // Read it NON-destructively: every request-relative check runs BEFORE take(), so
+    // a completion that fails validation stays in the table and teardown can still
+    // retire it. Taking it first and then failing would evaporate it from I1.
+    OutstandingRequest req;
+    if (!_table.get(h.channel, h.requestId, req)) return Status::Ok;
+
+    // R5 at the copy site: a completion can never claim more than we offered.
+    if (cb.actualLen > req.requestedLen) return Status::MalformedFrame;
 
     if (!h.segMore()) {
-        OutstandingRequest req;
-        (void)_table.take(h.channel, h.requestId, &req);
-
-        // R5 at the copy site: a completion can never claim more than we offered.
-        if (cb.actualLen > req.requestedLen) return Status::MalformedFrame;
-
         std::span<const std::uint8_t> payload;
         if (req.dir == Dir::In) {
             if (cb.payloadLen > req.requestedLen) return Status::MalformedFrame;
             if (cb.payloadLen > firstChunk.size()) return Status::MalformedFrame;
             payload = firstChunk.first(cb.payloadLen);
         }
+        (void)_table.take(h.channel, h.requestId, &req);   // validated — now retire it
         deliver(req, static_cast<Status>(h.status), cb.actualLen, cb.isShort(), payload, onComplete);
         return Status::Ok;
     }
 
     // A segmented reply: stash the metadata and begin reassembly. The request stays
     // in the table, so its deadline still guards a reply that stalls half-sent.
-    if (cb.actualLen > _cfg.maxTransferBytes) return Status::MalformedFrame;
     PendingReply pr;
     pr.status    = static_cast<Status>(h.status);
     pr.actualLen = cb.actualLen;
@@ -204,17 +205,18 @@ Status ImporterDataPlane::handleData(const Header& h, const std::vector<std::uin
     }
     if (o == Reassembler::Outcome::NeedMore) return Status::Ok;
 
-    // Complete. Move out the payload and metadata, take the request, deliver.
+    // Complete. Validate against the outstanding request BEFORE retiring it, so a
+    // malformed reply cannot pull it out of I1 tracking.
+    OutstandingRequest req;
+    const bool have = _table.get(h.channel, h.requestId, req);
     std::vector<std::uint8_t> full = _reasm.take(h);
     const PendingReply pr = pit->second;
     _pendingReply.erase(pit);
 
-    OutstandingRequest req;
-    if (!_table.take(h.channel, h.requestId, &req))
-        return Status::Ok;   // its deadline fired between first and last segment
+    if (!have) return Status::Ok;                                  // deadline fired mid-reassembly
+    if (pr.actualLen > req.requestedLen) return Status::MalformedFrame;   // req stays in table
 
-    if (pr.actualLen > req.requestedLen) return Status::MalformedFrame;
-
+    (void)_table.take(h.channel, h.requestId, &req);
     const std::span<const std::uint8_t> payload =
         (req.dir == Dir::In) ? std::span<const std::uint8_t>(full)
                              : std::span<const std::uint8_t>{};

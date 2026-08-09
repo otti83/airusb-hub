@@ -54,6 +54,13 @@ public:
 
     bool isOutstanding(std::uint16_t channel, std::uint64_t requestId) const noexcept;
 
+    /// Non-destructive read. Copies the request out WITHOUT removing it, so a
+    /// caller can run request-relative validation before deciding whether to
+    /// `take()` it. Returns false if it is not outstanding. This is what keeps a
+    /// completion that fails validation from being pulled out of I1 tracking before
+    /// the check runs — leaving it in the table so teardown can still retire it.
+    bool get(std::uint16_t channel, std::uint64_t requestId, OutstandingRequest& out) const noexcept;
+
     /// Every request whose deadline has expired. The caller completes each with
     /// XferTimeout — the table never completes anything itself, so there is exactly
     /// one place completions are generated.

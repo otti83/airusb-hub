@@ -262,6 +262,31 @@ void testAdmissionAndCancel()
         CHECK(plane.pump(std::ref(col)) == Status::Ok);
         CHECK_EQ(col.count(), std::size_t{0});        // I1 already satisfied by the RET_UNLINK
     }
+
+    TEST_CASE("a completion that fails the copy-site check stays in I1 tracking") {
+        // A hostile exporter sends a COMPLETE that is internally consistent (passes
+        // validateComplete) but claims more than we OFFERED. It must be rejected
+        // WITHOUT being pulled out of the request table first, so teardown can still
+        // retire it. Taking it before the check would evaporate it from I1.
+        Pair p(16384);
+        ImporterDataPlane plane(&p.planeLink, &p.clock, cfg1());
+        std::uint16_t ch = 0; std::uint64_t rid = 0;
+        CHECK(plane.submit(kEpIn, kBulk, kIn, 512, nullptr, {}, 45000, &ch, &rid) == Status::Ok);
+        SubmitBody sb; std::vector<std::uint8_t> ig;
+        CHECK(peerReadSubmit(p.peerLink, sb, ig) > 0);
+
+        // requestedLen/actualLen both 2048 > the 512 we offered.
+        peerComplete(p.peerLink, ch, rid, kEpIn, kIn, 2048, pattern(2048, 4));
+        Collector col;
+        CHECK(plane.pump(std::ref(col)) == Status::MalformedFrame);   // fatal, refused
+        CHECK_EQ(col.count(), std::size_t{0});                        // nothing delivered
+        CHECK_EQ(plane.outstanding(), std::size_t{1});                // STILL tracked
+
+        Collector td;
+        plane.completeAll(Status::DeviceGone, std::ref(td));
+        CHECK_EQ(td.count(), std::size_t{1});                         // teardown can retire it
+        CHECK(td.comps[0].status == Status::DeviceGone);
+    }
 }
 
 void testDeadline()

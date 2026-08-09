@@ -32,6 +32,15 @@ bool RequestTable::isOutstanding(std::uint16_t channel, std::uint64_t requestId)
     return _byKey.find(Key{channel, requestId}) != _byKey.end();
 }
 
+bool RequestTable::get(std::uint16_t channel, std::uint64_t requestId,
+                       OutstandingRequest& out) const noexcept
+{
+    const auto it = _byKey.find(Key{channel, requestId});
+    if (it == _byKey.end()) return false;
+    out = it->second;
+    return true;
+}
+
 std::vector<OutstandingRequest> RequestTable::expired()
 {
     std::vector<OutstandingRequest> out;
