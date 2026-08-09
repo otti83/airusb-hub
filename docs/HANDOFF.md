@@ -10,6 +10,44 @@ was that the listed order would have cemented a stop-ship bug.
 **The next session's job is the compatibility envelope, and the one thing only a
 human can do is load a driver.** Read §0 and then §4.
 
+---
+
+## PAUSED, 2026-08-09 — waiting for a spare Windows machine
+
+**Read this first if you are a fresh session.** Work stopped deliberately, not
+because anything broke. Everything is committed and pushed (`origin/main`), CI
+is green on all four jobs, and no machine is left holding a device.
+
+**The one thing that needs hardware:** loading `airusb.sys` for the first time.
+It builds, passes Code Analysis with a positive control, and now has an INF and
+a test-signed package that `Inf2Cat` accepts — and it has never been loaded on
+any machine. That needs a keyboard in front of a box nobody minds losing.
+**Not the GMKtec:** it is reachable only over the network and is the project's
+only Windows peer, so a boot loop there costs both.
+
+**When the machine arrives, go straight to `WINDOWS_IMPORTER_PLAN.md` §W6.** It
+is a runbook now, not a plan: the pre-trip commands, the recovery setup to do
+BEFORE the first load, the staged order, and the list of things that were fixed
+by reading and have never executed.
+
+**Waiting is not strictly required.** These need no Windows hardware at all and
+are all real:
+
+| | |
+|---|---|
+| **Static Driver Verifier** | the largest remaining pre-load check, and it is NOT blocked by the spare machine — it is blocked by two things that can be fixed now: `staticdv.exe` is not installed on the GMKtec (only the MSBuild targets are), and SDV needs a `.vcxproj` this driver deliberately does not have |
+| **N2 — a device that is not a flash drive** | needs a genuinely asynchronous platform port; macOS's agent does bulk I/O over a blocking request/reply socket. §0 |
+| **N3 — sustained load** | caps exist, no gate does |
+| **N4 — the local IPC boundary** | XPC audit tokens / polkit / Authenticode; §3.16 says exactly what is and is not established today |
+| **Step 2 of W6** | a synthetic device inside the driver, so the first load proves the controller alone rather than the controller plus the whole ABI plus the host |
+
+**State of the tree at the pause:** 29 suites, 6 fuzz targets, 0 failures on
+macOS and in the Lima `airusb` VM; MinGW clean at the full warning set; MSVC
+green in CI; `DRIVER BUILD PASS`, `CODE ANALYSIS 0 findings`, `PACKAGE PASS` on
+the GMKtec. No binaries are distributed — see the section below for why.
+
+---
+
 **Purpose:** resume this project in a fresh session with no access to the previous
 conversation. Everything load-bearing is here or in the documents it points to.
 **Repo:** `/Users/mba/Desktop/AirUSB Hub` — public at

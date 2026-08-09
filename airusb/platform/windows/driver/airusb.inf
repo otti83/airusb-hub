@@ -1,0 +1,103 @@
+;
+; airusb.inf — how Windows is told this driver exists.
+;
+; WHY THIS FILE IS IN THE REPOSITORY BEFORE THE DRIVER HAS EVER BEEN LOADED
+;
+; Because the alternative is authoring it at bring-up time, next to a machine
+; that is bugchecking, at the exact moment when a mistake is most expensive and
+; hardest to distinguish from a driver fault. An INF that names the wrong
+; service, the wrong class, or the wrong architecture produces "this device
+; cannot start (Code 10)" — which reads exactly like a broken driver and is not
+; one. Every hour spent on that is an hour not spent on the thing the trip was
+; for.
+;
+; It is validated by `scripts/wdk-package-driver.ps1`, which runs Inf2Cat over
+; it. That catches the ordinary mistakes — a missing DefaultDestDir, a
+; CatalogFile that does not match, an architecture decoration Windows will not
+; accept — WITHOUT installing anything.
+;
+; ROOT-ENUMERATED, ON PURPOSE
+;
+; There is no physical device to match. This driver IS the host controller, so
+; it is installed against a root-enumerated device node created by hand
+; (`devcon install`, or pnputil plus a manual node). That is the standard shape
+; for a UdeCx client and it is what makes the first bring-up step — "the
+; controller appears, with no device and no host" — expressible at all.
+;
+; NOT SIGNED FOR DISTRIBUTION
+;
+; The packaging script produces a TEST certificate and a test-signed catalogue.
+; That is enough for a machine with `bcdedit /set testsigning on`, and it is
+; deliberately not enough for anything else: shipping needs an EV certificate
+; and Microsoft attestation, which is a paid process and a decision nobody has
+; made yet.
+;
+
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = System
+ClassGuid   = {4d36e97d-e325-11ce-bfc1-08002be10318}
+Provider    = %ManufacturerName%
+CatalogFile = airusb.cat
+DriverVer   = ; set by stampinf at package time
+PnpLockdown = 1
+
+[Manufacturer]
+%ManufacturerName% = Standard, NT$ARCH$
+
+[Standard.NT$ARCH$]
+%DeviceName% = AirUsb_Device, root\airusb
+
+[SourceDisksNames]
+1 = %DiskName%,,,""
+
+[SourceDisksFiles]
+airusb.sys = 1,,
+
+[DestinationDirs]
+DefaultDestDir = 13     ; the driver store package directory
+
+; ---------------------------------------------------------------------------
+; The device
+; ---------------------------------------------------------------------------
+
+[AirUsb_Device.NT]
+CopyFiles = AirUsb_Device.NT.Copy
+
+[AirUsb_Device.NT.Copy]
+airusb.sys
+
+[AirUsb_Device.NT.Services]
+AddService = airusb, %SPSVCINST_ASSOCSERVICE%, AirUsb_Service_Inst
+
+[AirUsb_Service_Inst]
+DisplayName   = %ServiceName%
+ServiceType   = 1                  ; SERVICE_KERNEL_DRIVER
+StartType     = 3                  ; SERVICE_DEMAND_START — never boot-start.
+                                   ; A boot-start driver that bugchecks is a
+                                   ; boot loop; demand-start is recoverable
+                                   ; from Safe Mode without a reinstall, and on
+                                   ; the FIRST load that difference is the
+                                   ; whole margin of safety.
+ErrorControl  = 1                  ; SERVICE_ERROR_NORMAL — log and carry on,
+                                   ; rather than SERVICE_ERROR_CRITICAL, which
+                                   ; would make a failed load a boot failure.
+ServiceBinary = %13%\airusb.sys
+
+; UdeCx is a class extension and is LINKED as well as included. The driver
+; imports from it at run time, so the load order has to be stated: without
+; this, airusb.sys can be asked to start before udecx.sys exists.
+[AirUsb_Device.NT.Wdf]
+KmdfService = airusb, AirUsb_wdfsect
+
+[AirUsb_wdfsect]
+KmdfLibraryVersion = 1.35
+
+; ---------------------------------------------------------------------------
+
+[Strings]
+SPSVCINST_ASSOCSERVICE = 0x00000002
+ManufacturerName       = "AirUSB Hub"
+DiskName               = "AirUSB Hub Installation Disk"
+DeviceName             = "AirUSB Virtual USB Host Controller"
+ServiceName            = "AirUSB virtual USB host controller"

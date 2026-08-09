@@ -378,35 +378,128 @@ port is a link error rather than a silence) and are cross-built by
 which is exactly right and is the sentence the window shows. Nothing here is
 evidence about a kernel.
 
-### W6 — bring-up · NEEDS A SPARE MACHINE AND A PERSON AT IT
+### W6 — bring-up · THE RUNBOOK. NEEDS A SPARE MACHINE AND A PERSON AT IT
 
 **Not on the GMKtec.** That machine is reachable only over the network and is
 also the project's only Windows peer; a boot loop there cannot be recovered
-remotely and costs both. The user has said a spare Windows machine will be
-provided for the first load.
+remotely and costs both.
 
-`bcdedit /set testsigning on`, reboot, install the INF, and watch Device
-Manager — but not in that order on the first attempt. The ordering below exists
-so that a failure has ONE possible cause instead of four:
+Everything that can be done WITHOUT the spare machine has been done. What is
+left genuinely needs a keyboard in front of a machine nobody minds losing.
 
-1. the driver loads and the controller appears, with no device and no host;
-2. a fixed synthetic device enumerates, with no host service and no network;
-3. a LOCAL scripted host over the IOCTL ABI drives a RAM-backed BOT device to
-   Explorer, and is made to survive stalls, reset, cancellation, a host process
-   killed mid-transfer, malformed replies and endpoint reconfiguration;
-4. only then the session layer replaces the scripted backend;
-5. only then a real drive from the Mac.
+#### Before you travel — on the GMKtec, over ssh, loading nothing
 
-**Code Analysis is DONE and clean; SDV is not.** `scripts/wdk-analyze-driver.ps1`
-runs `cl /analyze` over the driver and reports 0 findings — and, because "0
-findings" is worthless if the analyser was not engaged, it was proved against a
-positive control (a file with a deliberate C6011, compiled under identical
-flags, which produced C6011 and C6387).
+```powershell
+cd $env:USERPROFILE\airusb-src              # or wherever the tree is
+powershell -ExecutionPolicy Bypass -File .\scripts\wdk-abi-check.ps1        # ABI CHECK PASS
+powershell -ExecutionPolicy Bypass -File .\scripts\wdk-build-driver.ps1     # DRIVER BUILD PASS
+powershell -ExecutionPolicy Bypass -File .\scripts\wdk-analyze-driver.ps1   # CODE ANALYSIS PASS
+powershell -ExecutionPolicy Bypass -File .\scripts\wdk-package-driver.ps1   # PACKAGE PASS
+```
 
-SDV is a different thing and is STILL a prerequisite: it proves KMDF *protocol*
-rules — the request-completion state machine, the cancel/complete race — and
-needs a real MSBuild project, which this driver deliberately does not have. That
-is the one piece of pre-load verification still outstanding.
+The last one produces `build-pkg\` — `airusb.sys`, `airusb.inf`, `airusb.cat`,
+`airusb-test.cer` — test-signed and installable, and **it installs nothing**.
+Verified on the GMKtec 2026-08-09: `Signability test complete. Errors: None`.
+Copy that directory to the spare machine.
+
+`signtool verify /pa` on the build machine reports the root is untrusted. That
+is CORRECT for a self-signed test certificate and the script says so; it becomes
+trusted on the bring-up machine at step 0 below.
+
+#### Step 0 — make the machine able to load it, and able to recover
+
+```powershell
+# As Administrator, on the SPARE machine.
+bcdedit /set testsigning on
+bcdedit /set {current} recoveryenabled yes     # you want the recovery menu
+# Know how to reach Safe Mode BEFORE you need it:
+#   hold Shift while choosing Restart, or interrupt boot three times.
+shutdown /r /t 0
+```
+
+After the reboot the desktop says "Test Mode" in the corner. Then trust the
+certificate — into BOTH stores, because one governs loading and the other
+governs installing:
+
+```powershell
+certutil -addstore -f Root         airusb-test.cer
+certutil -addstore -f TrustedPublisher airusb-test.cer
+```
+
+**The driver is demand-start and ErrorControl=Normal, deliberately** (see
+`airusb.inf`). A bugcheck at load is therefore recoverable from Safe Mode by
+deleting the device node — it is not a boot loop. That is the single most
+important property of this package and it is why the INF is in the repository
+rather than written on the day.
+
+#### Step 1 — the controller, and NOTHING else
+
+```powershell
+pnputil /add-driver airusb.inf /install
+devcon install airusb.inf root\airusb      # creates the root-enumerated node
+```
+
+Expect: a device under **System devices** named *AirUSB Virtual USB Host
+Controller*, started, Code 0. No USB device appears — there is none yet, and
+that is the pass condition for this step.
+
+If it fails, the cause is one of: the certificate is not in both stores, test
+mode is off, or `AirUsbEvtDeviceAdd` returned an error. `!analyze -v` under a
+kernel debugger distinguishes them; without one, the System event log names the
+service and the status.
+
+**What is most likely to go wrong here, from the review that read this driver:**
+`UdecxWdfDeviceAddUsbDeviceEmulation` failing because the capability callback is
+wrong or absent (it is present now — that bug was found and fixed), and the
+device-add path returning before `WdfDeviceCreateDeviceInterface`.
+
+#### Step 2 — a synthetic device, still no host
+
+Not yet written. The driver currently creates a device only on PLUG_IN from user
+mode, so step 2 as originally planned — "a fixed synthetic device enumerates,
+with no host service and no network" — needs a small `#ifdef` path in
+`AirUsbEvtDeviceAdd` that plugs in a hard-coded BOT descriptor set. **Write that
+before the trip if you want the staged ordering it buys**; it is the difference
+between "the controller works" and "the controller plus the whole IOCTL ABI plus
+the host works".
+
+#### Step 3 — a local scripted host, no network
+
+`airusb-brokerd.exe --simulated` already does this end to end EXCEPT that its
+device comes over the network. The smallest honest step 3 is a scripted host
+that opens the driver, plugs in a RAM-backed BOT manifest, and answers FETCHes
+from `tests/fakes/ScriptedDevice` — i.e. `UdecxDriverChannel` + `UdecxBridge`
+against a local device instead of `ImporterDataPlane`. Then make it survive
+stalls, reset, cancellation, the host killed mid-transfer, malformed replies and
+endpoint reconfiguration.
+
+#### Step 4 — the session layer
+
+`airusb-brokerd.exe` unmodified, pointed at a Mac running `airusb-exportd
+--serve`. The presenter reports `canPresent=yes` the moment the driver is
+installed; nothing else changes.
+
+#### Step 5 — a real drive from the Mac
+
+The Windows equivalent of the Linux gate in `HANDOFF.md` §3.17.
+
+#### Known-unverified, carried into the trip
+
+None of this has run. In particular, from `HANDOFF.md` §4.8, the following were
+found by reading and fixed by reading, and have never executed:
+
+* the BIND/PLUG_IN incarnation handshake — if this is wrong the FIRST URB hangs
+  and everything looks dead;
+* the cancel/complete ownership race, which is the most likely bugcheck;
+* endpoint reset delivery, which only matters once a device stalls;
+* the IN-completion length check.
+
+**SDV is still not run, and cannot be run on the GMKtec:** `staticdv.exe` is not
+installed there (checked, 2026-08-09 — only `WindowsDriver.Sdv.targets` is
+present). Running it needs the WDK's Static Driver Verifier component AND an
+MSBuild `.vcxproj`, which this driver deliberately does not have. Adding both is
+pre-load work that does not need the spare machine, and it is the largest
+remaining piece of verification available without a reboot.
 
 **Evidence.** The Windows equivalent of the Linux gate: the device appears in
 Device Manager under the right VID/PID, `diskmgmt` shows the volume, files are
