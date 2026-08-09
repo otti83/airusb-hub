@@ -98,18 +98,23 @@ LocalIdentity loadOrCreateIdentity(const std::string& path)
     // A real daemon stores this at 0600 under /Library/Application Support.
     // Here it is a file beside the working directory so a test run is
     // self-contained and obviously throwaway.
+    // 0600, not whatever the umask says. This file is the private key: whoever
+    // reads it can be this machine to every peer that has pinned it. The bare
+    // fopen("wb") that used to be here produced 0644, and the same mistake in
+    // airusb-exportd — which runs as root — put a world-readable Ed25519 seed
+    // on disk. Found on a real machine, not in review.
     Seed seed{};
-    if (FILE* f = std::fopen(path.c_str(), "rb"); f) {
-        const std::size_t got = std::fread(seed.data(), 1, seed.size(), f);
-        std::fclose(f);
-        if (got == seed.size()) return LocalIdentity::fromSeed(seed);
+    std::string blob;
+    if (platform::readWholeFile(path, blob, seed.size()) && blob.size() == seed.size()) {
+        std::memcpy(seed.data(), blob.data(), seed.size());
+        (void)platform::restrictToOwnerIfLoose(path);
+        return LocalIdentity::fromSeed(seed);
     }
 
     randomBytes(std::span<std::uint8_t>(seed.data(), seed.size()));
-    if (FILE* f = std::fopen(path.c_str(), "wb"); f) {
-        (void)std::fwrite(seed.data(), 1, seed.size(), f);
-        std::fclose(f);
-    }
+    (void)platform::writeFileAtomically(
+        path, std::string(reinterpret_cast<const char*>(seed.data()), seed.size()),
+        /*privateToOwner=*/true);
     return LocalIdentity::fromSeed(seed);
 }
 

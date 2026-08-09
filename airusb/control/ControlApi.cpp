@@ -96,7 +96,11 @@ HttpResponse ControlApi::handle(const HttpRequest& req)
 
     if (req.path == "/api/share/start") {
         if (!isPost) return error(405, "POST only");
-        const std::uint16_t port = in.port("port", 7714);
+        // 0 is accepted here and nowhere else: this is a bind, and "any free
+        // port" is a real answer. The state that comes back reports which one
+        // was chosen, so the window can tell the user what to type on the other
+        // machine.
+        const std::uint16_t port = in.listenPort("port", 7714);
         if (const Status s = _hub.shareStart(port, &why); s != Status::Ok)
             return error(httpFor(s), why);
         return state();

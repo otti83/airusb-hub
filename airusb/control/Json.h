@@ -114,7 +114,20 @@ public:
     bool has(std::string_view k) const noexcept;
     std::string     string(std::string_view k, std::string_view fallback = {}) const;
     std::int64_t    integer(std::string_view k, std::int64_t fallback = 0) const;
+    /// 1..65535, or `fallback`. Zero is refused because a caller asking to
+    /// CONNECT to port 0 has made a mistake, and silently turning that into a
+    /// default would hide it.
     std::uint16_t   port(std::string_view k, std::uint16_t fallback = 0) const;
+
+    /// The same, except 0 is accepted and means "let the OS choose one".
+    ///
+    /// Only for LISTENING. The two cases genuinely differ — 0 is meaningless as
+    /// a destination and useful as a bind — and giving them one accessor is how
+    /// a test that meant "any free port" quietly asked for 7714 instead, passed
+    /// for as long as nothing else wanted 7714, and then failed the first time
+    /// something did.
+    std::uint16_t   listenPort(std::string_view k, std::uint16_t fallback,
+                               bool* wasZero = nullptr) const;
     bool            boolean(std::string_view k, bool fallback = false) const;
 
     std::size_t size() const noexcept { return _members.size(); }

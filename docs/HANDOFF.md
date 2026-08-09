@@ -68,10 +68,10 @@ the two-machine procedure: **`GUI.md`**. Evidence: §3.9.
 
 In order, and none of it waits on Apple:
 
-1. **The hub against real hardware.** The last unverified cell that needs no new
-   code. `airusb-exportd --serve` already speaks this protocol, so a real
-   captured drive can be read through the window today — it needs `sudo` on the
-   Mac, which the assistant does not have. Two commands; see §3.9.
+1. **The Windows importer, UdeCx (§4.4).** With real hardware through the window
+   now done (§3.9), this is the largest remaining piece and the only one that
+   would add a new operating system to the "really enumerates it" column. It is
+   self-service: `bcdedit /set testsigning on` for development.
 
    (macOS ↔ Windows with the hub is **done** — §3.9. The binary question that
    blocked it is also settled: `scripts/cross-build-windows.sh` now produces
@@ -826,11 +826,65 @@ segmentation path proven between two operating systems on a real network, which
 is the strongest evidence for it anywhere in this project — loopback never fills
 a socket, and that is precisely why loopback never found this.
 
-**Not yet done with the hub:** pointing it at real hardware. It needs no code:
-`airusb-exportd --serve` speaks this protocol already, so
-`sudo ./build/airusb-exportd --device 058f:6387 --serve --port 7714` plus
-`./build/airusb-agent` on the Mac, and Connect from any hub, reads a real drive
-through the window. `sudo` is blocked for the assistant, so it is a user step.
+### Real hardware, through the window — PASS, 2026-08-09
+
+The last cell. `airusb-exportd --serve` captured the physical 058f:6387 and the
+hub read it through the control API, with no new code on either side — the
+daemon already spoke this protocol.
+
+```
+INQUIRY   'Generic' 'Flash Disk' rev '8.01'     <- the drive's OWN firmware strings,
+                                                   not 'AirUSB' / 'Scripted Device'
+CAPACITY  61440000 x 512 = 31.46 GB
+LBA 0     bootsig=55AA
+          head=[fa b8 00 00 8e d0 bc 00 7c 8b f4 50 07 50 1f fb]
+                 cli; mov ax,0; mov ss,ax; mov sp,0x7c00   <- a real MBR
+SHORT_READ_FIDELITY ok — offered 1024, device sent 512, short read preserved
+```
+
+**And the write path, on the physical medium, with the owner's explicit
+permission** (the stick was declared disposable; `WriteProbe` writes from LBA
+1024, well past the partition table, and restores):
+
+```
+SAVE_ORIGINAL     131072 bytes held for restore
+WRITE_10_1blk / 4blk / 32blk / 256blk    all ok, each in ONE transfer
+VERIFY_256blk     131072 bytes identical after the round trip
+RESTORE_ORIGINAL  ok
+verdict=PASS  outTransfers=5 largestOut=131072 bytesWritten=281088
+              mismatched=0 outBoundariesIntact=yes restored=yes
+SEGMENTATION out=2 in=2 contRecords=14 maxSegment=16552 fired=yes
+```
+
+Re-read afterwards: `bootsig=55AA`, the same sixteen boot bytes, the same
+capacity. The medium is byte-for-byte where it started.
+
+That is the whole product, minus only the Apple-blocked macOS importer: a real
+drive taken from macOS, carried over an authenticated encrypted session,
+segmented into eight records per transfer, and read AND written byte-exactly by
+a person clicking a button.
+
+**Two gotchas from doing it:**
+
+- **Start the agent FIRST.** `airusb-exportd` waits 30 s for it and then hands
+  the drive back (correctly — it fails closed); `airusb-agent` waits 60 s for
+  the daemon's socket. So the agent is the one that should be waiting. The first
+  attempt here died on exactly that, with `RESULT=ATTACH_FAILED XFER_TIMEOUT: no
+  agent connected`, and the drive was returned untouched.
+- **`lsof -iTCP -sTCP:LISTEN` as a normal user cannot see a root process's
+  listening socket.** It reported nothing and led to a wrong conclusion that
+  exportd had not reached its listener. Connect with the real client instead —
+  which is also the rule §3.5 already gives for a different reason.
+
+**How to reproduce the above.** Terminal 2 FIRST, as the console user, no sudo —
+`./build/airusb-agent`. Then terminal 1, as root —
+`sudo ./build/airusb-exportd --device 058f:6387 --serve --port 7714`. Then
+Connect from any hub to that Mac's address on 7714. Ctrl-C the agent to hand the
+drive back in the §7.6 order. `sudo` is blocked for the assistant, so terminals
+1 and 2 are always a user step.
+
+**Nothing is left that needs no new code.** Everything remaining is either a
+driver (§4.4, Windows UdeCx) or Apple's answer (§2).
 
 ---
 

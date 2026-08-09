@@ -165,6 +165,19 @@ bool writeFileAtomically(const std::string& path,
 bool readWholeFile(const std::string& path, std::string& out,
                    std::size_t maxBytes) noexcept;
 
+/// Narrows `path` to 0600 if any group or other bit is set. Returns false only
+/// if it is loose AND could not be tightened.
+///
+/// For repairing a secret written by an older build, or by a build that got the
+/// mode wrong — which happened: the exporter wrote its Ed25519 seed through a
+/// bare fopen, so the umask decided, and as a root daemon it produced a
+/// world-readable private key. Fixing the writer does nothing for the keys
+/// already on disk; this does.
+///
+/// Always true on Windows, where the file inherits the directory ACL and there
+/// is no mode to narrow.
+bool restrictToOwnerIfLoose(const std::string& path) noexcept;
+
 } // namespace airusb::platform
 
 #endif // AIRUSB_CORE_PLATFORM_H

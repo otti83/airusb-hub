@@ -259,6 +259,16 @@ std::uint16_t JsonObject::port(std::string_view k, std::uint16_t fallback) const
     return static_cast<std::uint16_t>(v);
 }
 
+std::uint16_t JsonObject::listenPort(std::string_view k, std::uint16_t fallback,
+                                     bool* wasZero) const
+{
+    if (wasZero) *wasZero = false;
+    const std::int64_t v = integer(k, -1);
+    if (v == 0) { if (wasZero) *wasZero = true; return 0; }
+    if (v < 1 || v > 65535) return fallback;
+    return static_cast<std::uint16_t>(v);
+}
+
 bool JsonObject::boolean(std::string_view k, bool fallback) const
 {
     for (const Member& m : _members) {

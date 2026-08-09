@@ -156,6 +156,19 @@ bool writeFileAtomically(const std::string& path, const std::string& data,
     return true;
 }
 
+bool restrictToOwnerIfLoose(const std::string& path) noexcept
+{
+#if defined(_WIN32)
+    (void)path;
+    return true;
+#else
+    struct stat st{};
+    if (::stat(path.c_str(), &st) != 0) return true;   // nothing there to narrow
+    if ((st.st_mode & (S_IRWXG | S_IRWXO)) == 0) return true;
+    return ::chmod(path.c_str(), S_IRUSR | S_IWUSR) == 0;
+#endif
+}
+
 bool readWholeFile(const std::string& path, std::string& out,
                    std::size_t maxBytes) noexcept
 {

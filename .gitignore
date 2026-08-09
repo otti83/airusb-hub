@@ -42,3 +42,15 @@ airusb/build-win/
 apple/AirUSBHub.xcodeproj/
 apple/Sources/Info.plist
 apple/build/
+
+# Runtime state, and one of these is a PRIVATE KEY.
+#
+# *.id is a raw Ed25519 seed: whoever holds it can be this machine to every peer
+# that has pinned it. *.peers is the pin store, *.token is the control-plane
+# bearer token. None of them is source, all of them are written into whatever
+# directory a tool was started from, and a root-run exportd drops them wherever
+# the operator happened to be — which was the repository root. `git add -A`
+# reached for the seed before this rule existed.
+airusb-*.id
+airusb-*.peers
+airusb-*.token

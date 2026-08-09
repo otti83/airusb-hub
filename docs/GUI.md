@@ -59,6 +59,13 @@ Sharing **real hardware** is likewise a privileged capture, and on macOS it live
 in `airusb-exportd`. The hub offers a simulated drive so the whole path can be
 exercised on a machine with nothing plugged in; it says so in the device's name.
 
+That is a split, not a limitation: `airusb-exportd --serve` speaks the same
+protocol, so the window imports a **real** captured drive with no extra code.
+Done on 2026-08-09 — the hub read a physical 058f:6387's own firmware strings,
+its 31.46 GB capacity and its MBR. Start `airusb-agent` FIRST (it waits 60 s for
+the daemon's socket; the daemon only waits 30 s for it, then correctly hands the
+drive back).
+
 ---
 
 ## The six digits, and why the connection drops in the middle
@@ -289,6 +296,8 @@ identities.
 | macOS ↔ Linux over a real network, both directions | run by hand 2026-08-09, `HANDOFF.md` §3.9 |
 | the hub speaks the same protocol as `airusb-net` | both directions, 2026-08-09, including a segmented 128 KiB write |
 | **macOS ↔ Windows, two machines** | **PASS 2026-08-09** — SAS compared by a person on both screens, attach, `BotProbe PASS 61440 × 512`, rtt 28.3 ms; then a segmented 128 KiB write, `fired=yes`, three times running |
+| **a real USB drive, read through this window** | **PASS 2026-08-09** — `airusb-exportd --serve` captured the physical 058f:6387; the hub read `'Generic' 'Flash Disk' rev '8.01'`, 61 440 000 × 512 = 31.46 GB, and a genuine MBR at LBA 0 (`bootsig=55AA`) |
+| a real USB drive, **written** through the session | **PASS 2026-08-09**, with the owner's explicit permission — 128 KiB segmented write from LBA 1024, byte-identical read-back, original restored, medium verified unchanged afterwards |
 
 That last row cost two real bugs to earn, and both were invisible on loopback:
 a socket that never fills never strands a tail, and a device that is only ever

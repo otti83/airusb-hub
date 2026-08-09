@@ -132,6 +132,19 @@ void testJsonReader()
         CHECK_EQ(o.port("c", 7714), 7714);
         CHECK_EQ(o.port("d", 7714), 7714);
     }
+
+    TEST_CASE("a listen port keeps 0, because 0 means 'any' when binding") {
+        JsonObject o;
+        CHECK(o.parse(R"({"a":0,"b":65536,"c":9000})"));
+        bool zero = false;
+        CHECK_EQ(o.listenPort("a", 7714, &zero), 0);
+        CHECK(zero);
+        CHECK_EQ(o.listenPort("b", 7714, &zero), 7714);   // still out of range
+        CHECK(!zero);
+        CHECK_EQ(o.listenPort("c", 7714, &zero), 9000);
+        CHECK(!zero);
+        CHECK_EQ(o.listenPort("missing", 7714), 7714);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -402,10 +415,20 @@ void testRoutes()
     }
 
     TEST_CASE("sharing starts, is listed, and stops") {
+        // Port 0 means "any free port". It has to, or this test binds 7714 on
+        // the developer's machine and fails the moment anything real is using
+        // it — which is exactly what happened: `port()` refuses 0 as
+        // out-of-range, so this silently asked for the 7714 fallback and passed
+        // only while that port was idle.
         const HttpResponse r = good("POST", "/api/share/start", R"({"port":0})");
-        // Port 0 lets the OS choose, so this works on a machine where 7714 is
-        // taken — which is any machine running the other half of this test.
         CHECK_EQ(r.status, 200);
+        // Scoped to the share object: the import object legitimately reports
+        // port 0 while nothing is connected, and an unscoped search matches it.
+        const std::size_t shareAt  = r.body.find("\"share\":{");
+        const std::size_t importAt = r.body.find("\"import\":{");
+        CHECK(shareAt != std::string::npos && importAt > shareAt);
+        const std::string share = r.body.substr(shareAt, importAt - shareAt);
+        CHECK(share.find("\"port\":0,") == std::string::npos);   // resolved, not echoed back
         CHECK(r.body.find("\"state\":\"listening\"") != std::string::npos);
         CHECK(r.body.find("Simulated Flash Disk") != std::string::npos);
         // A second start is a conflict, not a second listener.

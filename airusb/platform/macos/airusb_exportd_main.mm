@@ -166,19 +166,39 @@ bool runBotSelfTest(HostDeviceExporter& ex)
 // ExporterSession over a socket instead of a local BotProbe.
 // ---------------------------------------------------------------------------
 
+/// The exporter's long-term identity. This file IS the private key: anyone who
+/// can read it can be this Mac to every peer that has ever pinned it.
+///
+/// It used to be written with a bare fopen("wb"), so its mode came from the
+/// umask — 0644 in practice. This daemon runs as ROOT, so that produced a
+/// root-owned, world-readable Ed25519 seed sitting in whatever directory the
+/// operator happened to be in. Observed here, on this machine, at exactly that
+/// mode; the pin store beside it was 0600, which is the wrong way round because
+/// the pin store holds nothing secret.
+///
+/// writeFileAtomically(..., privateToOwner=true) chmods 0600 before the rename,
+/// so the file is never even briefly readable at the final path.
 crypto::LocalIdentity loadOrCreateIdentity(const std::string& path)
 {
     crypto::Seed seed{};
-    if (FILE* f = std::fopen(path.c_str(), "rb"); f) {
-        const std::size_t got = std::fread(seed.data(), 1, seed.size(), f);
-        std::fclose(f);
-        if (got == seed.size()) return crypto::LocalIdentity::fromSeed(seed);
+    std::string blob;
+    if (platform::readWholeFile(path, blob, seed.size()) && blob.size() == seed.size()) {
+        std::memcpy(seed.data(), blob.data(), seed.size());
+        // Repair a key written by an older build. A seed that has already been
+        // world-readable should be treated as compromised, but narrowing it is
+        // still strictly better than leaving it open, and rotating it silently
+        // would unpair every peer without saying so.
+        if (!platform::restrictToOwnerIfLoose(path))
+            logLine("ERROR", @"%s is readable by other users and could not be "
+                             @"tightened — treat this identity as compromised",
+                    path.c_str());
+        return crypto::LocalIdentity::fromSeed(seed);
     }
     crypto::randomBytes(std::span<std::uint8_t>(seed.data(), seed.size()));
-    if (FILE* f = std::fopen(path.c_str(), "wb"); f) {
-        (void)std::fwrite(seed.data(), 1, seed.size(), f);
-        std::fclose(f);
-    }
+    if (!platform::writeFileAtomically(
+            path, std::string(reinterpret_cast<const char*>(seed.data()), seed.size()),
+            /*privateToOwner=*/true))
+        logLine("ERROR", @"could not save the identity to %s", path.c_str());
     return crypto::LocalIdentity::fromSeed(seed);
 }
 
