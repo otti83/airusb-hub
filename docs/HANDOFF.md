@@ -7,10 +7,9 @@ finished end to end on real hardware (full L6 + L8; §0). Next session's focus i
 conversation. Everything load-bearing is here or in the documents it points to.
 **Repo:** `/Users/mba/Desktop/AirUSB Hub` — public at
 <https://github.com/otti83/airusb-hub> (Apache-2.0, branch `main`, `gh`
-authenticated as `otti83`). **NOT YET PUSHED:** as of this handoff, local `main` is
-**~12 commits ahead of `origin/main`** (this whole session's L5→L6 work + this
-handoff). Everything is committed locally and builds green; run `git push` to
-publish before relying on a fresh clone.
+authenticated as `otti83`). Everything below is committed AND pushed to
+`origin/main` (this session's L5→L6 work through the real-hardware pass; last commit
+records this line).
 
 ---
 
