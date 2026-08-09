@@ -1,42 +1,16 @@
 #include "WindowsUsb.h"
 
-// When the WDK is present, the transcribed constants in the header are compared
-// against Microsoft's own. This is the only place the numbers can actually be
-// confirmed, so a Windows build that includes the WDK is the acceptance test for
-// them — the portable tests can prove the mapping is consistent and total, but
-// not that 0xC0000004 is really USBD_STATUS_STALL_PID.
+// The transcribed constants are NOT checked here.
 //
-// Define AIRUSB_WITH_WDK when building airusb.sys or anything else that already
-// includes the WDK. Nothing portable defines it.
-#if defined(AIRUSB_WITH_WDK)
-  #include <usb.h>
-  #include <usbdi.h>
-  #include <udecxusbdevice.h>
-
-namespace airusb::windows {
-static_assert(static_cast<std::int32_t>(UdecxSpeed::Low)   == UdecxUsbLowSpeed);
-static_assert(static_cast<std::int32_t>(UdecxSpeed::Full)  == UdecxUsbFullSpeed);
-static_assert(static_cast<std::int32_t>(UdecxSpeed::High)  == UdecxUsbHighSpeed);
-static_assert(static_cast<std::int32_t>(UdecxSpeed::Super) == UdecxUsbSuperSpeed);
-
-static_assert(static_cast<std::uint32_t>(UsbdStatus::Success)            == USBD_STATUS_SUCCESS);
-static_assert(static_cast<std::uint32_t>(UsbdStatus::StallPid)           == USBD_STATUS_STALL_PID);
-static_assert(static_cast<std::uint32_t>(UsbdStatus::DevNotResponding)   == USBD_STATUS_DEV_NOT_RESPONDING);
-static_assert(static_cast<std::uint32_t>(UsbdStatus::DataOverrun)        == USBD_STATUS_DATA_OVERRUN);
-static_assert(static_cast<std::uint32_t>(UsbdStatus::DataUnderrun)       == USBD_STATUS_DATA_UNDERRUN);
-static_assert(static_cast<std::uint32_t>(UsbdStatus::BufferOverrun)      == USBD_STATUS_BUFFER_OVERRUN);
-static_assert(static_cast<std::uint32_t>(UsbdStatus::EndpointHalted)     == USBD_STATUS_ENDPOINT_HALTED);
-static_assert(static_cast<std::uint32_t>(UsbdStatus::ErrorShortTransfer) == USBD_STATUS_ERROR_SHORT_TRANSFER);
-static_assert(static_cast<std::uint32_t>(UsbdStatus::Canceled)           == USBD_STATUS_CANCELED);
-static_assert(static_cast<std::uint32_t>(UsbdStatus::Timeout)            == USBD_STATUS_TIMEOUT);
-static_assert(static_cast<std::uint32_t>(UsbdStatus::DeviceGone)         == USBD_STATUS_DEVICE_GONE);
-static_assert(static_cast<std::uint32_t>(UsbdStatus::InvalidParameter)   == USBD_STATUS_INVALID_PARAMETER);
-static_assert(static_cast<std::uint32_t>(UsbdStatus::NoMemory)           == USBD_STATUS_NO_MEMORY);
-static_assert(static_cast<std::uint32_t>(UsbdStatus::RequestFailed)      == USBD_STATUS_REQUEST_FAILED);
-static_assert(kUsbdShortTransferOk      == USBD_SHORT_TRANSFER_OK);
-static_assert(kUsbdTransferDirectionIn  == USBD_TRANSFER_DIRECTION_IN);
-} // namespace airusb::windows
-#endif
+// They cannot be: this file is compiled on macOS and Linux so the mapping can be
+// tested without Windows, and the WDK's kernel headers cannot coexist with the
+// C++ standard library in one translation unit. Putting the checks here meant
+// they would never actually run anywhere.
+//
+// `platform/windows/wdk_abi_check.c` is where they live now — a translation unit
+// that includes the real WDK headers, C_ASSERTs every value in
+// `WindowsUsbAbi.h`, produces no code and is never linked. Compiling it IS the
+// test, and only a machine with the WDK can do it.
 
 namespace airusb::windows {
 

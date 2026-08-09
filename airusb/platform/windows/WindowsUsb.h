@@ -47,14 +47,20 @@
 //
 // Same reason as `UsbipCodec` and `LinuxUsb`: this file must build on macOS and
 // Linux so the tests can run there, and the WDK headers do not exist on either.
-// The values below are transcribed from Microsoft's `usb.h` / `udecxusbdevice.h`.
-// Transcription can be wrong, so when the WDK IS present the real macros are
-// compared against these with static_assert — see `AIRUSB_WITH_WDK` in the .cpp.
-// A number that only ever exists in our own header is a number nobody has
-// checked.
+// The values themselves live in `WindowsUsbAbi.h`, which is plain C with no
+// includes so that a KERNEL-mode translation unit can also read them — the WDK's
+// headers and the C++ standard library cannot share a translation unit.
+//
+// Transcription can be wrong, and `platform/windows/wdk_abi_check.c` is the only
+// place it can be caught: it includes the real WDK headers and C_ASSERTs every
+// value. Compiling that file IS the test, and only a machine with the WDK can
+// run it. Until it has been compiled once, these are a careful guess. A number
+// that only ever exists in our own header is a number nobody has checked.
 
 #ifndef AIRUSB_PLATFORM_WINDOWS_WINDOWSUSB_H
 #define AIRUSB_PLATFORM_WINDOWS_WINDOWSUSB_H
+
+#include "WindowsUsbAbi.h"
 
 #include "../../core/Status.h"
 #include "../../core/UsbTypes.h"
@@ -65,10 +71,10 @@ namespace airusb::windows {
 
 /// UDECX_USB_DEVICE_SPEED. Never include <udecxusbdevice.h> from portable code.
 enum class UdecxSpeed : std::int32_t {
-    Low   = 0,
-    Full  = 1,
-    High  = 2,
-    Super = 3,
+    Low   = AIRUSB_UDECX_SPEED_LOW,
+    Full  = AIRUSB_UDECX_SPEED_FULL,
+    High  = AIRUSB_UDECX_SPEED_HIGH,
+    Super = AIRUSB_UDECX_SPEED_SUPER,
     /// Not a UdeCx value. Returned for speeds UdeCx cannot express, so the
     /// caller has to handle the case rather than receive a plausible wrong one.
     Unsupported = -1,
@@ -90,46 +96,46 @@ enum class UdecxSpeed : std::int32_t {
 /// it is whether the endpoint's state machine has stopped — which is the part a
 /// forwarding driver has to act on.
 enum class UsbdStatus : std::uint32_t {
-    Success              = 0x00000000u,
-    Pending              = 0x40000000u,
+    Success              = AIRUSB_USBD_SUCCESS,
+    Pending              = AIRUSB_USBD_PENDING,
 
-    Crc                  = 0xC0000001u,
-    BtStuff              = 0xC0000002u,
-    DataToggleMismatch   = 0xC0000003u,
-    StallPid             = 0xC0000004u,
-    DevNotResponding     = 0xC0000005u,
-    PidCheckFailure      = 0xC0000006u,
-    UnexpectedPid        = 0xC0000007u,
-    DataOverrun          = 0xC0000008u,
-    DataUnderrun         = 0xC0000009u,
-    BufferOverrun        = 0xC000000Cu,
-    BufferUnderrun       = 0xC000000Du,
-    NotAccessed          = 0xC000000Fu,
-    Fifo                 = 0xC0000010u,
-    EndpointHalted       = 0xC0000030u,
+    Crc                  = AIRUSB_USBD_CRC,
+    BtStuff              = AIRUSB_USBD_BTSTUFF,
+    DataToggleMismatch   = AIRUSB_USBD_DATA_TOGGLE_MISMATCH,
+    StallPid             = AIRUSB_USBD_STALL_PID,
+    DevNotResponding     = AIRUSB_USBD_DEV_NOT_RESPONDING,
+    PidCheckFailure      = AIRUSB_USBD_PID_CHECK_FAILURE,
+    UnexpectedPid        = AIRUSB_USBD_UNEXPECTED_PID,
+    DataOverrun          = AIRUSB_USBD_DATA_OVERRUN,
+    DataUnderrun         = AIRUSB_USBD_DATA_UNDERRUN,
+    BufferOverrun        = AIRUSB_USBD_BUFFER_OVERRUN,
+    BufferUnderrun       = AIRUSB_USBD_BUFFER_UNDERRUN,
+    NotAccessed          = AIRUSB_USBD_NOT_ACCESSED,
+    Fifo                 = AIRUSB_USBD_FIFO,
+    EndpointHalted       = AIRUSB_USBD_ENDPOINT_HALTED,
 
-    NoMemory             = 0x80000100u,
-    InvalidUrbFunction   = 0x80000200u,
-    InvalidParameter     = 0x80000300u,
-    ErrorBusy            = 0x80000400u,
-    RequestFailed        = 0x80000500u,
-    InvalidPipeHandle    = 0x80000600u,
-    NoBandwidth          = 0x80000700u,
-    InternalHcError      = 0x80000800u,
+    NoMemory             = AIRUSB_USBD_NO_MEMORY,
+    InvalidUrbFunction   = AIRUSB_USBD_INVALID_URB_FUNCTION,
+    InvalidParameter     = AIRUSB_USBD_INVALID_PARAMETER,
+    ErrorBusy            = AIRUSB_USBD_ERROR_BUSY,
+    RequestFailed        = AIRUSB_USBD_REQUEST_FAILED,
+    InvalidPipeHandle    = AIRUSB_USBD_INVALID_PIPE_HANDLE,
+    NoBandwidth          = AIRUSB_USBD_NO_BANDWIDTH,
+    InternalHcError      = AIRUSB_USBD_INTERNAL_HC_ERROR,
     /// An error (0x8…) but NOT a halt (0xC…): the transfer moved fewer bytes
     /// than were offered and the caller did not set USBD_SHORT_TRANSFER_OK.
     /// The endpoint is still usable and must not be reset over it.
-    ErrorShortTransfer   = 0x80000900u,
+    ErrorShortTransfer   = AIRUSB_USBD_ERROR_SHORT_TRANSFER,
 
-    Canceled             = 0xC0010000u,
-    Timeout              = 0xC0006000u,
-    DeviceGone           = 0xC0007000u,
+    Canceled             = AIRUSB_USBD_CANCELED,
+    Timeout              = AIRUSB_USBD_TIMEOUT,
+    DeviceGone           = AIRUSB_USBD_DEVICE_GONE,
 };
 
 /// USBD_SHORT_TRANSFER_OK, from the URB's TransferFlags.
-inline constexpr std::uint32_t kUsbdShortTransferOk = 0x00000002u;
+inline constexpr std::uint32_t kUsbdShortTransferOk = AIRUSB_USBD_SHORT_TRANSFER_OK;
 /// USBD_TRANSFER_DIRECTION_IN, bit 0 of the same field.
-inline constexpr std::uint32_t kUsbdTransferDirectionIn = 0x00000001u;
+inline constexpr std::uint32_t kUsbdTransferDirectionIn = AIRUSB_USBD_TRANSFER_DIRECTION_IN;
 
 /// USBD_ERROR: the value is negative as a signed 32-bit. Both 0x8… and 0xC…
 /// qualify, which is why this is a top-BIT test and not a top-two-bits one.
