@@ -23,7 +23,7 @@ authenticated as `otti83`).
 | Receiving on Windows | driver half not written |
 
 ```
-18 test suites / 0 failures
+19 test suites / 0 failures
 3 fuzz targets / 0 crashes / 0 UB findings
 Zero warnings: macOS (Clang, full flag set), Linux (GCC 12, -Wall -Wextra),
                Windows (MinGW, full flag set — -Wpedantic -Wconversion
@@ -689,9 +689,24 @@ Expect MSVC to find things MinGW did not. Paste whatever it says.
    `serialize`/`deserialize` exist so a daemon can persist it beside the pin
    store. A gate held only in memory is reset by anything that can restart the
    daemon, and that is the reset an attacker would look for.
-6. **Manifest segmentation.** A manifest larger than one record needs it; the
-   control plane has none. An 8-configuration device with a full string table could
-   reach it. The attach currently fails with a clear status rather than truncating.
+6. **Segmentation** — `protocol/Segmentation` (139 checks) is DONE: `planSegments`
+   splits a logical transfer at the record ceiling, and `Reassembler` puts it back
+   with exact-contiguity enforcement and a bounded arena. Still to do is WIRING it
+   into `ExporterSession` and `RemoteDevicePort`, which is what L5/L6 need.
+
+   **The bug this found is worth keeping.** The LAST segment of a multi-segment
+   transfer carries neither `SEG_FIRST` nor `SEG_MORE` — byte-identical in flags
+   to a message that was never segmented. Flags alone cannot tell them apart; the
+   transfer already in flight on that key is what decides. Reading it the other
+   way treats every final segment as a fresh unsegmented message and silently
+   discards everything received before it.
+
+   Reassembly must also COMPLETE before the transfer reaches the device. Handing
+   the exporter three segments to issue as three `bulkOut` calls would inject a
+   short packet at each seam, and a short packet is how USB signals the end of a
+   data phase — the device would read it as the end of the transfer and the next
+   segment as a new command. That is why `IUsbDevicePort` documents one call as
+   ONE logical transfer.
 
 ---
 

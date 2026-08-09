@@ -110,6 +110,7 @@ add_library(airusb_protocol STATIC
     protocol/ManifestCodec.cpp
     protocol/Messages.cpp
     protocol/Noise.cpp
+    protocol/Segmentation.cpp
 )
 target_link_libraries(airusb_protocol PUBLIC airusb_core airusb_crypto)
 
