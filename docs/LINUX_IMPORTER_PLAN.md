@@ -566,15 +566,27 @@ network, and the async data plane), and is not yet done.
 **Evidence.** `dmesg` enumeration lines; `lsblk`; `mount -o ro`; `ls`; `sha256sum /dev/sdX` against a known image; `descriptors` `cmp` again, now against a real device's real bytes.
 **PASS** iff the checksum matches and `dmesg` is free of `usb-storage` resets and I/O errors.
 
-**Progress, 2026-08-09.** The three hard-correctness prerequisites are built and
-proven with no kernel in the loop: segmentation (L5), the non-blocking
-`ImporterDataPlane` (§4.3 item 2), and the event-driven `platform/linux/VhciNetBridge`
-(`tests/unit/test_netbridge.cpp`, 68 checks). `VhciNetBridge` is the FSM this
-section needs — R-A drain-first, R-B buffered replies, R-C deadlines, immediate
-`CMD_UNLINK`, depth-1 admission queue — and the §4.2 deadlock/D-state is proven
-unreachable against a `MemoryPipe` kernel. **What is left is integration only:** the
-`--host` form of `airusb-vhci` (`ImporterClient` → `ImporterDataPlane` →
-`VhciNetBridge` → `FdStream`/socketpair behind `poll(2)`), then this run on the VM.
+**L6 PASSED ON A REAL KERNEL, 2026-08-09 (over localhost; simulated device).** The
+whole importer stack — `ImporterClient` → `ImporterDataPlane` → `VhciNetBridge` →
+an `AF_UNIX` socketpair on `vhci-hcd`, behind one `poll(2)` loop in
+`airusb-vhci --host` — ran on the Lima `airusb` VM (kernel 6.8.0) against
+`airusb-net serve`. The kernel enumerated the device (`New USB device found
+idVendor=058f idProduct=6387`, `Product: AirUSB`, `usb-storage … detected`,
+`sd [sda] 61440 512-byte blocks`, `Attached SCSI removable disk`; `lsblk` →
+`sda 30M disk usb`), then `mkfs.vfat` / `mount` / write / `umount` (WRITE(10)+CSW
+flushed) / remount / `cat` returned the exact bytes. The bridge forwarded ~1100
+transfers / ~17 MB through segmentation and the async plane, stalled=0.
+**What is left for the FULL gate:** the device was simulated (`airusb-net serve`),
+not a real `058f:6387` captured by the macOS exporter — that capture needs the
+user's `sudo` on the Mac (P2.8). Everything the importer builds is now proven on a
+real kernel.
+
+The three hard-correctness prerequisites were built and proven with no kernel in
+the loop first: segmentation (L5), the non-blocking `ImporterDataPlane` (§4.3 item
+2, 94 checks), and the event-driven `platform/linux/VhciNetBridge`
+(`tests/unit/test_netbridge.cpp`, 125 checks — R-A drain-first, R-B buffered
+replies, R-C deadlines, immediate `CMD_UNLINK`, the FdStream `Busy` convention),
+then GPT-5.6 reviewed the three cores to PASS across three rounds.
 
 ---
 
@@ -593,6 +605,16 @@ unreachable against a `MemoryPipe` kernel. **What is left is integration only:**
 **Implementation.** `iptables -j DROP` on the AirUSB port, or SIGSTOP the exporter, mid-write. Separately, SIGKILL the bridge mid-write.
 **Evidence.** Within `kUrbWatchdogImporter`: `dmesg` shows `usb 3-1: USB disconnect`, the mount errors out or goes read-only, `status` returns to `sta 004`, and **`umount -f` returns rather than hanging**. `ps -eo stat,comm | grep '^D'` is empty. No reboot.
 **PASS-FAIL:** **a run where `umount` hangs or any process is left in D state is a FAIL even if every positive gate passed.** That is the failure this whole design exists to prevent.
+
+**L8 PASSED ON A REAL KERNEL, 2026-08-09.** The exporter was killed during a
+sustained raw write (`dd … oflag=direct`, 6.8 MiB in). The write got an I/O error
+(`dd` exit 1), NOT a hang: `ps -eo stat` showed **zero D-state processes**,
+`umount -f` returned exit 0, `dmesg` showed a clean teardown (`connection closed →
+stop threads → release socket → disconnect device → usb 4-1: USB disconnect`), the
+vhci port returned to free (`sta 004`), and no reboot was needed. The §4.2 deadlock
+is unreachable on a real kernel, mid-write — as the hosted `test_netbridge`
+(network-drop → -ENODEV, immediate `CMD_UNLINK`, deadline → -ETIMEDOUT) already
+predicted deterministically.
 
 ---
 

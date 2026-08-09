@@ -18,7 +18,7 @@ authenticated as `otti83`). Everything below is pushed.
 | Session layer, L1 protocol, manifest | **done** |
 | Networking | **done** — real TCP; macOS↔macOS, macOS↔Linux, **Windows↔macOS on two machines** |
 | Windows client | **done** — MSVC 19.51 builds it, 13/13 native, full BOT exchange |
-| **Receiving on Linux** | **WORKS** — the kernel enumerates it, binds `usb-storage`, mounts a filesystem (§3.6) |
+| **Receiving on Linux** | **WORKS, incl. over the network** — the kernel enumerates it, binds `usb-storage`, mounts a filesystem: locally (§3.6) and via `airusb-vhci --host` over an encrypted session on a real kernel (L6+L8 PASS, `LINUX_IMPORTER_PLAN.md` §7). Only a real captured drive remains |
 | Receiving on a Mac | **blocked on Apple** — FB24214361, §2 |
 | Receiving on Windows | UdeCx driver not written. **Not blocked by anyone** |
 
@@ -40,29 +40,27 @@ portal checkbox to look for instead.
 
 ### THE NEXT TASK: finish Mac × Linux (§4.1)
 
-`airusb-vhci` already makes Linux enumerate a **simulated** device. Pointing the
-same bridge at a **real drive on the Mac, across the encrypted session**, was two
-pieces of work — wiring segmentation in, and a non-blocking data plane (§4.1). Two
-of the three sub-parts are now done and proven hosted:
+**A device now mounts on Linux over the encrypted network session, on a real
+kernel (L6 + L8 PASSED, 2026-08-09).** `airusb-vhci --host <ip>` connects
+(`ImporterClient`), attaches, and drives `ImporterDataPlane` + `VhciNetBridge` over
+an `AF_UNIX` socketpair on `vhci-hcd` behind one `poll(2)` loop. On the Lima
+`airusb` VM against `airusb-net serve`, the kernel enumerated the device
+(`idVendor=058f idProduct=6387`, `usb-storage`, `sd [sda] … Attached SCSI removable
+disk`), and `mkfs.vfat`/`mount`/write/`umount`/remount/`cat` returned the exact
+bytes — the whole importer stack, on a real kernel, over a real network. Killing
+the exporter mid-write gave an I/O error, not a D-state hang (L8). The three
+correctness cores were built hosted first (segmentation L5; `ImporterDataPlane`,
+94 checks; `VhciNetBridge`, 125 checks) and reviewed to PASS by GPT-5.6 across
+three rounds (§7); the blocking-vs-liveness reasoning is recorded in §7.
 
-* **Segmentation — L5 hosted PASS (2026-08-09; §3.7).**
-* **The async data plane — `session/ImporterDataPlane`, built + 82-check hosted
-  proof (2026-08-09; §4.1 item 2).** Non-blocking, one-terminal-outcome-per-submit,
-  deadline-swept, tested against the real `ExporterSession`.
-* **The event-driven bridge — `platform/linux/VhciNetBridge`, built + 68-check
-  hosted proof (2026-08-09; §4.1 item 2).** Non-blocking `poll()`, `CMD_UNLINK`
-  answered before the network, network-drop → -ENODEV, deadline → -ETIMEDOUT,
-  depth-1 admission queue. The D-state deadlock is proven unreachable with no
-  kernel in the loop.
-
-**What remains for L6 is integration, not new correctness cores:** the `--host`
-form of `airusb-vhci` — `ImporterClient` (connect/handshake/attach) →
-`ImporterDataPlane` → `VhciNetBridge` → the real socketpair (`FdStream`) behind a
-`poll(2)` loop — and then the real run on the Lima `airusb` VM against the macOS
-exporter with a real drive (L6's `sha256sum` gate). That is the whole product
-working on hardware, macOS exporter → Linux importer, and **nothing about it waits
-on Apple.** The blocking-vs-liveness reasoning was cross-checked with GPT-5.6 and
-is recorded in §7 (Decisions not to re-derive).
+**The ONE thing left for the FULL gate: a real drive.** The L6 run used a
+*simulated* device (`airusb-net serve`). Pointing it at a real `058f:6387`
+captured by the macOS exporter (P2.8) needs the user's `sudo` on the Mac (capture
+is root-only, and `sudo` is blocked for the assistant on the Mac — §5). The steps:
+run the macOS exporter daemon against `058f:6387`, then `airusb-vhci --host
+<mac-ip>` in the VM (route first — the Mac and VM reach each other via
+`host.lima.internal`; §4.3). Everything else — protocol, crypto, segmentation, the
+async data plane, the non-blocking bridge — is proven. **Nothing waits on Apple.**
 
 ---
 
