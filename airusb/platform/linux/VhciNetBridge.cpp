@@ -111,8 +111,12 @@ Status VhciNetBridge::drainKernel()
         std::uint8_t buf[16384];
         const transport::IoResult r = _kernel.read(std::span<std::uint8_t>(buf, sizeof buf));
         if (r.status == Status::TransportLost) return Status::TransportLost;
+        // Would-block reaches us two ways: MemoryPipe reports {Ok, 0}, a real
+        // O_NONBLOCK FdStream reports Busy on EAGAIN. Both mean "drained for now",
+        // never fatal — treating Busy as an error would tear down a healthy port.
+        if (r.status == Status::Busy) break;
         if (r.status != Status::Ok) return r.status;
-        if (r.bytes == 0) break;                       // would-block: drained for now
+        if (r.bytes == 0) break;
         _rx.insert(_rx.end(), buf, buf + r.bytes);
         _stats.bytesFromKernel += r.bytes;
     }
@@ -130,8 +134,9 @@ Status VhciNetBridge::flushKernel()
         const transport::IoResult r = _kernel.write(
             std::span<const std::uint8_t>(_tx.data() + _txSent, _tx.size() - _txSent));
         if (r.status == Status::TransportLost) return Status::TransportLost;
+        if (r.status == Status::Busy) break;           // would-block (FdStream EAGAIN)
         if (r.status != Status::Ok) return r.status;
-        if (r.bytes == 0) break;                       // would-block: retry next poll
+        if (r.bytes == 0) break;                       // would-block (MemoryPipe {Ok,0})
         _txSent += r.bytes;
         _stats.bytesToKernel += r.bytes;
     }

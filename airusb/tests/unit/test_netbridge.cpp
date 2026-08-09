@@ -159,6 +159,28 @@ void peerComplete(RecordLayer& peer, std::uint16_t channel, std::uint64_t rid,
     (void)peer.flush();
 }
 
+/// Wraps a stream so that would-block is reported the way a real O_NONBLOCK
+/// FdStream reports it — Busy on EAGAIN — instead of MemoryPipe's {Ok, 0}. The
+/// bridge must tolerate BOTH, or a healthy real socketpair looks like a fatal error.
+class BusyView final : public IByteStream {
+public:
+    explicit BusyView(IByteStream* inner) noexcept : _inner(inner) {}
+    IoResult read(std::span<std::uint8_t> dst) override
+    {
+        const IoResult r = _inner->read(dst);
+        return (r.status == Status::Ok && r.bytes == 0) ? IoResult{ Status::Busy, 0 } : r;
+    }
+    IoResult write(std::span<const std::uint8_t> src) override
+    {
+        const IoResult r = _inner->write(src);
+        return (r.status == Status::Ok && r.bytes == 0) ? IoResult{ Status::Busy, 0 } : r;
+    }
+    void close() override { _inner->close(); }
+    bool isOpen() const noexcept override { return _inner->isOpen(); }
+private:
+    IByteStream* _inner;
+};
+
 // --- the rig -----------------------------------------------------------------
 
 ImporterDataPlane::Config planeCfg()
@@ -557,6 +579,39 @@ void testIsoRefusal()
     }
 }
 
+void testBusyConvention()
+{
+    std::printf("the bridge tolerates the FdStream would-block convention (Busy, not {Ok,0})\n");
+
+    TEST_CASE("a forward round trip works over a Busy-reporting kernel stream") {
+        ScriptedDevice proto;
+        MemoryPipe kpipe, npipe;
+        auto kInner = kpipe.endpointA();
+        auto kSim   = kpipe.endpointB();
+        BusyView kBusy(kInner.get());          // the bridge sees Busy on would-block
+        RecordLayer planeLink(npipe.endpointA(), std::make_unique<NullCipher>());
+        RecordLayer peerLink(npipe.endpointB(), std::make_unique<NullCipher>());
+        planeLink.setHandshakeComplete(wire::kRecordBytesDefault);
+        peerLink.setHandshakeComplete(wire::kRecordBytesDefault);
+        ManualClock clock{1000};
+        ImporterDataPlane plane(&planeLink, &clock, planeCfg());
+        VhciNetBridge bridge(kBusy, plane, proto.manifest(), clock, VhciNetBridge::Config{});
+
+        kSubmit(*kSim, 1, 0, kDirIn, 1, kGetMaxLun);
+        CHECK(bridge.poll() == Status::Ok);    // Busy on the empty read must NOT be fatal
+        Header h; SubmitBody sb;
+        CHECK(peerReadSubmit(peerLink, h, sb));
+        const std::uint8_t lun[1] = { 0x00 };
+        peerComplete(peerLink, h.channel, h.requestId, 0, sb.xferType, kDirIn, 1, lun);
+        CHECK(bridge.poll() == Status::Ok);
+        UsbipPdu ret; std::vector<std::uint8_t> pl;
+        CHECK(kReadPdu(*kSim, ret, pl, true));
+        CHECK_EQ(ret.seqnum, 1u);
+        CHECK_EQ(ret.status, 0);
+        CHECK_EQ(pl.size(), std::size_t{1});
+    }
+}
+
 } // namespace
 
 int main()
@@ -570,5 +625,6 @@ int main()
     testSetConfiguration();
     testFatalDrainTeardown();
     testIsoRefusal();
+    testBusyConvention();
     TEST_MAIN_END();
 }
