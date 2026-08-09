@@ -95,6 +95,24 @@ needs XPC audit tokens plus a code requirement on macOS, polkit on Linux, and an
 Authenticode check on Windows. The header says so plainly rather than implying
 more; see §3.16.
 
+### No binaries are distributed, and that is a decision — 2026-08-09
+
+CI builds for Windows on every commit and **publishes nothing**. The three
+GitHub releases that carried `.exe` assets have had those assets withdrawn; the
+tags and their notes stay, because they are the project's history and deleting
+history to tidy a shelf is a different thing from taking a product off it.
+
+The reason is not caution for its own sake. `airusb.sys` has never been loaded.
+Every hardware claim in this repository rests on one SuperSpeed BOT flash drive
+on a clean LAN. Somebody who downloads a build from a green tick has no way to
+learn either of those facts, and this project's whole discipline is that a claim
+travels with its evidence.
+
+Building it is two lines (§6), and `scripts/cross-build-windows.sh` produces the
+Windows binaries from a Mac or a Linux box. When there is something worth
+running, publishing comes back with a release note that says what it does and
+does not do.
+
 ### Apple entitlement — LOWEST PRIORITY now, RECORD ONLY (human-only action)
 
 **Do not prioritize this. Apple will not grant it for a while, and everything that
@@ -1395,7 +1413,8 @@ at a drive.
 **Concretely, once §4.1 lands:**
 
 ```powershell
-# Windows (the exporter). Use the v0.2.1 release binary or a fresh CI artifact.
+# Windows (the exporter). Build it there, or cross-build it — CI no longer
+# publishes binaries and the old release assets have been withdrawn.
 .\airusb-net-msvc-x64.exe serve --port 7714
 ```
 ```bash
@@ -1807,8 +1826,11 @@ poc/           p0-probe (entitlement matrix), p1-capture-test
                that must SEGMENT; Linux under ASan; macOS; the MinGW
                cross-build. Both the Windows and Linux jobs also start TWO
                hub daemons, pair them, and require a device to be read
-               through the control API. Green on every commit; the Windows
-               binaries are published as artifacts.
+               through the control API. A third Linux job drives the BROKER
+               and asserts the window shows the machine's identity. Green on
+               every commit, and it publishes NOTHING: the binaries are built
+               and checked, never uploaded, because the project is not
+               finished and a downloadable build is an invitation to run it.
 ```
 
 Layer graph, one direction only:

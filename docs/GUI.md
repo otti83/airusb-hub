@@ -187,7 +187,7 @@ difference is measured rather than assumed — these are the DLLs each one impor
 | | size | needs |
 |---|---|---|
 | **MinGW** (`scripts/cross-build-windows.sh`) | 13 MB | `bcrypt` · `kernel32` · `ws2_32` · UCRT — all part of Windows 10 and later. **Nothing to install.** |
-| **MSVC** (the CI artifact) | 347 KB | the above **plus `MSVCP140.dll`, `VCRUNTIME140.dll`, `VCRUNTIME140_1.dll`** — the Visual C++ 2015–2022 x64 redistributable |
+| **MSVC** (built on the Windows box, or by CI without publishing) | 347 KB | the above **plus `MSVCP140.dll`, `VCRUNTIME140.dll`, `VCRUNTIME140_1.dll`** — the Visual C++ 2015–2022 x64 redistributable |
 
 The GMKtec already has that redistributable: it ran an MSVC-built `airusb-net.exe`
 during the two-machine run in `HANDOFF.md` §3.5. On a machine where that is not

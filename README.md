@@ -79,7 +79,14 @@ It prints a local address and opens it:
 Do the same on a second machine, press **Connect**, compare the six digits on
 both screens, and accept. It offers a simulated drive so the whole path works on
 a machine with nothing plugged in; add `airusb-exportd` on a Mac to share real
-hardware. Windows binaries are published by CI on every commit.
+hardware.
+
+**There are no downloadable builds, on purpose.** CI compiles for Windows on
+every commit and does not publish the result: the Windows importer's driver has
+never been loaded, and every hardware claim here rests on one flash drive. A
+binary behind a green tick tells somebody neither of those things. Build it
+yourself with the two lines above, or cross-compile with
+`airusb/scripts/cross-build-windows.sh`.
 
 Started that way, the window says **DIAGNOSTIC ONLY** — it can pair with another
 machine and read a device from it, and it cannot add one to this computer. To

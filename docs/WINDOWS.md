@@ -142,9 +142,14 @@ browser is already installed:
 ```
 
 If you have no toolchain on the Windows machine, you do not need one:
-`airusb-hubd.exe` is statically linked and is published by CI alongside
-`airusb-net.exe` as the `airusb-windows-msvc-x64` artifact, and
-`scripts/cross-build-windows.sh` produces it from a Mac or a Linux box.
+`airusb-hubd.exe` is statically linked, and `scripts/cross-build-windows.sh`
+produces it from a Mac or a Linux box.
+
+**CI no longer publishes it, and that is deliberate** (2026-08-09). It still
+builds it on every commit — that is what proves MSVC accepts the sources — but
+the artifact is gone, because this project is not finished and a downloadable
+binary is an invitation to run it. Copy the one you built; §GUI.md has the
+routes.
 
 The two-machine procedure — where to get the file, the firewall rule, which side
 shares, what to compare — is written out in [`GUI.md`](GUI.md).

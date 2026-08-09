@@ -275,18 +275,28 @@ jobs:
             }
           }
 
-      # Both binaries, not just the client. The window is the half a person
-      # actually uses, and until this line existed the procedure for running it
-      # on Windows pointed at a file that was not produced by anything — not by
-      # CI, not by a release, not by the cross-build script.
-      - name: Publish the binaries MSVC actually produced
-        uses: actions/upload-artifact@v4
-        with:
-          name: airusb-windows-msvc-x64
-          path: |
-            airusb/build/Release/airusb-net.exe
-            airusb/build/Release/airusb-hubd.exe
-          if-no-files-found: error
+      # NO ARTIFACT IS PUBLISHED, deliberately.
+      #
+      # This job used to upload airusb-net.exe and airusb-hubd.exe on every
+      # commit. It no longer does, and the reason is not disk space: this
+      # project is not finished, and a downloadable binary is an invitation to
+      # run it. The Windows importer's driver has never been loaded, the
+      # compatibility envelope is one flash drive, and somebody who fetches a
+      # build from a green tick has no way to know either of those things.
+      #
+      # The BUILD stays — it is what proves MSVC still accepts the sources and
+      # that the suites pass natively. What stops is handing the result to
+      # people. When there is something worth running, this is where it comes
+      # back, with a release note that says what it does and does not do.
+      - name: Confirm the binaries exist without publishing them
+        shell: pwsh
+        run: |
+          foreach ($f in @('airusb\build\Release\airusb-net.exe',
+                           'airusb\build\Release\airusb-hubd.exe')) {
+            if (-not (Test-Path $f)) { throw "MSVC did not produce $f" }
+            $len = (Get-Item $f).Length
+            Write-Host ("{0}  {1:N0} bytes" -f $f, $len)
+          }
 
   # ---------------------------------------------------------------------------
   # Linux, with AddressSanitizer.
@@ -569,10 +579,14 @@ jobs:
         env:
           MINGW_CXX: x86_64-w64-mingw32-g++-posix
         run: ./scripts/cross-build-windows.sh
-      - uses: actions/upload-artifact@v4
-        with:
-          name: airusb-windows-mingw-x64
-          path: |
-            airusb/build-win/airusb-net.exe
-            airusb/build-win/airusb-hubd.exe
-          if-no-files-found: error
+      # Built, checked, and NOT published — see the MSVC job for why. The
+      # cross-build's value is that it keeps the Windows target compiling from
+      # a Linux runner; it is not a distribution channel.
+      - name: Confirm the cross-build produced binaries without publishing them
+        run: |
+          set -eu
+          for f in airusb/build-win/airusb-net.exe airusb/build-win/airusb-hubd.exe \
+                   airusb/build-win/airusb-brokerd.exe; do
+            [ -s "$f" ] || { echo "the cross-build did not produce $f"; exit 1; }
+            printf '%s  %s bytes\n' "$f" "$(stat -c%s "$f")"
+          done
