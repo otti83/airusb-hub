@@ -857,7 +857,21 @@ SEGMENTATION out=2 in=2 contRecords=14 maxSegment=16552 fired=yes
 ```
 
 Re-read afterwards: `bootsig=55AA`, the same sixteen boot bytes, the same
-capacity. The medium is byte-for-byte where it started.
+capacity. Releasing the capture (SIGINT to the agent — Ctrl-C's equivalent, and
+the assistant CAN send it because the agent runs as the console user) returned
+the drive to macOS as `/dev/disk22`, the same identifier as before, remounted at
+`/Volumes/Memory 32GB` with its files intact.
+
+**And the write went somewhere the code claimed it would not.** That drive's
+partition starts at **LBA 128**, so absolute LBA 1024 is 896 sectors INSIDE the
+exFAT filesystem — not the free space the caller's comment promised ("damages
+free space rather than the map of where everything is"). The restore worked and
+the volume mounted clean, so nothing was lost; the comment was still wrong, and
+is now corrected in both `tools/airusb_net_main.cpp` and `diag/WriteProbe.h`.
+The offset was NOT raised, because there is no safe one: past the metadata is
+user data. What makes the instrument safe to keep is that it is a separate type
+from `BotProbe` with a method called `runDestructiveWriteTest`, not a hopeful
+choice of sector.
 
 That is the whole product, minus only the Apple-blocked macOS importer: a real
 drive taken from macOS, carried over an authenticated encrypted session,

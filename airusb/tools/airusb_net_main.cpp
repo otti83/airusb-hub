@@ -315,9 +315,18 @@ int runConnect(const std::string& host, std::uint16_t port, bool probe, bool wri
 
         diag::WriteProbe::Options wopt;
         wopt.blockSize = r.blockSize ? r.blockSize : 512;
-        // Well past the end of anything a partition table lives in, so an
-        // accident against a real disk damages free space rather than the map of
-        // where everything is. It is still an accident; the flag is the guard.
+        // LBA 1024 clears the partition TABLE and nothing else. This used to
+        // claim it was "well past" anything structural, so an accident would
+        // "damage free space rather than the map of where everything is" —
+        // measured against a real 32 GB stick on 2026-08-09, that is false. Its
+        // partition begins at LBA 128, so LBA 1024 is 896 sectors INSIDE the
+        // filesystem, where exFAT keeps its allocation bitmap and FAT.
+        //
+        // The number is not raised, because there is no offset that is safe on
+        // an unknown medium: past the metadata is user data, and a bigger
+        // number only changes whose bytes are lost. The guard is the flag and
+        // the fact that this instrument is a separate type with a method called
+        // runDestructiveWriteTest — not a hopeful choice of sector.
         wopt.startLba  = 1024;
 
         const diag::WriteProbeResult wr = wp.runDestructiveWriteTest(wopt);

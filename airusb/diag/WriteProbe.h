@@ -34,6 +34,14 @@
 // It restores what it overwrote, best effort, but a probe that is interrupted
 // mid-run cannot. That is the nature of the thing; do not point it at anything
 // you care about.
+//
+// AND THERE IS NO SAFE `startLba`. The caller in tools/ used to say 1024 was
+// far enough out to hit free space rather than anything structural; measured
+// against a real 32 GB stick, that drive's partition starts at LBA 128, so
+// 1024 lands 896 sectors inside its exFAT metadata. Every offset is inside
+// something on some medium. What makes this instrument safe to have in the tree
+// is that it is a separate type from BotProbe with a method whose name says
+// what it does — not the number.
 
 #ifndef AIRUSB_DIAG_WRITEPROBE_H
 #define AIRUSB_DIAG_WRITEPROBE_H
