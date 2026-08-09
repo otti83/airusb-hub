@@ -288,4 +288,10 @@ identities.
 | two daemons pair and read a device, Windows | CI, MSVC 19.51, PowerShell |
 | macOS ↔ Linux over a real network, both directions | run by hand 2026-08-09, `HANDOFF.md` §3.9 |
 | the hub speaks the same protocol as `airusb-net` | both directions, 2026-08-09, including a segmented 128 KiB write |
-| macOS ↔ Windows, two machines | **not yet run with the hub** — the procedure above is what runs it |
+| **macOS ↔ Windows, two machines** | **PASS 2026-08-09** — SAS compared by a person on both screens, attach, `BotProbe PASS 61440 × 512`, rtt 28.3 ms; then a segmented 128 KiB write, `fired=yes`, three times running |
+
+That last row cost two real bugs to earn, and both were invisible on loopback:
+a socket that never fills never strands a tail, and a device that is only ever
+used once is never handed on mid-phase. `HANDOFF.md` §3.4 and §3.9 have the
+details. It is the argument for running the two-machine case rather than
+trusting the matrix.

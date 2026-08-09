@@ -25,7 +25,7 @@ records this line).
 | Session layer, L1 protocol, manifest | **done** |
 | Networking | **done** — real TCP; macOS↔macOS, macOS↔Linux, **Windows↔macOS on two machines** |
 | Windows client | **done, and re-verified against the CURRENT tree** — MSVC 19.51, 24/24 native, full BOT exchange **with segmentation actually firing** (§3.4) |
-| **The product's window** | **done, and it is the same window on three OSes** — `airusb-hubd`, a loopback control plane and one embedded page. Pairing, attach, verification. §3.9, `GUI.md` |
+| **The product's window** | **done, and proven on two real machines** — `airusb-hubd` on the GMKtec and this Mac paired with a human comparing the six digits, then read a device; §3.9, `GUI.md` |
 | **Receiving on Linux** | **WORKS on real hardware, over the network** — a real 058f:6387 drive captured on the Mac (`airusb-exportd --serve`) mounted on the Linux kernel via `airusb-vhci --host`, read-only, real files read; clean teardown (full L6 + L8 PASS, `LINUX_IMPORTER_PLAN.md` §7) |
 | Receiving on a Mac | **blocked on Apple** — FB24214361, §2 |
 | Receiving on Windows | UdeCx driver not written. **Not blocked by anyone** |
@@ -68,25 +68,19 @@ the two-machine procedure: **`GUI.md`**. Evidence: §3.9.
 
 In order, and none of it waits on Apple:
 
-1. **Two machines, macOS ↔ Windows, with the hub.** Everything else about the hub
-   is verified; this one cannot be, from here — the Windows box has RDP and
-   nothing else. The procedure is written out and ready to paste in `GUI.md`
-   ("Two machines, macOS and Windows"). Measured 2026-08-09: the Mac reaches
-   `192.168.0.109` in ~28 ms via the Tailscale subnet router on `utun8`, and
-   Windows still has no route back — so **Windows shares and the Mac imports**,
-   the same direction §3.5 had to use.
+1. **The hub against real hardware.** The last unverified cell that needs no new
+   code. `airusb-exportd --serve` already speaks this protocol, so a real
+   captured drive can be read through the window today — it needs `sudo` on the
+   Mac, which the assistant does not have. Two commands; see §3.9.
 
-   **Getting the binary onto that machine is step 0 and it used to be missing.**
-   `airusb-hubd.exe` was produced by nothing: not CI, not a release, not the
-   cross-build script — so the first version of this procedure told the user to
-   run a file that did not exist. Now `scripts/cross-build-windows.sh` builds it
-   (statically linked PE32+, ~13 MB, no runtime to install) and both CI jobs
-   publish it as `airusb-windows-msvc-x64` / `airusb-windows-mingw-x64`. SMB
-   (445) and RDP (3389) both answer on that box, measured, so copying it there
-   is a question of credentials rather than of route — and credentials are the
-   user's to supply. **No release asset has been published**; if a plain
-   no-login URL would be easier, that is a deliberate publishing step and needs
-   asking for.
+   (macOS ↔ Windows with the hub is **done** — §3.9. The binary question that
+   blocked it is also settled: `scripts/cross-build-windows.sh` now produces
+   `airusb-hubd.exe`, and both CI jobs publish it as
+   `airusb-windows-msvc-x64` / `airusb-windows-mingw-x64`. Before that it was
+   produced by nothing at all, and the procedure told the user to run a file
+   that did not exist. **No release asset has been published**; if a plain
+   no-login download URL would be easier, that is a deliberate publishing step
+   and needs asking for.)
 2. **The hub against real hardware.** `airusb-exportd --serve` already speaks this
    exact protocol, so pointing the hub's importer at a real captured drive needs
    no new code — only `sudo` on the Mac, which the assistant does not have. One
@@ -505,11 +499,39 @@ overlays on the wire, and no order-of-evaluation hazards.
   same alignment, nothing to mute), and the expected C4018/C4389 signed-unsigned
   noise never materialised. `/wd4018 /wd4389` is therefore NOT needed.
 
-**Residual risk the audit could not settle:** MSVC's optimizer is not modelled by
-either available compiler, and `RecordLayer::flush` returns `Ok` on a would-block
-short write without any caller re-flushing — unreachable at the current 16 KB
-record ceiling and ≤2 KB transfers, but the first thing to suspect if record
-sizes ever grow toward the 65519 ceiling.
+**Residual risk the audit could not settle — the flush half HAPPENED, and is
+fixed (2026-08-09). Read this one; it is the best evidence in the file that
+writing a risk down is worth the minute it costs.** The paragraph used to say:
+
+> `RecordLayer::flush` returns `Ok` on a would-block short write without any
+> caller re-flushing — unreachable at the current 16 KB record ceiling and
+> ≤2 KB transfers, but the first thing to suspect if record sizes ever grow
+> toward the 65519 ceiling.
+
+This session raised the largest transfer to 128 KiB and then ran it between two
+machines ~28 ms apart, which is exactly the named condition. It failed on the
+first attempt. The exporter sends eight records, the socket fills, `flush()`
+buffers the remainder and reports `Ok` — correct, a short write is not an error
+— and every record except the last is pushed along by the next `sendRecord()`.
+The last one has nothing behind it, and `pump()` only ever read. Evidence, from
+the failing run itself: `SEGMENTATION out=0 in=1 contRecords=3` — three
+continuations out of eight, then silence.
+
+Fixed: `ExporterSession::pump()` drains before it reads, and the two synchronous
+senders (`RemoteDevicePort::submit`, `ImporterClient::call`) flush to empty
+before blocking for a reply — waiting for an answer to a request still in your
+own send buffer is a deadlock you hold both ends of. `pendingTxBytes()` existed
+the whole time and had exactly one caller outside a test (the Linux vhci loop),
+which is why only that path was safe.
+
+**Why no test caught it, and what changed:** `MemoryPipe` was unbounded, so
+`flush()` always completed and the buffered tail could not exist.
+`MemoryPipe::setCapacity()` now makes a pipe fill like a socket, and
+`test_l5_segmentation` drives a 120 KiB reply through 8 KiB of capacity.
+Verified to bite: 207 checks / 3 failures without the fix, 0 with.
+
+**Still unsettled:** MSVC's optimizer is not modelled by either available
+compiler.
 
 **The Windows machine:** `192.168.0.225`, reachable, **RDP 3389 open, SSH closed**.
 The assistant cannot run anything there; every Windows step must be handed to the
@@ -773,8 +795,38 @@ both orders over real TCP on all three platforms.
   indistinguishable from one that has gone away, and the pairing heartbeat has to
   tell those apart.
 
-**Not yet done with the hub:** the two-machine macOS ↔ Windows run (§5 — needs the
-user), and pointing it at real hardware. The second needs no code:
+**macOS ↔ Windows, two machines, with the hub — PASS, 2026-08-09.** The GMKtec ran
+`airusb-hubd.exe --share --share-port 7714` (the MinGW cross-build, its first
+execution anywhere), the Mac imported over the Tailscale subnet router, and both
+windows named each other exactly:
+
+```
+GMKtec  SN6AJTQJ HVZA33NS S22XH5N7 OB347LE5      SAS 052861 on BOTH screens
+Mac     NRPWP5HX 2JI6HVGZ 4I7Q4K2A 7CRBNIKQ      (a human compared them)
+importer accepted first, exporter second -> reconnect -> paired, new SAS 450218
+attach -> BotProbe PASS, 61440 x 512, rtt 28.3 ms
+  SHORT_READ_FIDELITY ok — offered 1024, device sent 512, short read preserved
+```
+
+**And the run that found the bugs.** A 128 KiB write across the same link,
+before the fixes: `verdict=FAIL outTransfers=0`, `SEGMENTATION out=0 in=1
+contRecords=3`; and the NEXT attach could not get past `TEST_UNIT_READY`,
+because the simulated device was still in the phase the failed run had abandoned
+(§3.4, and `SimulatedDeviceSource` now resets on claim). After both fixes, three
+consecutive runs:
+
+```
+verdict=PASS  outTransfers=5 largestOut=131072 bytesWritten=281088 mismatched=0 restored=yes
+SEGMENTATION out=2 in=2 contRecords=14 maxSegment=16552 largestOut=131072 fired=yes
+RESULT=PASS
+```
+
+Fourteen continuation records, twice eight-record transfers. That is the
+segmentation path proven between two operating systems on a real network, which
+is the strongest evidence for it anywhere in this project — loopback never fills
+a socket, and that is precisely why loopback never found this.
+
+**Not yet done with the hub:** pointing it at real hardware. It needs no code:
 `airusb-exportd --serve` speaks this protocol already, so
 `sudo ./build/airusb-exportd --device 058f:6387 --serve --port 7714` plus
 `./build/airusb-agent` on the Mac, and Connect from any hub, reads a real drive
