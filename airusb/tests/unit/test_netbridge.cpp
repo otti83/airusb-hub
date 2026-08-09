@@ -455,6 +455,91 @@ void testSetConfiguration()
         CHECK_EQ(ret2.seqnum, 12u);
         CHECK_EQ(ret2.status, -kEPipe);                 // we cannot reconfigure a remote device
     }
+
+    // CLEAR_FEATURE(ENDPOINT_HALT, ep) — standard, host->device, no data.
+    auto clearHalt = [](std::uint8_t ep) {
+        std::array<std::uint8_t, 8> s{ 0x02, 0x01, 0x00, 0x00, ep, 0x00, 0, 0 };
+        return s;
+    };
+
+    TEST_CASE("CLEAR_HALT is forwarded as a verb and answered on the acknowledgement") {
+        // This used to be refused outright, with a note that a clean read-only
+        // mount never reaches it. True, and beside the point: a stall is the
+        // ordinary way a mass-storage device reports a bad command, and BOT
+        // recovery is a class reset plus clearing both bulk halts. Refusing it
+        // turned one recoverable error into a device unusable until unplugged.
+        Rig r;
+        const auto ch = clearHalt(0x81);
+        kSubmit(*r.kSim, 21, 0, kDirOut, 0, ch.data());
+        CHECK(r.bridge.poll() == Status::Ok);
+
+        // It reaches the wire as the EP_CLEAR_HALT VERB — not a forwarded
+        // CLEAR_FEATURE. The exporter's clearHalt also resets its own host
+        // controller's data toggle; a raw forward leaves that wrong and every
+        // later transfer on the endpoint silently misbehaves.
+        std::vector<std::uint8_t> rec;
+        CHECK(r.peerLink.receiveRecord(rec) == Status::Ok);
+        CHECK(!rec.empty());
+        Header vh;
+        CHECK(decodeHeader(rec, vh));
+        CHECK_EQ(static_cast<int>(vh.type), static_cast<int>(wire::Type::EpClearHalt));
+        CHECK_EQ(static_cast<int>(vh.channel & 0xFF), 0x81);
+
+        // And the kernel is NOT answered yet. Telling the guest the halt is
+        // cleared before the device agrees is how the next transfer goes out
+        // onto an endpoint that is still stalled.
+        UsbipPdu early; std::vector<std::uint8_t> ep;
+        CHECK(!kReadPdu(*r.kSim, early, ep, false));
+
+        // The acknowledgement arrives; now it is answered, with success.
+        Header ack;
+        ack.type      = static_cast<std::uint8_t>(wire::Type::CtrlAck);
+        ack.flags     = wire::kFlagSegFirst;
+        ack.channel   = vh.channel;
+        ack.attachId  = vh.attachId;
+        ack.requestId = vh.requestId;
+        ack.status    = static_cast<std::uint16_t>(Status::Ok);
+        std::vector<std::uint8_t> ackRec;
+        encodeHeader(ack, ackRec);
+        CHECK(r.peerLink.sendRecord(ackRec) == Status::Ok);
+        (void)r.peerLink.flush();
+
+        CHECK(r.bridge.poll() == Status::Ok);
+        UsbipPdu done; std::vector<std::uint8_t> dpl;
+        CHECK(kReadPdu(*r.kSim, done, dpl, false));
+        CHECK_EQ(done.seqnum, 21u);
+        CHECK_EQ(done.status, 0);
+    }
+
+    TEST_CASE("a CLEAR_HALT the exporter refuses is reported, not claimed as success") {
+        Rig r;
+        const auto ch = clearHalt(0x02);
+        kSubmit(*r.kSim, 22, 0, kDirOut, 0, ch.data());
+        CHECK(r.bridge.poll() == Status::Ok);
+
+        std::vector<std::uint8_t> rec;
+        CHECK(r.peerLink.receiveRecord(rec) == Status::Ok);
+        Header vh;
+        CHECK(decodeHeader(rec, vh));
+
+        Header ack;
+        ack.type      = static_cast<std::uint8_t>(wire::Type::CtrlAck);
+        ack.flags     = wire::kFlagSegFirst;
+        ack.channel   = vh.channel;
+        ack.attachId  = vh.attachId;
+        ack.requestId = vh.requestId;
+        ack.status    = static_cast<std::uint16_t>(Status::XferStall);
+        std::vector<std::uint8_t> ackRec;
+        encodeHeader(ack, ackRec);
+        CHECK(r.peerLink.sendRecord(ackRec) == Status::Ok);
+        (void)r.peerLink.flush();
+
+        CHECK(r.bridge.poll() == Status::Ok);
+        UsbipPdu done; std::vector<std::uint8_t> dpl;
+        CHECK(kReadPdu(*r.kSim, done, dpl, false));
+        CHECK_EQ(done.seqnum, 22u);
+        CHECK_EQ(done.status, -kEPipe);   // the guest escalates to a port reset
+    }
 }
 
 void testFatalDrainTeardown()

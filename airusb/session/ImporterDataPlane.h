@@ -61,9 +61,20 @@ struct DataCompletion {
     std::span<const std::uint8_t> data;
 };
 
+/// A verb's outcome. Verbs are not transfers: they carry no data, they are not
+/// admitted against the transfer depth, and their reply is a CTRL_ACK rather
+/// than a COMPLETE.
+struct VerbCompletion {
+    std::uint16_t channel   = 0;
+    std::uint64_t requestId = 0;
+    std::uint8_t  epAddr    = 0;
+    Status        status    = Status::Ok;
+};
+
 class ImporterDataPlane {
 public:
     using OnComplete = std::function<void(const DataCompletion&)>;
+    using OnVerb     = std::function<void(const VerbCompletion&)>;
 
     struct Config {
         std::uint32_t attachId         = 0;
@@ -91,15 +102,38 @@ public:
                   std::span<const std::uint8_t> dataOut, std::uint32_t timeoutMs,
                   std::uint16_t* channelOut, std::uint64_t* requestIdOut);
 
+    /// EP_CLEAR_HALT, asynchronously.
+    ///
+    /// A VERB, not a forwarded CLEAR_FEATURE. The exporter's `clearHalt` clears
+    /// the device's stall AND the exporter host controller's data toggle; a raw
+    /// forward clears only the first and leaves every later transfer on that
+    /// endpoint silently wrong.
+    ///
+    /// It has to be asynchronous for the same reason everything else here does:
+    /// a stall is answered by the guest's driver immediately, and a bridge that
+    /// blocked on a LAN round trip to clear it would hold the kernel's endpoint
+    /// callback across the network.
+    ///
+    /// The reply is a CTRL_ACK, and it is dispatched HERE — which is what makes
+    /// the old hazard unreachable. When `clearHalt` was fire-and-forget its
+    /// acknowledgement was left in the stream for whatever read next to
+    /// mistake for its own COMPLETE, and a stall recovery is always followed
+    /// immediately by a transfer, so the misread was the common case rather
+    /// than a rare one.
+    Status clearHalt(std::uint8_t epAddr, std::uint16_t* channelOut,
+                     std::uint64_t* requestIdOut);
+
+    std::size_t verbsOutstanding() const noexcept { return _verbs.size(); }
+
     /// Non-blocking. Flushes buffered tx, drains every record available RIGHT NOW,
     /// and fires `onComplete` once per finished transfer. Returns Ok when the input
     /// is momentarily drained, or a fatal status if the link died (the caller then
     /// completes the rest with `completeAll`). NEVER blocks on I/O.
-    Status pump(const OnComplete& onComplete);
+    Status pump(const OnComplete& onComplete, const OnVerb& onVerb = {});
 
     /// R-C: completes locally, with XferTimeout, every transfer whose deadline has
     /// passed. The kernel has no timeout of its own; ours is the only one.
-    void sweepDeadlines(const OnComplete& onComplete);
+    void sweepDeadlines(const OnComplete& onComplete, const OnVerb& onVerb = {});
 
     /// Drops one outstanding transfer locally WITHOUT firing a completion — used
     /// when the kernel unlinks a URB, whose terminal outcome is the RET_UNLINK the
@@ -110,7 +144,8 @@ public:
     /// Completes EVERY outstanding transfer locally with `with` (teardown / device
     /// gone), so I1 holds when the link dies: no URB is left for the kernel to wait
     /// on forever.
-    void completeAll(Status with, const OnComplete& onComplete);
+    void completeAll(Status with, const OnComplete& onComplete,
+                     const OnVerb& onVerb = {});
 
     /// Diagnostics.
     std::size_t pendingReplies() const noexcept { return _pendingReply.size(); }
@@ -126,6 +161,17 @@ private:
         std::uint32_t actualLen = 0;
         bool          shortXfer = false;
     };
+
+    /// A verb awaiting its CTRL_ACK. Kept out of `RequestTable` on purpose: that
+    /// table is the transfer admission accounting, and a verb that consumed a
+    /// slot would let a stall recovery be blocked by the very transfers it
+    /// exists to unblock.
+    struct PendingVerb {
+        std::uint8_t epAddr     = 0;
+        ContinuousNs deadlineNs = 0;
+    };
+
+    Status handleCtrlAck(const protocol::Header& h, const OnVerb& onVerb);
 
     Status handleComplete(const protocol::Header& h,
                           const std::vector<std::uint8_t>& rec,
@@ -144,6 +190,8 @@ private:
     RequestTable            _table;
     protocol::Reassembler   _reasm;
     std::map<ReplyKey, PendingReply> _pendingReply;
+    std::map<ReplyKey, PendingVerb>  _verbs;
+    std::uint64_t                    _nextVerbId = 1;
 };
 
 } // namespace airusb::session

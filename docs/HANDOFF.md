@@ -1193,11 +1193,33 @@ offers a simulated device source. "Attach" in the window and "attach" in the
 product are different verbs. This is stated in `GUI.md` but the architecture
 needs a privileged broker the window drives.
 
-**3. Linux cannot recover from a stall.** `VhciNetBridge` STALLS
-`EP_CLEAR_HALT` rather than forwarding it, so one endpoint halt makes a real
-mass-storage device permanently unusable — BOT recovery needs a class reset plus
-clearing both bulk halts. `DeviceReset` is defined in `Wire.h` and advertised by
-the exporter with no handler behind it, which is worse than not advertising it.
+**3. Linux could not recover from a stall — FIXED, 2026-08-09.**
+`VhciNetBridge` used to STALL `EP_CLEAR_HALT` with a note that a clean read-only
+mount never reaches it. True, and beside the point: a stall is the ordinary way
+a mass-storage device reports a bad command, so refusing the clear turned one
+recoverable error into a device unusable until unplugged.
+
+`ImporterDataPlane` now has a VERB path — `clearHalt()` sends `EP_CLEAR_HALT`
+and the reply is a `CTRL_ACK` dispatched by the plane itself. That is what makes
+the hazard §7 warns about structurally unreachable: fire-and-forget used to
+leave the acknowledgement in the stream for the next read to mistake for its own
+COMPLETE, and a stall recovery is always followed immediately by a transfer, so
+the misread was the common case. Verbs are kept out of `RequestTable` on purpose
+— a verb consuming an admission slot would let a stall recovery be blocked by
+the very transfers it exists to unblock — and they carry T_net_ctrl rather than
+the URB ceiling, so a dead exporter costs five seconds and an honest failure
+rather than thirty and a held-open endpoint callback.
+
+The kernel's request is parked until the acknowledgement lands and is NOT
+answered optimistically: claiming the halt is cleared before the device agrees
+is how the next transfer goes out onto an endpoint that is still stalled. A
+refusal is reported as `-EPIPE` so the guest escalates to a port reset, which it
+handles natively.
+
+**Still open in this area:** `DeviceReset` is defined in `Wire.h` and advertised
+by the exporter with no handler behind it, which is worse than not advertising
+it. Full BOT recovery is a class reset plus clearing BOTH bulk halts; the clear
+is now there and the class reset is not.
 
 **4. The exporter is synchronous, which is wrong for interrupt endpoints.**
 `ExporterSession` performs the device transfer inline. An interrupt IN that

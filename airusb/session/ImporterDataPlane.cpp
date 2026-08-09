@@ -1,5 +1,7 @@
 #include "ImporterDataPlane.h"
 
+#include "../core/Watchdog.h"
+
 #include "../protocol/Codec.h"
 #include "../protocol/Validate.h"
 
@@ -92,7 +94,70 @@ Status ImporterDataPlane::submit(std::uint8_t epAddr, std::uint8_t xferType, std
     return Status::Ok;
 }
 
-Status ImporterDataPlane::pump(const OnComplete& onComplete)
+Status ImporterDataPlane::clearHalt(std::uint8_t epAddr, std::uint16_t* channelOut,
+                                    std::uint64_t* requestIdOut)
+{
+    if (channelOut)   *channelOut = 0;
+    if (requestIdOut) *requestIdOut = 0;
+    if (!_link) return Status::TransportLost;
+
+    // The endpoint address is the low byte of the derived channel (§3.4), so
+    // the verb carries no body: the exporter reads the endpoint out of the
+    // channel it arrived on.
+    const std::uint16_t channel = wire::channelFor(_cfg.attachSlot, epAddr);
+    const std::uint64_t rid     = _nextVerbId++;
+
+    Header h;
+    h.type      = static_cast<std::uint8_t>(wire::Type::EpClearHalt);
+    h.flags     = wire::kFlagSegFirst;
+    h.channel   = channel;
+    h.attachId  = _cfg.attachId;
+    h.requestId = rid;
+    h.bodyLen   = 0;
+    h.totalLen  = 0;
+
+    std::vector<std::uint8_t> rec;
+    encodeHeader(h, rec);
+    if (const Status s = _link->sendRecord(rec); s != Status::Ok) return s;
+    (void)_link->flush();   // non-blocking; a full socket buffers, R-B
+
+    PendingVerb v;
+    v.epAddr = epAddr;
+    // T_net_ctrl, not the URB ceiling: this is a control-plane exchange with
+    // the exporter, not a transfer with a device. If it does not answer, the
+    // endpoint stays halted and the guest is told so — which is recoverable —
+    // rather than the bridge waiting on it for thirty seconds.
+    v.deadlineNs = _clock ? _clock->nowNs() +
+                            static_cast<ContinuousNs>(watchdog::kNetCtrl) * 1'000'000ull
+                          : 0;
+    _verbs[ReplyKey{channel, rid}] = v;
+
+    if (channelOut)   *channelOut = channel;
+    if (requestIdOut) *requestIdOut = rid;
+    return Status::Ok;
+}
+
+Status ImporterDataPlane::handleCtrlAck(const Header& h, const OnVerb& onVerb)
+{
+    const ReplyKey key{h.channel, h.requestId};
+    const auto it = _verbs.find(key);
+    if (it == _verbs.end()) {
+        // A CTRL_ACK for a verb we are not waiting on. Late after a timeout, or
+        // a stale attach's. Dropped, not fatal — R12's rule, and the same
+        // reasoning as a late transfer completion.
+        return Status::Ok;
+    }
+    VerbCompletion vc;
+    vc.channel   = h.channel;
+    vc.requestId = h.requestId;
+    vc.epAddr    = it->second.epAddr;
+    vc.status    = static_cast<Status>(h.status);
+    _verbs.erase(it);
+    if (onVerb) onVerb(vc);
+    return Status::Ok;
+}
+
+Status ImporterDataPlane::pump(const OnComplete& onComplete, const OnVerb& onVerb)
 {
     if (!_link) return Status::TransportLost;
     (void)_link->flush();   // push whatever is buffered, non-blocking
@@ -115,8 +180,11 @@ Status ImporterDataPlane::pump(const OnComplete& onComplete)
             case wire::Type::Data:
                 if (const Status s = handleData(h, in, onComplete); s != Status::Ok) return s;
                 break;
+            case wire::Type::CtrlAck:
+                if (const Status s = handleCtrlAck(h, onVerb); s != Status::Ok) return s;
+                break;
             case wire::Type::Error:
-                // We only ever send SUBMIT and DATA, both supported, so a
+                // We send SUBMIT, DATA and EP_CLEAR_HALT, all supported, so a
                 // protocol-level ERROR means the session is broken. Surface it as
                 // fatal; the caller then drains with completeAll() so I1 holds.
                 return static_cast<Status>(h.status) == Status::Ok
@@ -244,13 +312,34 @@ Status ImporterDataPlane::handleData(const Header& h, const std::vector<std::uin
     return Status::Ok;
 }
 
-void ImporterDataPlane::sweepDeadlines(const OnComplete& onComplete)
+void ImporterDataPlane::sweepDeadlines(const OnComplete& onComplete, const OnVerb& onVerb)
 {
     for (const OutstandingRequest& req : _table.expired()) {
         // A reply that had partially arrived is discarded: the transfer is over.
         _pendingReply.erase(ReplyKey{req.channel, req.requestId});
         _reasm.forget(req.channel, req.requestId);
         deliver(req, Status::XferTimeout, 0, false, {}, onComplete);
+    }
+
+    // Verbs have their own, shorter deadline. A stall recovery that never gets
+    // its acknowledgement must be reported, not waited on: the guest is told
+    // the clear failed, which it can act on, instead of the bridge holding an
+    // endpoint callback open across a dead network.
+    if (_clock) {
+        const ContinuousNs now = _clock->nowNs();
+        for (auto it = _verbs.begin(); it != _verbs.end();) {
+            if (it->second.deadlineNs != 0 && now >= it->second.deadlineNs) {
+                VerbCompletion vc;
+                vc.channel   = it->first.first;
+                vc.requestId = it->first.second;
+                vc.epAddr    = it->second.epAddr;
+                vc.status    = Status::XferTimeout;
+                it = _verbs.erase(it);
+                if (onVerb) onVerb(vc);
+            } else {
+                ++it;
+            }
+        }
     }
 }
 
@@ -263,13 +352,29 @@ bool ImporterDataPlane::cancel(std::uint16_t channel, std::uint64_t requestId)
     return was;
 }
 
-void ImporterDataPlane::completeAll(Status with, const OnComplete& onComplete)
+void ImporterDataPlane::completeAll(Status with, const OnComplete& onComplete,
+                                    const OnVerb& onVerb)
 {
     const std::vector<OutstandingRequest> drained = _table.takeAttach(_cfg.attachId);
     _pendingReply.clear();
     _reasm.clear();
     for (const OutstandingRequest& req : drained)
         deliver(req, with, 0, false, {}, onComplete);
+
+    // Verbs too, or invariant I1 has a hole in it: a caller waiting on a stall
+    // recovery would never hear anything after a teardown, and an endpoint
+    // callback held open across a dead session is exactly what this design
+    // exists to make impossible.
+    auto verbs = std::move(_verbs);
+    _verbs.clear();
+    for (const auto& [key, v] : verbs) {
+        VerbCompletion vc;
+        vc.channel   = key.first;
+        vc.requestId = key.second;
+        vc.epAddr    = v.epAddr;
+        vc.status    = with;
+        if (onVerb) onVerb(vc);
+    }
 }
 
 void ImporterDataPlane::deliver(const OutstandingRequest& req, Status status,

@@ -126,6 +126,12 @@ private:
 
     void refuseIso(const UsbipPdu& pdu, std::span<const std::uint8_t> isoDescs);
 
+    /// A verb the exporter has not acknowledged yet, and the kernel request
+    /// parked on it. Keyed by the PLANE's (channel, requestId) — the same
+    /// namespace confusion that cost the Windows bridge a working cancel.
+    using VerbRef = std::pair<std::uint16_t, std::uint64_t>;
+    void onVerb(const session::VerbCompletion& v);
+
     Status pumpPlane();
     void   onCompletion(const session::DataCompletion& c);
     void   failAll(Status with);
@@ -154,6 +160,7 @@ private:
     std::map<Ref, UsbipPdu>                _outstanding;   ///< (channel,rid) -> the CMD_SUBMIT
     std::unordered_map<std::uint32_t, Ref> _bySeqnum;      ///< seqnum -> (channel,rid)
     std::deque<Pending>                    _pending;       ///< accepted, not yet on the wire
+    std::map<VerbRef, UsbipPdu>            _verbWaiters;   ///< CLEAR_HALT in flight
 
     VhciBridgeStats _stats;
     Trace           _trace;

@@ -206,10 +206,37 @@ Status VhciNetBridge::onSubmit(const UsbipPdu& pdu, std::span<const std::uint8_t
                     localStatus(pdu, -kEPipe, 0);
                     return Status::Ok;
                 }
-                // v1 narrowing: EP_CLEAR_HALT has no verb path on the async plane
-                // yet. Refuse cleanly rather than fake a clear that leaves the
-                // device's data toggle wrong — a clean read-only mount never
-                // reaches this.
+                // EP_CLEAR_HALT, forwarded as a VERB and answered when the
+                // exporter acknowledges it.
+                //
+                // This used to be refused, with a note that a clean read-only
+                // mount never reaches it. True, and beside the point: a stall
+                // is the ordinary way a mass-storage device reports a bad
+                // command, and BOT recovery is a class reset plus clearing both
+                // bulk halts. Refusing the clear turned one recoverable error
+                // into a device that stays unusable until it is unplugged.
+                //
+                // A verb, not a forwarded CLEAR_FEATURE: the exporter's
+                // clearHalt also resets the exporter host controller's data
+                // toggle, and a raw forward leaves that wrong so every later
+                // transfer on the endpoint silently misbehaves.
+                if (d.verb == Ep0Verb::EpClearHalt) {
+                    const std::uint8_t ep = static_cast<std::uint8_t>(d.arg0 & 0xFFu);
+                    std::uint16_t vch = 0;
+                    std::uint64_t vrid = 0;
+                    if (_plane.clearHalt(ep, &vch, &vrid) != Status::Ok) {
+                        ++_stats.stalled;
+                        localStatus(pdu, -kEPipe, 0);
+                        return Status::Ok;
+                    }
+                    // The kernel's request is parked until the acknowledgement
+                    // lands. It is NOT answered optimistically: telling the
+                    // guest the halt is cleared before the device agrees is how
+                    // the next transfer goes out onto an endpoint that is still
+                    // stalled.
+                    _verbWaiters[VerbRef{vch, vrid}] = pdu;
+                    return Status::Ok;
+                }
                 ++_stats.stalled;
                 localStatus(pdu, -kEPipe, 0);
                 return Status::Ok;
@@ -368,10 +395,31 @@ void VhciNetBridge::doSubmit(const UsbipPdu& pdu, std::uint8_t xferType, std::ui
 // Network completions -> RET_SUBMIT.
 // ---------------------------------------------------------------------------
 
+void VhciNetBridge::onVerb(const session::VerbCompletion& v)
+{
+    const auto it = _verbWaiters.find(VerbRef{v.channel, v.requestId});
+    if (it == _verbWaiters.end()) return;      // late, or already answered
+    const UsbipPdu waiting = it->second;
+    _verbWaiters.erase(it);
+
+    if (v.status == Status::Ok) {
+        ++_stats.answeredLocally;
+        localStatus(waiting, 0, 0);
+    } else {
+        // The clear failed. The guest is told, and can escalate to a port reset
+        // — which is a state it handles natively. Claiming success here would
+        // leave it transferring onto a halted endpoint for ever.
+        ++_stats.stalled;
+        localStatus(waiting, -kEPipe, 0);
+    }
+}
+
 Status VhciNetBridge::pumpPlane()
 {
-    const Status s = _plane.pump([this](const DataCompletion& c) { onCompletion(c); });
-    _plane.sweepDeadlines([this](const DataCompletion& c) { onCompletion(c); });
+    const Status s = _plane.pump([this](const DataCompletion& c) { onCompletion(c); },
+                                 [this](const session::VerbCompletion& v) { onVerb(v); });
+    _plane.sweepDeadlines([this](const DataCompletion& c) { onCompletion(c); },
+                          [this](const session::VerbCompletion& v) { onVerb(v); });
     return s;
 }
 
@@ -392,7 +440,8 @@ void VhciNetBridge::onCompletion(const DataCompletion& c)
 
 void VhciNetBridge::failAll(Status with)
 {
-    _plane.completeAll(with, [this](const DataCompletion& c) { onCompletion(c); });
+    _plane.completeAll(with, [this](const DataCompletion& c) { onCompletion(c); },
+                       [this](const session::VerbCompletion& v) { onVerb(v); });
 
     // completeAll fires onCompletion for every request the plane still held, which
     // retires their seqnums. Anything still mapped here was orphaned — e.g. a
