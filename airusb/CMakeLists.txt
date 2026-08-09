@@ -254,7 +254,10 @@ if(APPLE)
     )
 
     add_executable(airusb-exportd platform/macos/airusb_exportd_main.mm)
-    target_link_libraries(airusb-exportd PRIVATE airusb_macos)
+    # airusb_session for the --serve mode's TCP ExporterSession (the real drive,
+    # over the network, to a remote importer). airusb_macos already brings the
+    # capture (HostDeviceExporter, an IUsbDevicePort); session adds the network.
+    target_link_libraries(airusb-exportd PRIVATE airusb_macos airusb_session)
     target_compile_options(airusb-exportd PRIVATE
         $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>
         $<$<COMPILE_LANGUAGE:OBJCXX>:-Wno-import-preprocessor-directive-pedantic>

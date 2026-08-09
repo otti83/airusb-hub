@@ -16,8 +16,15 @@
 
 #include "HostDeviceExporter.h"
 #include "MacUsbCommon.h"
-#include "../../diag/BotProbe.h"
+#include "../../core/Clock.h"
+#include "../../core/Platform.h"
 #include "../../core/Watchdog.h"
+#include "../../crypto/Identity.h"
+#include "../../diag/BotProbe.h"
+#include "../../session/ExporterSession.h"
+#include "../../session/PeerStore.h"
+#include "../../session/SecureSession.h"
+#include "../../transport/TcpTransport.h"
 
 #import <Foundation/Foundation.h>
 
@@ -41,6 +48,8 @@ void usage(const char* argv0)
         "  --socket PATH        where the agent connects (default /var/run/airusb-exportd.sock)\n"
         "  --agent-wait MS      how long to wait for the agent (default 30000)\n"
         "  --selftest-bot       run the read-only Bulk-Only Transport probe and exit\n"
+        "  --serve [--port N]   after capture, serve the drive over TCP (default 7714)\n"
+        "                       to a remote importer (e.g. Linux airusb-vhci --host)\n"
         "  --hold MS            after the probe, keep the lease this long\n"
         "  --list               enumerate USB devices and exit (read-only, no root needed)\n"
         "\n"
@@ -150,6 +159,157 @@ bool runBotSelfTest(HostDeviceExporter& ex)
     return r.passed;
 }
 
+// ---------------------------------------------------------------------------
+// --serve: the captured drive, over TCP, to a remote importer (e.g. the Linux
+// airusb-vhci --host). The capture and the network are the same two-process split
+// as everywhere else — the daemon owns the IUsbDevicePort, this just runs an
+// ExporterSession over a socket instead of a local BotProbe.
+// ---------------------------------------------------------------------------
+
+crypto::LocalIdentity loadOrCreateIdentity(const std::string& path)
+{
+    crypto::Seed seed{};
+    if (FILE* f = std::fopen(path.c_str(), "rb"); f) {
+        const std::size_t got = std::fread(seed.data(), 1, seed.size(), f);
+        std::fclose(f);
+        if (got == seed.size()) return crypto::LocalIdentity::fromSeed(seed);
+    }
+    crypto::randomBytes(std::span<std::uint8_t>(seed.data(), seed.size()));
+    if (FILE* f = std::fopen(path.c_str(), "wb"); f) {
+        (void)std::fwrite(seed.data(), 1, seed.size(), f);
+        std::fclose(f);
+    }
+    return crypto::LocalIdentity::fromSeed(seed);
+}
+
+/// Presents the ALREADY-captured device (an IUsbDevicePort) to ExporterSession.
+/// release() is a no-op: unclaiming the drive is the daemon's job, in the
+/// documented order (§7.6), not a network session's.
+class CapturedDeviceSource final : public session::IDeviceSource {
+public:
+    explicit CapturedDeviceSource(HostDeviceExporter& ex) : _ex(ex) {}
+
+    std::vector<protocol::DeviceRecord> list() override
+    {
+        protocol::DeviceRecord r;
+        r.uid = uid();
+        const auto dd = _ex.manifest().deviceDescriptor();
+        r.vendorId  = dd.size() >= 10 ? static_cast<std::uint16_t>(dd[8]  | (dd[9]  << 8)) : 0;
+        r.productId = dd.size() >= 12 ? static_cast<std::uint16_t>(dd[10] | (dd[11] << 8)) : 0;
+        r.speed = static_cast<std::uint8_t>(_ex.manifest().speed());
+        r.flags = protocol::kDevHasStorage | protocol::kDevShareable;
+        r.name  = "Captured USB drive";
+        return { r };
+    }
+
+    Status claim(const protocol::DeviceUid& u, IUsbDevicePort** portOut,
+                 DeviceManifest& m, std::uint8_t* cfg, std::string* whyNot) override
+    {
+        if (!(u == uid())) { if (whyNot) *whyNot = "No such device on this Mac."; return Status::NotFound; }
+        if (!_ex.attached()) { if (whyNot) *whyNot = "The drive is no longer captured."; return Status::DeviceGone; }
+        *portOut = &_ex;
+        m        = _ex.manifest();
+        if (cfg) *cfg = _ex.configValue();
+        return Status::Ok;
+    }
+
+    void release(const protocol::DeviceUid&) override {}
+
+    static protocol::DeviceUid uid()
+    {
+        protocol::DeviceUid u{};
+        for (std::size_t i = 0; i < u.size(); ++i) u[i] = static_cast<std::uint8_t>(0xB0 + i);
+        return u;
+    }
+
+private:
+    HostDeviceExporter& _ex;
+};
+
+int runServe(HostDeviceExporter& exporter, std::uint16_t port,
+             const std::string& idPath, const std::string& peersPath)
+{
+    crypto::LocalIdentity identity = loadOrCreateIdentity(idPath);
+    session::PeerStore peers;
+    (void)peers.load(peersPath);
+    logLine("ATTACH", @"exporter identity %s",
+            crypto::fingerprintText(crypto::fingerprint(identity.identityKey())).c_str());
+
+    Status st = Status::Ok;
+    const platform::SocketHandle listenFd = transport::TcpStream::listen(port, &st);
+    if (!platform::isValid(listenFd)) {
+        logLine("ERROR", @"could not listen on TCP port %u", port);
+        return 1;
+    }
+    logLine("ATTACH", @"serving the captured drive on TCP port %u", port);
+
+    CapturedDeviceSource source(exporter);
+
+    while (exporter.attached() && exporter.agentAlive()) {
+        std::unique_ptr<transport::TcpStream> conn;
+        for (int i = 0; i < 3000 && !conn; ++i) {          // wait for the next importer
+            conn = transport::TcpStream::accept(listenFd, &st);
+            if (!conn) {
+                if (!exporter.agentAlive()) break;
+                platform::sleepMs(20);
+            }
+        }
+        if (!conn) continue;
+        logLine("ATTACH", @"importer connected");
+
+        session::SecureSession secure;
+        session::SecureSession::Config sc;
+        sc.initiator = false;
+        sc.identity  = &identity;
+        sc.peers     = &peers;
+        (void)secure.begin(std::move(conn), sc);
+
+        for (int i = 0; i < 15000 && !secure.established(); ++i) {
+            const Status s = secure.pump();
+            if (secure.state() == session::SecureSession::State::Failed) {
+                logLine("ERROR", @"handshake failed: %s", secure.failureReason().c_str());
+                break;
+            }
+            if (s != Status::Ok && s != Status::Busy) break;
+            platform::sleepMs(1);
+        }
+        if (!secure.established()) continue;
+
+        if (secure.trust() != session::Trust::Paired) {
+            // TOFU for a test tool, said out loud: pin and drop, so the importer
+            // reconnects with the grants applied.
+            logLine("ATTACH", @"importer not paired — pinning (test tool). SAS %s",
+                    crypto::sasText(secure.sas()).c_str());
+            (void)peers.pin(secure.peerIdentity(), "importer", session::kDefaultGrants, 0);
+            (void)peers.save(peersPath);
+            logLine("ATTACH", @"pinned; the importer must reconnect");
+            continue;
+        }
+        logLine("ATTACH", @"importer paired, SAS %s", crypto::sasText(secure.sas()).c_str());
+
+        session::ExporterSession expSess;
+        session::ExporterSession::Config ec;
+        ec.devices = &source;
+        ec.clock   = &Clock::system();
+        if (expSess.begin(&secure, ec) != Status::Ok) continue;
+
+        for (;;) {
+            const Status s = expSess.pump();
+            if (s == Status::TransportLost) { logLine("DETACH", @"importer disconnected"); break; }
+            if (isFatal(s)) {
+                logLine("ERROR", @"session closed: %s — %s", statusName(s), expSess.lastError().c_str());
+                break;
+            }
+            if (!exporter.agentAlive()) { logLine("ERROR", @"the agent is gone — ending the session"); break; }
+            platform::sleepMs(1);
+        }
+        logLine("ATTACH", @"served %llu transfer(s)",
+                static_cast<unsigned long long>(expSess.transfersServed()));
+        expSess.close();
+    }
+    return 0;
+}
+
 } // namespace
 
 int main(int argc, const char* argv[])
@@ -167,7 +327,8 @@ int main(int argc, const char* argv[])
         }
 
         ExporterConfig cfg;
-        bool selftest = false, list = false;
+        bool selftest = false, list = false, serve = false;
+        std::uint16_t servePort = 7714;
         std::uint32_t holdMs = 0;
         bool haveDevice = false;
 
@@ -189,6 +350,8 @@ int main(int argc, const char* argv[])
             else if (a == "--agent-wait" && i + 1 < argc) cfg.agentWaitMs = static_cast<std::uint32_t>(std::atoi(argv[++i]));
             else if (a == "--hold" && i + 1 < argc)       holdMs = static_cast<std::uint32_t>(std::atoi(argv[++i]));
             else if (a == "--selftest-bot")               selftest = true;
+            else if (a == "--serve")                      serve = true;
+            else if (a == "--port" && i + 1 < argc)       servePort = static_cast<std::uint16_t>(std::atoi(argv[++i]));
             else if (a == "--list")                       list = true;
             else { usage(argv[0]); return 64; }
         }
@@ -224,7 +387,12 @@ int main(int argc, const char* argv[])
         if (selftest)
             rc = runBotSelfTest(exporter) ? 0 : 3;
 
-        if (holdMs > 0) {
+        if (serve) {
+            // Serve until the importer is done and the agent is still alive. The
+            // release below hands the drive back to this Mac in the documented order.
+            rc = runServe(exporter, servePort, "airusb-exportd.id", "airusb-exportd.peers");
+        }
+        else if (holdMs > 0) {
             logLine("ATTACH", @"holding the lease for %u ms", holdMs);
             // The agent dying is the event that must release the capture and hand
             // the drive back, so the hold watches for exactly that rather than
