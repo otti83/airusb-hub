@@ -355,8 +355,8 @@ Read the matrix this way:
 | macOS exporter ↔ macOS client, loopback | earlier | `RESULT=PASS`, full BOT exchange |
 | macOS exporter ↔ Linux client, real network | earlier | `RESULT=PASS` |
 | Windows exporter ↔ macOS importer, **two machines, different subnets** | 2026-08-09 | §3.5 — SAS `927920` matched on both consoles |
-| Windows, MSVC 19.51, loopback | 2026-08-09 | 13/13 native + `verdict=PASS` + write probe |
-| Linux, ASan+UBSan, loopback | 2026-08-09 | 13/13 + `RESULT=PASS`, no sanitizer findings |
+| Windows, MSVC 19.51, loopback | 2026-08-09 | **24/24** native + `verdict=PASS` + a write probe that now SEGMENTS (§3.4) |
+| Linux, ASan+UBSan, loopback | 2026-08-09 | **24/24** + `RESULT=PASS`, no sanitizer findings, segmented 128 KiB watched by ASan |
 | **Linux kernel enumerated a device** | 2026-08-09 | §3.6 — `Attached SCSI removable disk`, then `mkfs`/`mount`/write/read-back |
 
 ---
@@ -1208,9 +1208,12 @@ airusb/
 apple/         SwiftUI app (device list, detail, eject) + the entitlement probe
 poc/           p0-probe (entitlement matrix), p1-capture-test
 .github/workflows/ci.yml
-               Windows/MSVC + native ctest + a real loopback BOT exchange;
-               Linux under ASan; macOS; the MinGW cross-build. Committed,
-               NEVER RUN — nothing has been pushed yet.
+               Windows/MSVC + native ctest + a real loopback BOT exchange
+               that must SEGMENT; Linux under ASan; macOS; the MinGW
+               cross-build. Both the Windows and Linux jobs also start TWO
+               hub daemons, pair them, and require a device to be read
+               through the control API. Green on every commit; the Windows
+               binaries are published as artifacts.
 ```
 
 Layer graph, one direction only:
@@ -1344,8 +1347,8 @@ L6 passes.
 | OQ-6 | are the credit/pipeline constants in the safe direction? | unresolved; instrument in P2.9 |
 | OQ-7 | no `API_AVAILABLE` on the IOUSBHostCI headers, so the ABI could shift | pin a tested range; treat any exception at init as a hard refusal |
 | new | does the exporter's **write** path work? | **ANSWERED: yes** — `diag/WriteProbe`, byte-exact to 16 KB over the network, in CI. Sustained load is still unmeasured |
-| new | does the Windows client actually run? | **ANSWERED: yes.** MSVC 19.51, 13/13 suites, RESULT=PASS over a real socket, in CI |
+| new | does the Windows client actually run? | **ANSWERED: yes.** MSVC 19.51, 24/24 suites, RESULT=PASS over a real socket, in CI — and two hub daemons pair and read a device there too |
 | new | does MSVC accept the sources? | **ANSWERED: yes**, after one missing `<string>` was fixed. Zero warnings at /W4 /permissive- |
-| new | does anything break under ASan? | **ANSWERED: no.** First ASan run ever, Linux, 13/13 + RESULT=PASS, no findings |
+| new | does anything break under ASan? | **ANSWERED: no.** Linux, 24/24 + RESULT=PASS, no findings — including the reassembly buffers under a segmented 128 KiB transfer |
 | new | two machines, real network, one Windows | **ANSWERED: PASS** (§3.6), SAS confirmed on both consoles |
 | new | does the console mangle user-facing text on a Japanese Windows? | **it did** — CP932 read the em dash as `窶・` in the SAS line. Fixed with `platform::ConsoleUtf8` |

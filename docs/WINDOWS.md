@@ -1,12 +1,21 @@
-# Testing with Windows
+# Windows
 
-The client is portable C++ with no platform USB API. It builds and runs on
-Windows today and talks to a macOS exporter over the LAN — which proves the wire
-protocol, the crypto and the session layer on Windows long before there is a
-Windows driver.
+Everything portable runs on Windows: the wire protocol, the crypto, the session
+layer, and the product's window. Two binaries, both statically linkable, neither
+needing a driver or a privilege:
 
-What it does **not** do yet is present the device to Windows' USB stack. That is
-the UdeCx driver, and it is the next piece.
+* `airusb-hubd.exe` — the interface. Share, connect, pair, attach, verify.
+* `airusb-net.exe` — the same thing from a command line, used by CI.
+
+Both are proven on Windows, not merely compiled for it: the MSVC job in CI
+starts two hub daemons, makes them pair, and requires a USB Mass Storage
+exchange to complete before it passes. A two-machine run against a Mac has also
+been done by hand — see "Two machines" in [`GUI.md`](GUI.md).
+
+What Windows **cannot** do yet is present a forwarded device to its own USB
+stack, so a drive shared from a Mac does not appear in Explorer. That is the
+UdeCx driver, and it is the next piece. Windows' gate for it is self-service
+(test signing), unlike macOS's.
 
 ---
 
