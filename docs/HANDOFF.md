@@ -41,10 +41,22 @@ portal checkbox to look for instead.
 ### THE NEXT TASK: finish Mac × Linux (§4.1)
 
 `airusb-vhci` already makes Linux enumerate a **simulated** device. Pointing the
-same bridge at a **real drive on the Mac, across the encrypted session**, is two
-pieces of work — wiring segmentation in, and a data plane that can pipeline
-(§4.1). That is the whole product working, on hardware, with macOS as the
-exporter and Linux as the importer, and **nothing about it waits on Apple.**
+same bridge at a **real drive on the Mac, across the encrypted session**, was two
+pieces of work — wiring segmentation in, and a non-blocking data plane (§4.1). Two
+of the three sub-parts are now done and proven hosted:
+
+* **Segmentation — L5 hosted PASS (2026-08-09; §3.7).**
+* **The async data plane — `session/ImporterDataPlane`, built + 82-check hosted
+  proof (2026-08-09; §4.1 item 2).** Non-blocking, one-terminal-outcome-per-submit,
+  deadline-swept, tested against the real `ExporterSession`.
+
+**What remains for L6 is the event-driven bridge** that wires the kernel's
+`vhci-hcd` socket to `ImporterDataPlane` while never blocking on the network (the
+R-A/R-B/R-C rules of `LINUX_IMPORTER_PLAN.md` §4.2) and answers `CMD_UNLINK`
+immediately — plus the `--host` form of `airusb-vhci`. That is the whole product
+working on hardware, macOS exporter → Linux importer, and **nothing about it waits
+on Apple.** The blocking-vs-liveness reasoning was cross-checked with GPT-5.6 and
+is recorded in §7 (Decisions not to re-derive).
 
 ---
 
@@ -566,6 +578,20 @@ back into one.
 
 **L4 PASSED, and it went straight through L7 on the way.** See §3.5.
 
+**L5 hosted PASS, 2026-08-09.** Segmentation is now wired into the real
+`ExporterSession` and `RemoteDevicePort`, not just written. `protocol::emitTransfer`
+is the shared sender (record 0 carries the SUBMIT/COMPLETE fixed body + the first
+data slice; every later record is a `Type::Data` continuation with status 0), and
+`Reassembler` is the receiver on both ends. `RecordLayer::maxPlaintextBytes()`
+sizes each segment so a segment plus the AEAD tag never trips the ceiling. Evidence:
+`tests/unit/test_l5_segmentation.cpp` runs a **120 KiB round trip through the real
+exporter at record sizes 4 KiB → 65 519**, byte-identical both directions, and
+asserts the device sees **exactly one `bulkOut`/`bulkIn` per URB** — reassembly
+completes before the device is touched, so no seam short-packet. 20/20 suites
+green; zero warnings, Clang full set + strict MinGW. The remaining half of §4.1 is
+the **async data plane (L6)**, and the on-kernel `dd` half of the L5 gate belongs
+to it.
+
 ---
 
 ## 4. THE WORK QUEUE while Apple decides
@@ -586,33 +612,58 @@ kernel enumerate a device (§3.6). What is missing is between them.
 
 **Two pieces of work, both ours, neither blocked:**
 
-1. **Wire segmentation in.** `protocol/Segmentation` is written and tested (139
-   checks): `planSegments` splits at the record ceiling, `Reassembler` puts it
-   back with exact-contiguity enforcement and a bounded arena. It is **not yet
-   connected** to `ExporterSession` or `RemoteDevicePort`.
+1. **Wire segmentation in. — DONE, L5 hosted PASS, 2026-08-09.**
+   `protocol::planSegments`/`Reassembler` (139 checks) are now joined by
+   `protocol::emitTransfer`, and the two are wired into the real `ExporterSession`
+   (reassembles a segmented OUT before one `bulkOut`; segments a large IN COMPLETE)
+   and `RemoteDevicePort` (segments a large OUT; reassembles a segmented IN).
+   `RecordLayer::maxPlaintextBytes()` sizes segments against the ceiling *minus the
+   AEAD tag*. Proof: a 120 KiB round trip through the real exporter at record sizes
+   4 KiB → 65 519, byte-identical, one device transfer per URB
+   (`tests/unit/test_l5_segmentation.cpp`). See §3.7.
 
-   Why it is mandatory rather than an optimisation: a record cannot exceed 65 519
+   Why it was mandatory rather than an optimisation: a record cannot exceed 65 519
    bytes — Noise's plaintext ceiling, not a tuning parameter — and `usb-storage`
    asks for 122 880 bytes in one URB at high speed and **a megabyte** once
    `slave_configure()` raises `max_sectors` on a SuperSpeed link.
 
-   **Reassembly must complete before the device sees anything.** Handing the
-   exporter three segments to issue as three `bulkOut` calls injects a short
-   packet at each seam, and a short packet is how USB signals the end of a data
-   phase — the device reads the first seam as the end of the transfer and the
-   next segment as a new command. Silent corruption. This is why
-   `IUsbDevicePort` documents one call as ONE logical transfer.
+   **Reassembly completes before the device sees anything** — the load-bearing
+   rule, now enforced and tested. Handing the exporter three segments to issue as
+   three `bulkOut` calls injects a short packet at each seam, and a short packet is
+   how USB signals the end of a data phase — the device reads the first seam as the
+   end of the transfer and the next segment as a new command. Silent corruption.
+   This is why `IUsbDevicePort` documents one call as ONE logical transfer, and why
+   the L5 test asserts `outCalls == 1` / `inCalls == 1` for a 120 KiB URB.
 
-2. **A data plane that can pipeline.** `RemoteDevicePort` sends one SUBMIT and
-   treats any other `request_id` as a fatal `MalformedFrame`
-   (`RemoteDevicePort.cpp:88`). The kernel has many URBs in flight at once.
+2. **A non-blocking data plane. — HALF DONE.** `RemoteDevicePort` sends one SUBMIT
+   and blocks in `receiveRecord` until the COMPLETE; behind vhci that deadlocks
+   (vhci-hcd writes CMD_SUBMIT and reads RET_SUBMIT over ONE socket via two
+   kthreads, so a bridge that blocks on the network while the kernel's socket fills
+   hangs both sides → unkillable D-state, reboot). The hazard is **liveness, not
+   throughput** — see the GPT-5.6 cross-check recorded below.
 
-   The hazard is not throughput, it is deadlock: vhci-hcd writes CMD_SUBMIT into
-   the socket and reads RET_SUBMIT from the same socket. If the bridge blocks on
-   the network while the kernel's socket buffer fills, both sides wait for each
-   other. `VhciBridge` is single-strand today, which is correct only because L3/L4
-   drive a *local* `IUsbDevicePort` that never blocks on a network.
-   `LINUX_IMPORTER_PLAN.md` §4.2 is about exactly this.
+   **Built and hosted-proven (2026-08-09): `session/ImporterDataPlane`.** The async,
+   non-blocking analogue of `RemoteDevicePort`: `submit()` emits and returns (never
+   blocks — a full socket buffers, R-B); `pump()` drains what the network has right
+   now and fires one completion per finished transfer; `sweepDeadlines()` is the
+   only timeout in the system (R-C); `cancel()`/`completeAll()` keep invariant I1
+   (exactly one terminal outcome per submit) on unlink and teardown. Demux and
+   reassembly are keyed by `(channel, request_id)` on `core::RequestTable` +
+   `protocol::Reassembler`. Admission depth defaults to **1** (usb-storage is
+   `can_queue=1`); the machinery already supports more. `tests/unit/test_dataplane.cpp`
+   (82 checks) proves round trips vs the real `ExporterSession`, non-blocking under
+   a stalled socket, R-C timeout, cancel-drops-the-late-completion, and I1 on
+   teardown.
+
+   **What remains for L6: the event-driven bridge.** `VhciBridge` is still
+   single-strand (`pumpOnce` reads one PDU, calls the device synchronously, replies,
+   repeats) — correct only for L4's *local* `ScriptedDevice`. The remaining work is
+   an event-driven importer bridge that drains `sv[1]` first and unconditionally
+   every loop (R-A), buffers replies to the kernel non-blocking (R-B), answers
+   `CMD_UNLINK` immediately, admits from a pending queue under the data plane's
+   depth, and drives `ImporterDataPlane` for everything the `Ep0Arbiter` does not
+   answer locally. Then the `--host` form of `airusb-vhci` and the real run.
+   `LINUX_IMPORTER_PLAN.md` §4.2 is the spec.
 
 **Gates:** L5 then L6 in `LINUX_IMPORTER_PLAN.md` §7. L6's evidence is
 `sha256sum /dev/sdX` matching a known image and `dmesg` free of `usb-storage`
@@ -694,10 +745,12 @@ kernel in the loop, and the same split applies to UdeCx.
 * **`PAIR_*` handlers.** The opcodes are reserved in `Wire.h` (0x10/0x11/0x12) and
   the trust gate already refuses everything else to an Unpaired peer, but no
   handler exists. The rate limiter half is done (`session/PairingGate`).
-* **Manifest segmentation on the control plane.** `protocol/Segmentation` now
-  exists; the manifest path still has none. An 8-configuration device with a full
-  string table could exceed one record. The attach currently fails with a clear
-  status rather than truncating.
+* **Manifest segmentation on the control plane.** `protocol::emitTransfer`/
+  `Reassembler` are now wired into the **data** plane (§4.1), but the manifest path
+  still has none — an 8-configuration device with a full string table could exceed
+  one record. The attach currently fails with a clear status rather than
+  truncating. `emitTransfer` is control-plane-agnostic, so this is now mostly a
+  matter of teaching `ImporterClient`'s manifest read to reassemble.
 * **`kXfShortNotOk` / `kXfZeroPacket` / `kXfIsoAsap` have no consumer.**
   `Codec.cpp` round-trips `xflags`; nothing reads it. Both ends need wiring in one
   commit. `ZERO_PACKET` matters for real writes: dropped, a device waits for ever
@@ -895,6 +948,23 @@ one and Super in the other. Read `USBSpeed`, cross-check `UsbLinkSpeed`.
   manifest hash use BLAKE2s rather than SHA-256 (a fourth hash function for an
   internal value is not worth the attack surface), and the plan's reference to
   libsodium is corrected to Monocypher, which is what the code vendors.
+
+### The L6 blocker is liveness, not throughput — settled, cross-checked
+
+Do not re-open this as "the protocol is too slow, speed it up first." The reason
+the synchronous `RemoteDevicePort` cannot sit behind vhci is **deadlock**, not
+latency: vhci-hcd runs tx and rx as two kthreads over one socket, the AF_UNIX send
+window cannot hold a large URB atomically, and a bridge that blocks on the network
+while that window fills wedges both sides into an unkillable `D`-state (reboot).
+The fix — a non-blocking data plane — *also* removes the per-URB round-trip that
+would make a mounted filesystem crawl, so "avoid the deadlock" and "make it usable"
+are the **same component** (`ImporterDataPlane`), correctness-first. The project's
+own priority order says so: Correctness > Compatibility > Reliability > Latency >
+Throughput. This was independently cross-checked with GPT-5.6 (`gpt-5.6-sol` via
+`codex exec`, read-only) on 2026-08-09, which verified the mechanism against
+`RemoteDevicePort`/`VhciBridge` and agreed: build the async plane first, keep
+admission depth 1 until there is something to measure, throughput-tune only after
+L6 passes.
 
 ### Open questions
 

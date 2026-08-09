@@ -135,6 +135,7 @@ add_library(airusb_session STATIC
     session/SecureSession.cpp
     session/ExporterSession.cpp
     session/RemoteDevicePort.cpp
+    session/ImporterDataPlane.cpp
     session/ImporterClient.cpp
 )
 target_link_libraries(airusb_session PUBLIC airusb_transport)

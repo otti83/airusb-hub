@@ -185,7 +185,7 @@ Optional belt-and-braces, documented but not shipped in v1: `setsockopt(sv[0], S
 **What must change above `platform/linux/`:**
 
 1. `transport/` + `session/` — **segmentation**: emit N records for one logical transfer (same `request_id`, `SEG_FIRST` on the first, `SEG_MORE` on all but the last, `seg_offset` advancing, `total_len` constant) and reassemble per `(channel, request_id)` into a per-attach arena capped at `credit_bytes` (R2). `FrameScheduler` already exists and is unused outside tests.
-2. `session/` — a new **async data plane** (`ImporterDataPlane`) over the `RecordLayer*` that `ImporterClient::transport()` already exposes, demultiplexing on `(channel, request_id)` via the existing `core/RequestTable`. `RemoteDevicePort` stays exactly as it is; it is the instrument `diag/BotProbe` validates the network with, and the two use cases have opposite requirements.
+2. `session/` — a new **async data plane** (`ImporterDataPlane`) over the `RecordLayer*` that `ImporterClient::transport()` already exposes, demultiplexing on `(channel, request_id)` via the existing `core/RequestTable`. `RemoteDevicePort` stays exactly as it is; it is the instrument `diag/BotProbe` validates the network with, and the two use cases have opposite requirements. **DONE, hosted PASS 2026-08-09** — `session/ImporterDataPlane.{h,cpp}`, `tests/unit/test_dataplane.cpp` (82 checks): non-blocking `submit`/`pump` (R-B, proven with a stalled-socket stream), `sweepDeadlines` (R-C), `cancel`/`completeAll` for I1, admission depth 1, and a full round trip against the real `ExporterSession`. What is NOT yet done: the event-driven bridge that consumes it (R-A ordering, `CMD_UNLINK`, pending queue) and the `--host` form of `airusb-vhci`.
 3. `core/Ep0Arbiter.cpp` — `local()` on an **empty** blob must return `Stall(NotFound)`, not a zero-length success (§8 R7).
 4. `session/ExporterSession.cpp` + `platform/macos/` — control-OUT `actualLen`, interrupt/iso routing, `xflags` honouring (§8 R4, R5, R8).
 5. `core/IUsbDevicePort.h` — an `actualLen` out-param on `controlTransfer`, and a per-transfer timeout parameter so `SubmitBody::timeoutMs` stops being decoded and dropped.
@@ -541,6 +541,21 @@ plus `status` row at `sta 006` with the expected `hub`/`spd`, plus `readlink /sy
 **Implementation.** `SEG_FIRST`/`SEG_MORE`/`seg_offset`/`total_len` emit and reassemble, per-attach arena capped at `credit_bytes` (R2). Reassembly at the **exporter** into one `bulkOut`/`bulkIn` call.
 **Evidence.** Hosted: a 120 KiB round trip over `MemoryPipe` at every record size from 4 KiB to the ceiling, byte-compared. On kernel: `dd bs=1M count=64` read from the device, `sha256sum` matching the `ScriptedDevice` image. `WriteProbe`'s `outBoundariesIntact`.
 **PASS** iff bytes are identical and the exporter observes **one** transfer per URB. **A split that does not land on a `wMaxPacketSize` boundary injects a short packet the device reads as a phase boundary** — that is corruption, not a performance issue.
+
+**HOSTED PASS, 2026-08-09.** Segmentation is wired into the real `ExporterSession`
+and `RemoteDevicePort` via `protocol::emitTransfer` (record 0 carries the
+SUBMIT/COMPLETE fixed body + the first data slice; every later record is a
+`Type::Data` continuation) and `protocol::Reassembler`. `RecordLayer` now exposes
+`maxPlaintextBytes()` so a segment plus the AEAD tag never trips the ceiling.
+`tests/unit/test_l5_segmentation.cpp` drives a **120 KiB round trip through the real
+exporter at record sizes 4 KiB, 8 KiB, 16 KiB, 32 KiB and the 65 519 ceiling**,
+byte-compared both directions, asserting the `EchoDevice` sees **exactly one
+`bulkOut` and one `bulkIn` per URB** — i.e. reassembly completes before the device
+is touched, so no seam short-packet is injected. `RemoteDevicePort` is also
+exercised in isolation against a pre-scripted peer (Path A emit, Path D
+reassemble). 20/20 suites green; zero warnings on Clang (full set) and strict
+MinGW. **The on-kernel `dd bs=1M` half of this gate is L6** (a real kernel, real
+network, and the async data plane), and is not yet done.
 
 ---
 

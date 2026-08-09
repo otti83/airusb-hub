@@ -27,6 +27,7 @@ airusb_test(test_pairinggate)
 airusb_test(test_manifest)
 airusb_test(test_segmentation)
 airusb_test(test_l5_segmentation)
+airusb_test(test_dataplane)
 airusb_test(test_exporter airusb_diag)
 
 find_package(Threads REQUIRED)
