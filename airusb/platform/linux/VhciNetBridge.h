@@ -91,6 +91,11 @@ public:
     std::size_t pendingSubmits() const noexcept { return _pending.size(); }
     std::size_t outstanding()    const noexcept { return _outstanding.size(); }
 
+    /// Bytes buffered for the kernel that have not been written yet. The poll(2)
+    /// loop arms POLLOUT on the kernel fd only while this is non-zero, so a full
+    /// kernel socket parks here (R-B) instead of spinning the loop.
+    std::size_t pendingKernelTx() const noexcept { return _tx.size() - _txSent; }
+
 private:
     using Ref = std::pair<std::uint16_t, std::uint64_t>;   // (channel, request_id)
 

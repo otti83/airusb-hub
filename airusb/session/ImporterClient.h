@@ -15,7 +15,10 @@
 
 #include "RemoteDevicePort.h"
 #include "SecureSession.h"
+#include "../core/DeviceManifest.h"
 #include "../core/Status.h"
+#include "../core/UsbTypes.h"
+#include "../protocol/ManifestCodec.h"
 #include "../protocol/Messages.h"
 
 #include <cstdint>
@@ -47,10 +50,29 @@ public:
 
     Status listDevices(std::vector<protocol::DeviceRecord>& out);
 
-    /// Attaches and returns a port for it. `slot` must be 1..15.
+    /// Attaches and returns a synchronous port for it (the BotProbe instrument).
+    /// `slot` must be 1..15.
     Status attach(const protocol::DeviceUid& uid, std::uint8_t slot,
                   std::unique_ptr<RemoteDevicePort>& portOut,
                   std::string* whyNot = nullptr);
+
+    /// Everything the ASYNCHRONOUS importer path needs from an attach: the live
+    /// record layer, the attach id and slot, the manifest, the configuration the
+    /// exporter captured the device in (for the vhci bridge's SET_CONFIGURATION
+    /// policy), and the link speed (for the vhci port-half choice). Unlike
+    /// `attach()`, it builds no `RemoteDevicePort` — the async data plane and
+    /// `VhciNetBridge` drive the link directly.
+    struct BridgeAttach {
+        transport::RecordLayer* link             = nullptr;
+        std::uint32_t           attachId         = 0;
+        std::uint8_t            slot             = 0;
+        std::uint8_t            capturedConfig   = 0;
+        Speed                   speed            = Speed::None;
+        std::uint32_t           maxTransferBytes = 0;
+        DeviceManifest          manifest;
+    };
+    Status attachForBridge(const protocol::DeviceUid& uid, std::uint8_t slot,
+                           BridgeAttach& out, std::string* whyNot = nullptr);
 
     Status detach();
 
@@ -70,6 +92,13 @@ private:
     /// an unexpected type is reported rather than skipped.
     Status call(wire::Type type, std::span<const std::uint8_t> body,
                 protocol::Header& replyHeader, std::vector<std::uint8_t>& replyBody);
+
+    /// The shared ATTACH handshake: sends ATTACH, reads ATTACH_OK and the manifest,
+    /// checks the speed agreement, and stamps `_attachId`/`_attachSlot`. Both
+    /// `attach()` and `attachForBridge()` are thin wrappers over it.
+    Status doAttach(const protocol::DeviceUid& uid, std::uint8_t slot,
+                    protocol::AttachOkBody& ok, DeviceManifest& manifest,
+                    protocol::ManifestHeader& mhdr, std::string* whyNot);
 
     SecureSession _secure;
     Config        _cfg;

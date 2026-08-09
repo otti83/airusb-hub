@@ -131,11 +131,10 @@ Status ImporterClient::listDevices(std::vector<DeviceRecord>& out)
     return Status::Ok;
 }
 
-Status ImporterClient::attach(const DeviceUid& uid, std::uint8_t slot,
-                              std::unique_ptr<RemoteDevicePort>& portOut,
-                              std::string* whyNot)
+Status ImporterClient::doAttach(const DeviceUid& uid, std::uint8_t slot,
+                                AttachOkBody& ok, DeviceManifest& manifest,
+                                ManifestHeader& mhdr, std::string* whyNot)
 {
-    portOut.reset();
     if (slot == 0 || slot > 15) return Status::BadArgument;
 
     AttachBody ab;
@@ -187,7 +186,6 @@ Status ImporterClient::attach(const DeviceUid& uid, std::uint8_t slot,
         return static_cast<Status>(h.status);
     }
 
-    AttachOkBody ok;
     if (!decodeAttachOk(body, ok)) return Status::MalformedFrame;
     if (ok.attachId == 0) return Status::MalformedFrame;
 
@@ -211,8 +209,6 @@ Status ImporterClient::attach(const DeviceUid& uid, std::uint8_t slot,
     mbody.assign(in.begin() + static_cast<std::ptrdiff_t>(wire::kHeaderSize),
                  in.begin() + static_cast<std::ptrdiff_t>(wire::kHeaderSize + mh.bodyLen));
 
-    DeviceManifest manifest;
-    ManifestHeader mhdr;
     std::string mwhy;
     if (const Status s = decodeManifest(mbody, manifest, mhdr, &mwhy); s != Status::Ok) {
         _why = "the peer's manifest was rejected: " + mwhy;
@@ -232,8 +228,44 @@ Status ImporterClient::attach(const DeviceUid& uid, std::uint8_t slot,
 
     _attachId   = ok.attachId;
     _attachSlot = slot;
-    portOut = std::make_unique<RemoteDevicePort>(link, ok.attachId, slot,
+    return Status::Ok;
+}
+
+Status ImporterClient::attach(const DeviceUid& uid, std::uint8_t slot,
+                              std::unique_ptr<RemoteDevicePort>& portOut,
+                              std::string* whyNot)
+{
+    portOut.reset();
+    AttachOkBody ok;
+    DeviceManifest manifest;
+    ManifestHeader mhdr;
+    if (const Status s = doAttach(uid, slot, ok, manifest, mhdr, whyNot); s != Status::Ok)
+        return s;
+    portOut = std::make_unique<RemoteDevicePort>(_secure.transport(), ok.attachId, slot,
                                                  std::move(manifest));
+    return Status::Ok;
+}
+
+Status ImporterClient::attachForBridge(const DeviceUid& uid, std::uint8_t slot,
+                                       BridgeAttach& out, std::string* whyNot)
+{
+    out = BridgeAttach{};
+    AttachOkBody ok;
+    DeviceManifest manifest;
+    ManifestHeader mhdr;
+    if (const Status s = doAttach(uid, slot, ok, manifest, mhdr, whyNot); s != Status::Ok)
+        return s;
+
+    // Everything the async path (ImporterDataPlane + VhciNetBridge) needs, and
+    // nothing it does not. capturedConfig is the value SET_CONFIGURATION may be
+    // confirmed for locally; speed drives the vhci port-half choice.
+    out.link             = _secure.transport();
+    out.attachId         = ok.attachId;
+    out.slot             = slot;
+    out.capturedConfig   = mhdr.currentConfigValue;
+    out.speed            = manifest.speed();
+    out.maxTransferBytes = 1u << 20;
+    out.manifest         = std::move(manifest);
     return Status::Ok;
 }
 
