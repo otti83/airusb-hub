@@ -826,6 +826,33 @@ segmentation path proven between two operating systems on a real network, which
 is the strongest evidence for it anywhere in this project — loopback never fills
 a socket, and that is precisely why loopback never found this.
 
+### The routing asymmetry is GONE — macOS → Windows, 2026-08-09
+
+Every two-machine run in this file until now had to put **Windows on the sharing
+side**, and §3.5 says why: "Windows has no route back to the Mac". That was a
+real constraint and it had a real consequence — **the Windows IMPORTER could
+never have been tested**, because testing an importer requires the importer to
+be the one that connects out.
+
+Tailscale is now installed on the GMKtec (`100.90.151.48`), and it reaches the
+Mac's `100.120.39.113` directly. Measured, then used:
+
+```
+Mac shares (airusb-hubd --share --share-port 7714, on the tailnet)
+GMKtec imports:  connect -> connected, peer NRPWP5HX 2JI6HVGZ 4I7Q4K2A 7CRBNIKQ
+                 attach  -> 058f:6387 Super(5G)
+                 verify  -> PASS, 61440 x 512, rtt 24.8 ms
+                 verdict=PASS cbw=6 data=5 csw=6 stallRecoveries=0 shortReads=0
+```
+
+Already paired from the earlier session, so it went straight to `connected` with
+no number to compare — pins are per identity pair, not per direction.
+
+**This is a W6 prerequisite, not a convenience.** Do it before writing the
+driver, not after: a driver that cannot be pointed at anything is untestable,
+and discovering the routing problem at bring-up time would waste the reboot
+cycles that are the expensive part of driver work.
+
 ### Real hardware, through the window — PASS, 2026-08-09
 
 The last cell. `airusb-exportd --serve` captured the physical 058f:6387 and the
@@ -1132,12 +1159,26 @@ kernel in the loop, and the same split applies to UdeCx.
 | **Working Linux VM** | Lima **`airusb`** — Ubuntu 24.04 aarch64, kernel 6.8.0-134-generic, GCC 13.3, cmake 3.28. **vhci-hcd loaded**, `nports=16` (8 `hs` + 8 `ss`), lockdown `[none]`. This is the one to use |
 | Other Linux VM | Lima `kbuild`, Debian 12 aarch64, GCC 12.2 — **belongs to another project, do not modify.** Its `cloud` kernel is built with `CONFIG_USB_SUPPORT` unset, so it can never do vhci-hcd |
 | Mac LAN / Tailscale | `192.168.2.15` (en0) / `100.120.39.113` (utun8) |
-| Windows box | `GMKtec`, **192.168.0.109**, RDP + SMB open, **SSH closed**, no Tailscale. Different LAN from the Mac — reached only via the `ts-464` subnet router. `.225` is a DIFFERENT machine |
+| Windows box | `GMKtec` / hostname **NucBoxG3**, Windows 11 Pro build 26200, 4 cores, 83 GB free. **192.168.0.109** on the LAN and **100.90.151.48 on Tailscale**. RDP + SMB + **SSH (OpenSSH for Windows 9.5, key auth, and the assistant HAS a key)**. `.225` is a DIFFERENT machine |
 | Cross-compiler | `x86_64-w64-mingw32-g++` (Homebrew mingw-w64) |
 | GitHub | `gh` authenticated as `otti83` |
 
 ### Tooling constraints learned the hard way
 
+- **The Windows box is now reachable and drivable by the assistant.** SSH with a
+  key (`~/.ssh/airusb_gmktec`, user `GMKtec@192.168.0.109`), and an SSH session
+  for an Administrators member is ELEVATED — `bcdedit`, `pnputil` and the like
+  all work. Two things to know:
+  * the default shell is `cmd.exe` and the console is **CP932**, so every
+    command goes through `powershell -EncodedCommand` with UTF-8 forced; hand
+    escaping through ssh → cmd → powershell mangles anything with quotes in it;
+  * **Windows' sshd kills the job object when the session ends**, so anything
+    started with `Start-Process` dies with the session. This is the exact
+    counterpart of the `setsid` note for the Linux VM. Run a whole test inside
+    ONE ssh invocation, or register a scheduled task for something that must
+    outlive it.
+  * `Start-Process -ArgumentList` does not quote: `--name 'A B'` arrives as two
+    arguments and the tool prints its usage.
 - **`sudo` is blocked for the assistant ON THE MAC.** Every root experiment on
   macOS is handed to the user as a copy-pasteable command. **Inside a Lima VM
   passwordless sudo works**, which is what made the whole Linux importer possible
