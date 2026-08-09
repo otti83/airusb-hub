@@ -1,6 +1,8 @@
 #include "ImporterClient.h"
 
+#include "../core/Clock.h"
 #include "../core/Platform.h"
+#include "../core/Watchdog.h"
 #include "../protocol/ManifestCodec.h"
 
 #include <cstring>
@@ -72,6 +74,49 @@ Status ImporterClient::trustPeerWithoutConfirmation(const std::string& name)
     return _cfg.peers->pin(_secure.peerIdentity(), name, kDefaultGrants, 0);
 }
 
+Status ImporterClient::trustPeerAfterSasConfirmed(const std::string& name)
+{
+    if (!_secure.established()) return Status::BadArgument;
+    if (!_cfg.peers) return Status::BadArgument;
+    return _cfg.peers->pin(_secure.peerIdentity(), name, kDefaultGrants, 0);
+}
+
+Status ImporterClient::ping(std::uint64_t* rttNs)
+{
+    if (rttNs) *rttNs = 0;
+    if (!_secure.established()) return Status::BadArgument;
+
+    const Clock& clock = Clock::system();
+
+    PingBody p;
+    p.pingTsNs = clock.nowNs();
+    std::vector<std::uint8_t> body;
+    encodePing(p, body);
+
+    Header h;
+    std::vector<std::uint8_t> reply;
+    if (const Status s = call(wire::Type::Ping, body, h, reply); s != Status::Ok) return s;
+
+    if (h.type == static_cast<std::uint8_t>(wire::Type::Error)) {
+        _why = "the peer refused the ping: ";
+        _why += statusName(static_cast<Status>(h.status));
+        return static_cast<Status>(h.status);
+    }
+    if (h.type != static_cast<std::uint8_t>(wire::Type::Pong)) return Status::MalformedFrame;
+
+    PingBody pong;
+    if (!decodePing(reply, pong)) return Status::MalformedFrame;
+    // The echo has to be OUR timestamp coming back. Accepting any PONG would
+    // make this measure "something arrived" rather than "this peer answered
+    // this ping", and on a stream where a stale reply is possible those are
+    // different facts.
+    if (pong.pingTsNs != p.pingTsNs) return Status::MalformedFrame;
+
+    const std::uint64_t now = clock.nowNs();
+    if (rttNs) *rttNs = now > p.pingTsNs ? now - p.pingTsNs : 0;
+    return Status::Ok;
+}
+
 Status ImporterClient::call(wire::Type type, std::span<const std::uint8_t> body,
                             Header& replyHeader, std::vector<std::uint8_t>& replyBody)
 {
@@ -94,12 +139,32 @@ Status ImporterClient::call(wire::Type type, std::span<const std::uint8_t> body,
     if (const Status s = link->sendRecord(rec); s != Status::Ok) return s;
     if (const Status s = link->flush(); s != Status::Ok) return s;
 
+    // A deadline, because this loop used to have none.
+    //
+    // `Busy` means "nothing on the socket yet", so an unbounded spin here waits
+    // for ever on a peer that accepted the connection and then stopped
+    // answering — which is not a hypothetical: a peer holding a session it is
+    // not allowed to serve, a machine that went to sleep, and a half-open TCP
+    // connection all produce exactly that. In a command-line tool it looks like
+    // a hang; in a daemon with a window attached it wedges the window too,
+    // because this runs on the same thread.
+    //
+    // T_net_ctrl is the project's own name for how long a control-plane
+    // exchange may take (§ the timeout table), so the number is not invented
+    // here. The clock is the continuous one, so a laptop that sleeps mid-call
+    // times out on waking rather than granting itself the nap.
+    const Clock& clock = Clock::system();
+    const Deadline deadline = Deadline::afterMs(clock, watchdog::kNetCtrl);
+
     std::vector<std::uint8_t> in;
     for (;;) {
         const Status r = link->receiveRecord(in);
-        if (r == Status::Busy) continue;
-        if (r != Status::Ok) return r;
-        if (!in.empty()) break;
+        if (r != Status::Busy && r != Status::Ok) return r;
+        if (r == Status::Ok && !in.empty()) break;
+        if (deadline.expired(clock)) {
+            _why = "the other machine did not answer in time";
+            return Status::XferTimeout;
+        }
     }
 
     if (!decodeHeader(in, replyHeader)) return Status::MalformedFrame;

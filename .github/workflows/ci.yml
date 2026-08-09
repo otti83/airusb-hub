@@ -231,6 +231,79 @@ jobs:
           grep -q 'SEGMENTATION .*fired=yes' attempt.out || {
             echo "segmentation did not fire"; exit 1; }
 
+      # -----------------------------------------------------------------
+      # The product's own interface, as two real processes.
+      #
+      # test_hub_e2e already runs the pairing state machine on every OS, but
+      # it does it in one process with the HTTP layer bypassed. This is the
+      # other half: two daemons, two token files, real loopback sockets, and
+      # a client that is not the one that wrote the server — curl. Under ASan,
+      # so the request parser is watched while a stranger's bytes go through
+      # it.
+      # -----------------------------------------------------------------
+      - name: The hub daemon, two processes, driven over its own HTTP API
+        env:
+          ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: |
+          set -eu -o pipefail
+          bin="$PWD/build/airusb-hubd"
+          mkdir -p /tmp/hubA /tmp/hubB
+
+          (cd /tmp/hubA && "$bin" --ui-port 8801 --share-port 7745 --share \
+              --no-open --name sharer > hub.log 2>&1) &
+          (cd /tmp/hubB && "$bin" --ui-port 8802 --no-open --name importer \
+              > hub.log 2>&1) &
+          trap 'pkill -f airusb-hubd || true; echo "--- A ---"; cat /tmp/hubA/hub.log;
+                echo "--- B ---"; cat /tmp/hubB/hub.log' EXIT
+          for i in $(seq 1 50); do
+            [ -s /tmp/hubA/airusb-hub.token ] && [ -s /tmp/hubB/airusb-hub.token ] && break
+            sleep 0.2
+          done
+          TA=$(cat /tmp/hubA/airusb-hub.token); TB=$(cat /tmp/hubB/airusb-hub.token)
+          A() { curl -sS -H "X-AirUSB-Token: $TA" -H 'Content-Type: application/json' "$@"; }
+          B() { curl -sS -H "X-AirUSB-Token: $TB" -H 'Content-Type: application/json' "$@"; }
+
+          # The guard, before anything else. A control plane whose refusals
+          # have stopped working is worse than one that is down, because it
+          # looks fine.
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8801/api/state)
+          [ "$code" = 401 ] || { echo "no-token request got $code, wanted 401"; exit 1; }
+          curl -s -H "Host: rebind.example:8801" -H "X-AirUSB-Token: $TA" \
+               http://127.0.0.1:8801/api/state | grep -q 'Host header' \
+            || { echo "the Host check did not fire"; exit 1; }
+          curl -s -X POST -H "Origin: https://evil.example" -H "X-AirUSB-Token: $TA" \
+               http://127.0.0.1:8801/api/share/stop | grep -q 'cross-origin' \
+            || { echo "the Origin check did not fire"; exit 1; }
+          curl -s http://127.0.0.1:8801/ | grep -q '<title>AirUSB Hub</title>' \
+            || { echo "the page was not served"; exit 1; }
+
+          B -X POST -d '{"host":"127.0.0.1","port":7745}' \
+            http://127.0.0.1:8802/api/import/connect > /dev/null
+          sasB=$(B http://127.0.0.1:8802/api/state | grep -o '"sas":"[0-9]*"' | head -1)
+          sasA=$(A http://127.0.0.1:8801/api/state | grep -o '"sas":"[0-9]*"' | head -1)
+          echo "importer $sasB / sharer $sasA"
+          [ -n "$sasA" ] && [ "$sasA" = "$sasB" ] \
+            || { echo "the two sides showed different numbers"; exit 1; }
+
+          B -X POST -d '{"accept":true}' http://127.0.0.1:8802/api/import/approve > /dev/null
+          A -X POST -d '{"accept":true}' http://127.0.0.1:8801/api/share/approve > /dev/null
+
+          for i in $(seq 1 40); do
+            state=$(B http://127.0.0.1:8802/api/state | grep -o '"state":"[a-z-]*"' | sed -n 2p)
+            echo "  importer $state"
+            case "$state" in *connected*) break;; esac
+            sleep 0.5
+          done
+          uid=$(B http://127.0.0.1:8802/api/state | grep -o '"uid":"[0-9a-f]*"' | head -1 |
+                cut -d'"' -f4)
+          [ -n "$uid" ] || { echo "the sharer offered nothing"; exit 1; }
+          B -X POST -d "{\"uid\":\"$uid\"}" http://127.0.0.1:8802/api/import/attach > /dev/null
+          B -X POST -d '{}' http://127.0.0.1:8802/api/import/verify > verify.json
+          grep -q '"passed":true' verify.json \
+            || { echo "the verification failed:"; cat verify.json; exit 1; }
+          echo 'PASS: paired over the control API and read the device through it.'
+
   # ---------------------------------------------------------------------------
   # macOS. The development platform, and the only one with the real exporter.
   # The IOKit half is not exercised here — it needs a physical device and root —

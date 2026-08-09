@@ -30,7 +30,15 @@ public:
                                               Status* status = nullptr);
 
     /// Listening socket helper. Returns platform::kInvalidSocket on failure.
-    static platform::SocketHandle listen(std::uint16_t port, Status* status = nullptr);
+    ///
+    /// `loopbackOnly` binds 127.0.0.1 instead of INADDR_ANY. It is a different
+    /// kind of guarantee from a firewall rule or an authentication check: a
+    /// socket bound to the loopback address cannot receive a packet from
+    /// another host at all, so the control plane's reachability stops being a
+    /// property of configuration. The device-sharing listener does NOT use it —
+    /// being reachable from the LAN is that socket's entire purpose.
+    static platform::SocketHandle listen(std::uint16_t port, Status* status = nullptr,
+                                         bool loopbackOnly = false);
 
     /// Accepts one connection from a listening fd. Returns nullptr when there is
     /// nothing pending.

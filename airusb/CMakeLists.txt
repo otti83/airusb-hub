@@ -285,6 +285,32 @@ add_executable(airusb-net
 target_link_libraries(airusb-net PRIVATE airusb_session airusb_diag)
 
 # ---------------------------------------------------------------------------
+# control/ — the product's interface.
+#
+# A loopback HTTP control plane and one embedded page. It is here rather than in
+# a platform/ directory because it is the same code on all three operating
+# systems: the window is the browser every one of them already has, so there is
+# no toolkit to choose and nothing to port.
+#
+# It depends on session (it drives the protocol) and diag (the "check it really
+# works" button is BotProbe, which cannot write). Nothing depends on IT — the
+# arrow points one way, like every other arrow in this file.
+# ---------------------------------------------------------------------------
+add_library(airusb_control STATIC
+    control/Json.cpp
+    control/HttpServer.cpp
+    control/HubState.cpp
+    control/ControlApi.cpp
+    control/WebUi.cpp
+    control/SimulatedDeviceSource.cpp
+    tests/fakes/ScriptedDevice.cpp
+)
+target_link_libraries(airusb_control PUBLIC airusb_session airusb_diag)
+
+add_executable(airusb-hubd tools/airusb_hubd_main.cpp)
+target_link_libraries(airusb-hubd PRIVATE airusb_control)
+
+# ---------------------------------------------------------------------------
 # tests
 # ---------------------------------------------------------------------------
 enable_testing()

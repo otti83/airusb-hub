@@ -1,5 +1,6 @@
 #include "RemoteDevicePort.h"
 
+#include "../core/Clock.h"
 #include "../core/Watchdog.h"
 #include "../protocol/Segmentation.h"
 #include "../protocol/Validate.h"
@@ -87,13 +88,27 @@ Status RemoteDevicePort::submit(std::uint8_t epAddr, std::uint8_t xferType,
     ++_issued;
 
     // ---- wait for record 0 of the COMPLETE ---------------------------------
+    //
+    // Bounded, which it was not. `Busy` means the socket has nothing yet, so
+    // the old spin waited for ever on an exporter that stopped answering — and
+    // the SUBMIT itself carries a 30 s device deadline, so the two ends
+    // disagreed about whether this transfer could outlive the day. T_urb_wd_imp
+    // is deliberately larger than the device ceiling: the exporter should be
+    // the one to give up on the device and say so, and this only fires when the
+    // exporter itself has gone quiet.
+    const Clock& clock = Clock::system();
+    const Deadline deadline = Deadline::afterMs(clock, watchdog::kUrbWatchdogImporter);
+    auto awaitRecord = [&](std::vector<std::uint8_t>& into) -> Status {
+        for (;;) {
+            const Status r = _link->receiveRecord(into);
+            if (r != Status::Busy && r != Status::Ok) return r;
+            if (r == Status::Ok && !into.empty()) return Status::Ok;
+            if (deadline.expired(clock)) return Status::XferTimeout;
+        }
+    };
+
     std::vector<std::uint8_t> in;
-    for (;;) {
-        const Status r = _link->receiveRecord(in);
-        if (r == Status::Busy) continue;          // caller's loop drives the socket
-        if (r != Status::Ok) return r;
-        if (!in.empty()) break;
-    }
+    if (const Status r = awaitRecord(in); r != Status::Ok) return r;
 
     Header rh;
     if (!decodeHeader(in, rh)) return Status::MalformedFrame;
@@ -151,12 +166,7 @@ Status RemoteDevicePort::submit(std::uint8_t epAddr, std::uint8_t xferType,
 
             std::vector<std::uint8_t> dr;
             while (o == Reassembler::Outcome::NeedMore) {
-                for (;;) {
-                    const Status r = _link->receiveRecord(dr);
-                    if (r == Status::Busy) continue;
-                    if (r != Status::Ok) return r;
-                    if (!dr.empty()) break;
-                }
+                if (const Status r = awaitRecord(dr); r != Status::Ok) return r;
                 Header dh;
                 if (!decodeHeader(dr, dh)) return Status::MalformedFrame;
                 if (dr.size() - wire::kHeaderSize < dh.bodyLen) return Status::MalformedFrame;

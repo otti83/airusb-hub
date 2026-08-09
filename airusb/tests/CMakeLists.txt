@@ -30,6 +30,13 @@ airusb_test(test_l5_segmentation)
 airusb_test(test_dataplane)
 airusb_test(test_netbridge airusb_linux_usbip)
 airusb_test(test_exporter airusb_diag)
+airusb_test(test_control  airusb_control)
+airusb_test(test_hub_e2e  airusb_control)
 
 find_package(Threads REQUIRED)
 target_link_libraries(test_macipc PRIVATE Threads::Threads)
+# test_hub_e2e runs the sharing half on its own thread. Not for concurrency
+# inside the hub — each HubState is touched by exactly one thread — but because
+# two machines are two machines, and a single-threaded test would have each side
+# waiting for the other to be scheduled.
+target_link_libraries(test_hub_e2e PRIVATE Threads::Threads)

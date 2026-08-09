@@ -48,7 +48,24 @@ public:
     /// trusts on first use, which is a decision a person should be making.
     Status trustPeerWithoutConfirmation(const std::string& name);
 
+    /// The same mechanism, with the promise the other name disclaims: a person
+    /// was shown `sas()` and said it matched what the other machine showed.
+    ///
+    /// Two functions rather than a `bool confirmed` parameter, because the
+    /// difference between them is not a behaviour, it is a claim about what
+    /// happened outside the process — and a claim is worth a name. Grepping for
+    /// the honest one has to keep working.
+    Status trustPeerAfterSasConfirmed(const std::string& name);
+
     Status listDevices(std::vector<protocol::DeviceRecord>& out);
+
+    /// PING, and the PONG that comes back, with the round trip in nanoseconds.
+    ///
+    /// A GUI that sits attached and idle otherwise has no way to tell a live
+    /// link from a peer that went away: TCP will happily hold a socket open
+    /// across a sleeping laptop for minutes. This is what lets the window say
+    /// "connected" and mean it.
+    Status ping(std::uint64_t* rttNs = nullptr);
 
     /// Attaches and returns a synchronous port for it (the BotProbe instrument).
     /// `slot` must be 1..15.

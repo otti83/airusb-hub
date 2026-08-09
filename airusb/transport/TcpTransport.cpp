@@ -109,7 +109,8 @@ std::unique_ptr<TcpStream> TcpStream::connect(const std::string& host, std::uint
     return std::make_unique<TcpStream>(fd);
 }
 
-platform::SocketHandle TcpStream::listen(std::uint16_t port, Status* status)
+platform::SocketHandle TcpStream::listen(std::uint16_t port, Status* status,
+                                         bool loopbackOnly)
 {
     auto set = [&](Status s) { if (status) *status = s; };
     if (!platform::ensureNetworkReady()) {
@@ -145,7 +146,7 @@ platform::SocketHandle TcpStream::listen(std::uint16_t port, Status* status)
 
     struct sockaddr_in addr{};
     addr.sin_family      = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    addr.sin_addr.s_addr = htonl(loopbackOnly ? INADDR_LOOPBACK : INADDR_ANY);
     addr.sin_port        = htons(port);
 
     if (::bind(fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) != 0
