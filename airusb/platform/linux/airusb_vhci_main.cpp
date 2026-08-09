@@ -150,7 +150,7 @@ LocalIdentity loadOrCreateIdentity(const std::string& path)
     return LocalIdentity::fromSeed(seed);
 }
 
-int runHost(const std::string& host, std::uint16_t port,
+int runHost(const std::string& host, std::uint16_t port, bool trustOnFirstUse,
             const std::string& idPath, const std::string& peersPath)
 {
     // A kernel detach closes the socket under us; a write to it must become
@@ -180,11 +180,33 @@ int runHost(const std::string& host, std::uint16_t port,
     }
     logLine("ATTACH", "connected; SAS " + sasText(client.sas()));
     if (client.trust() != Trust::Paired) {
-        // Trust on first use, for a test tool, said out loud. The exporter pins the
-        // first unpaired peer and drops the session, so the first run pairs and the
-        // second run mounts — the caller retries.
-        logLine("ATTACH", "peer not pinned — trusting on first use (test tool)");
-        (void)client.trustPeerWithoutConfirmation("test peer");
+        // An unpaired peer is REFUSED by default, and this used to be the
+        // opposite.
+        //
+        // It printed the six-digit number and then trusted whoever had
+        // connected, without asking. On a shared LAN the first connector is not
+        // guaranteed to be the machine you meant, and this is the pair of
+        // programs that actually makes a kernel enumerate a device — so it was
+        // the one path where trust-on-first-use mattered most and the one place
+        // the ceremony was skipped. The README was simultaneously promising
+        // that a person compares the digits "before anything is trusted".
+        //
+        // Now: refuse, print the number, and say exactly what to do. The
+        // ceremony that the window already implements is the right answer;
+        // --trust-on-first-use is the honest name for taking the risk
+        // deliberately, and it has to be typed.
+        if (!trustOnFirstUse) {
+            logLine("ERROR", "this peer is not paired. Its number is " +
+                             sasText(client.sas()) + " — compare it with the number "
+                             "on the other machine.");
+            logLine("ERROR", "if they match, re-run with --trust-on-first-use to pin "
+                             "it. If they do not, something is between you and the "
+                             "machine you meant.");
+            return 2;
+        }
+        logLine("ATTACH", "pinning an unpaired peer because --trust-on-first-use was "
+                          "given; its number was " + sasText(client.sas()));
+        (void)client.trustPeerAfterSasConfirmed("trust-on-first-use");
         (void)peers.save(peersPath);
     }
 
@@ -381,6 +403,7 @@ int main(int argc, char** argv)
     std::string host, idPath = "airusb-vhci.id", peersPath = "airusb-vhci.peers";
     std::uint16_t port = 7714;
     bool wantHost = false;
+    bool trustOnFirstUse = false;
 
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -388,12 +411,18 @@ int main(int argc, char** argv)
         else if (a == "--port" && i + 1 < argc)  port = static_cast<std::uint16_t>(std::atoi(argv[++i]));
         else if (a == "--id" && i + 1 < argc)    idPath = argv[++i];
         else if (a == "--peers" && i + 1 < argc) peersPath = argv[++i];
+        else if (a == "--trust-on-first-use")    trustOnFirstUse = true;
         else {
             std::fprintf(stderr,
                 "usage:\n"
                 "  %s                       local simulated device (L4)\n"
                 "  %s --host H [--port N]   mount a network-served device on this kernel (L6)\n"
-                "                           [--id PATH] [--peers PATH]\n\n"
+                "                           [--id PATH] [--peers PATH]\n"
+                "                           [--trust-on-first-use]\n\n"
+                "  An unpaired peer is REFUSED. Its six-digit number is printed; compare it\n"
+                "  with the number the other machine shows, and only if they match re-run\n"
+                "  with --trust-on-first-use. On a shared network the first machine to\n"
+                "  connect is not guaranteed to be the one you meant.\n\n"
                 "  The attach speed is NOT an option. It is read from the device's own\n"
                 "  manifest, because it is a fact about the device and not a preference.\n",
                 argv[0], argv[0]);
@@ -401,5 +430,5 @@ int main(int argc, char** argv)
         }
     }
 
-    return wantHost ? runHost(host, port, idPath, peersPath) : runLocal();
+    return wantHost ? runHost(host, port, trustOnFirstUse, idPath, peersPath) : runLocal();
 }

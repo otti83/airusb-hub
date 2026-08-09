@@ -50,6 +50,9 @@ void usage(const char* argv0)
         "  --selftest-bot       run the read-only Bulk-Only Transport probe and exit\n"
         "  --serve [--port N]   after capture, serve the drive over TCP (default 7714)\n"
         "                       to a remote importer (e.g. Linux airusb-vhci --host)\n"
+        "  --trust-on-first-use pin an unpaired importer instead of refusing it.\n"
+        "                       Without it the six-digit number is printed and the\n"
+        "                       importer is turned away — compare the numbers first.\n"
         "  --hold MS            after the probe, keep the lease this long\n"
         "  --list               enumerate USB devices and exit (read-only, no root needed)\n"
         "\n"
@@ -246,7 +249,7 @@ private:
     HostDeviceExporter& _ex;
 };
 
-int runServe(HostDeviceExporter& exporter, std::uint16_t port,
+int runServe(HostDeviceExporter& exporter, std::uint16_t port, bool trustOnFirstUse,
              const std::string& idPath, const std::string& peersPath)
 {
     crypto::LocalIdentity identity = loadOrCreateIdentity(idPath);
@@ -299,13 +302,27 @@ int runServe(HostDeviceExporter& exporter, std::uint16_t port,
         if (!secure.established()) continue;
 
         if (secure.trust() != session::Trust::Paired) {
-            // TOFU for a test tool, said out loud: pin and drop, so the importer
-            // reconnects with the grants applied.
-            logLine("ATTACH", @"importer not paired — pinning (test tool). SAS %s",
+            // An unpaired importer is REFUSED unless somebody asked for the
+            // risk in so many words. This used to pin whoever connected first.
+            //
+            // The drive on the other side of this decision is a REAL one that
+            // has been unmounted and captured from this Mac. Handing it to the
+            // wrong machine is not a diagnostic inconvenience, and on a shared
+            // network the first connector is not guaranteed to be the machine
+            // you meant. The six-digit number is printed either way; what
+            // changed is that it now has to be looked at.
+            logLine("ATTACH", @"importer not paired. Its number is %s — compare it "
+                              @"with the number on that machine.",
                     crypto::sasText(secure.sas()).c_str());
+            if (!trustOnFirstUse) {
+                logLine("ERROR", @"refusing to pin it. If the numbers match, restart "
+                                 @"with --trust-on-first-use.");
+                continue;
+            }
             (void)peers.pin(secure.peerIdentity(), "importer", session::kDefaultGrants, 0);
             (void)peers.save(peersPath);
-            logLine("ATTACH", @"pinned; the importer must reconnect");
+            logLine("ATTACH", @"pinned because --trust-on-first-use was given; the "
+                              @"importer must reconnect");
             continue;
         }
         logLine("ATTACH", @"importer paired, SAS %s", crypto::sasText(secure.sas()).c_str());
@@ -350,7 +367,7 @@ int main(int argc, const char* argv[])
         }
 
         ExporterConfig cfg;
-        bool selftest = false, list = false, serve = false;
+        bool selftest = false, list = false, serve = false, trustOnFirstUse = false;
         std::uint16_t servePort = 7714;
         std::uint32_t holdMs = 0;
         bool haveDevice = false;
@@ -374,6 +391,7 @@ int main(int argc, const char* argv[])
             else if (a == "--hold" && i + 1 < argc)       holdMs = static_cast<std::uint32_t>(std::atoi(argv[++i]));
             else if (a == "--selftest-bot")               selftest = true;
             else if (a == "--serve")                      serve = true;
+            else if (a == "--trust-on-first-use")         trustOnFirstUse = true;
             else if (a == "--port" && i + 1 < argc)       servePort = static_cast<std::uint16_t>(std::atoi(argv[++i]));
             else if (a == "--list")                       list = true;
             else { usage(argv[0]); return 64; }
@@ -413,7 +431,8 @@ int main(int argc, const char* argv[])
         if (serve) {
             // Serve until the importer is done and the agent is still alive. The
             // release below hands the drive back to this Mac in the documented order.
-            rc = runServe(exporter, servePort, "airusb-exportd.id", "airusb-exportd.peers");
+            rc = runServe(exporter, servePort, trustOnFirstUse,
+                          "airusb-exportd.id", "airusb-exportd.peers");
         }
         else if (holdMs > 0) {
             logLine("ATTACH", @"holding the lease for %u ms", holdMs);

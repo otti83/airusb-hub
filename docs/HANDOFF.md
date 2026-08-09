@@ -1174,12 +1174,17 @@ that is true of the window and false of the command-line pair that actually
 enumerates a device. Leaving that sentence up was the single worst thing in the
 repository, and it was mine.
 
-**1. The real path does not do the pairing ceremony.** `airusb-vhci` and
-`airusb-exportd --serve` both call `trustPeerWithoutConfirmation` and print the
-SAS without asking anyone. The six-digit check exists, is tested, and is used by
-a different pair of processes with different identities and a different pin
-store. Until the privileged tools use it, first-use security on the only
-OS-enumerating path is trust-on-first-use.
+**1. The real path did not do the pairing ceremony — HALF FIXED, 2026-08-09.**
+Both `airusb-vhci --host` and `airusb-exportd --serve` used to pin whoever
+connected first and print the six digits without asking. Both now **REFUSE an
+unpaired peer by default**, print its number, and say to compare it with the
+other machine's; taking the risk deliberately requires typing
+`--trust-on-first-use`, which is the honest name for it.
+
+That closes the silent hole. What it does NOT do is give those two programs the
+ceremony itself — a person still cannot answer "they match" to them, only
+restart with a flag. The real fix is item 2: the window drives a privileged
+broker, and the broker never decides trust on its own.
 
 **2. The window is a diagnostic front end, not the control plane.** `hubd`
 attaches a `RemoteDevicePort` and runs `BotProbe`; it never tells `airusb-vhci`
@@ -1200,9 +1205,11 @@ legitimately idles blocks cancellation, detach and keepalive for the whole
 session. There is also no `CANCEL` handler: Linux cancellation retires the local
 request and the physical transfer continues.
 
-**5. Control OUT reports the wrong length.** The exporter does not set
-`actualLen` for a control OUT, so a class or vendor request with data can
-succeed physically and be reported as zero. Drivers that check the count break.
+**5. Control OUT reported the wrong length — FIXED, 2026-08-09.** The exporter
+never set `actualLen` for a control OUT, so a class or vendor request carrying
+data succeeded physically and was reported as having moved zero bytes. USB has
+no partial control data stage — the status stage is what says it worked — so on
+success the length is what was offered, and it now says so.
 
 **6. HELLO is never exchanged.** Roles, capabilities, max transfer and keepalive
 are defined in `Wire.h` and negotiated by nobody; `SecureSession` adopts its own

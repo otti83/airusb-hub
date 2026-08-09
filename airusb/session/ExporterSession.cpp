@@ -492,6 +492,18 @@ Status ExporterSession::completeSubmit(const Header& reqHeader, const SubmitBody
         sp.wIndex        = static_cast<std::uint16_t>(sb.setup[4] | (sb.setup[5] << 8));
         sp.wLength       = static_cast<std::uint16_t>(sb.setup[6] | (sb.setup[7] << 8));
         st = _port->controlTransfer(sp, dataOut, payload);
+
+        // A control OUT's length, which used to be left at zero.
+        //
+        // `controlTransfer` reports a moved count only for the IN direction —
+        // an OUT either completed or it did not, and USB has no partial
+        // control data stage: the status stage is what says it worked. So on
+        // success the length IS what was offered, and saying zero told every
+        // guest driver that checks the count that its class or vendor request
+        // moved nothing. It succeeded physically and was reported as a failure
+        // to write, which is the worst of the two possible lies.
+        if (sb.dir == static_cast<std::uint8_t>(wire::Dir::Out) && st == Status::Ok)
+            cb.actualLen = static_cast<std::uint32_t>(dataOut.size());
     } else if (sb.dir == static_cast<std::uint8_t>(wire::Dir::In)) {
         st = _port->bulkIn(sb.epAddr, sb.bufferLen, payload);
     } else {
