@@ -200,11 +200,22 @@ add_library(airusb_windows_udecx STATIC
     platform/windows/WindowsUsb.cpp
     platform/windows/UdecxIpc.cpp
     platform/windows/UdecxBridge.cpp
+    # W5. Compiled on EVERY platform and empty everywhere but Windows, so that a
+    # missing symbol on Windows is a link error somebody notices rather than a
+    # port nobody wrote. Its header says which half is which.
+    platform/windows/UdecxDriverChannel.cpp
+    $<$<BOOL:${WIN32}>:${CMAKE_CURRENT_SOURCE_DIR}/platform/windows/UdecxPresenter.cpp>
 )
 # UdecxBridge drives session::ImporterDataPlane, the same platform -> session
 # arrow platform/linux is allowed. WindowsUsb and UdecxIpc stay pure, so the
 # fuzzed codec keeps building with nothing but core.
 target_link_libraries(airusb_windows_udecx PUBLIC airusb_core airusb_session)
+if(WIN32)
+    # cfgmgr32 resolves CM_Get_Device_Interface_List, which is how the host
+    # finds the driver: a device-interface path is generated and must never be
+    # guessed at.
+    target_link_libraries(airusb_windows_udecx PUBLIC cfgmgr32)
+endif()
 
 # The L1 gate. Linux only, because it writes to vhci-hcd's sysfs and there is
 # nothing to point it at anywhere else.
@@ -359,6 +370,9 @@ add_executable(airusb-brokerd tools/airusb_brokerd_main.cpp)
 target_link_libraries(airusb-brokerd PRIVATE airusb_control)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_link_libraries(airusb-brokerd PRIVATE airusb_linux_usbip)
+endif()
+if(WIN32)
+    target_link_libraries(airusb-brokerd PRIVATE airusb_windows_udecx)
 endif()
 
 # ---------------------------------------------------------------------------

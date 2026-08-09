@@ -46,7 +46,22 @@ VENDORED=(-x c third_party/monocypher/monocypher.c
     -lws2_32 -lbcrypt \
     -o "$OUT/airusb-hubd.exe"
 
-for exe in airusb-net airusb-hubd; do
+# airusb-brokerd — the privileged half, with the Windows presenter (W5).
+#
+# It links platform/windows because the presenter is real code on this platform,
+# even though the driver it talks to has never been loaded: UdecxDriverChannel
+# reports "not installed" and the broker renders that verbatim. Building it here
+# is what stops the Windows importer from rotting between bring-up sessions.
+"$CXX" -std=c++20 -O2 -I. -Wall -Wextra -static \
+    tools/airusb_brokerd_main.cpp tests/fakes/ScriptedDevice.cpp \
+    control/*.cpp platform/windows/WindowsUsb.cpp platform/windows/UdecxIpc.cpp \
+    platform/windows/UdecxBridge.cpp platform/windows/UdecxDriverChannel.cpp \
+    platform/windows/UdecxPresenter.cpp \
+    "${COMMON[@]}" "${VENDORED[@]}" \
+    -lws2_32 -lbcrypt -lcfgmgr32 -ladvapi32 \
+    -o "$OUT/airusb-brokerd.exe"
+
+for exe in airusb-net airusb-hubd airusb-brokerd; do
     echo "built $OUT/$exe.exe"
     file "$OUT/$exe.exe" 2>/dev/null || true
 done

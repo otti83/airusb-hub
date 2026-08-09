@@ -59,6 +59,8 @@
 #ifndef AIRUSB_PLATFORM_WINDOWS_UDECXIPC_H
 #define AIRUSB_PLATFORM_WINDOWS_UDECXIPC_H
 
+#include "WindowsUsbAbi.h"
+
 #include "../../core/Status.h"
 #include "../../core/UsbTypes.h"
 
@@ -70,7 +72,7 @@ namespace airusb::windows::ipc {
 
 /// Bumped when a field's meaning changes. A mismatch is refused, never
 /// negotiated: the driver and the host ship together.
-inline constexpr std::uint16_t kVersion = 1;
+inline constexpr std::uint16_t kVersion = AIRUSB_IPC_VERSION;
 
 /// Bounds, all enforced by the decoder. They exist so a hostile or confused
 /// host cannot make the kernel size an allocation from a number it supplied.
@@ -114,14 +116,30 @@ Result fromStatus(Status s) noexcept;
 
 // ---------------------------------------------------------------------------
 
-enum class TransferType : std::uint8_t { Control = 0, Bulk = 1, Interrupt = 2 };
-enum class Direction    : std::uint8_t { Out = 0, In = 1 };
+enum class TransferType : std::uint8_t {
+    Control   = AIRUSB_XFER_CONTROL,
+    Bulk      = AIRUSB_XFER_BULK,
+    Interrupt = AIRUSB_XFER_INTERRUPT,
+};
+enum class Direction : std::uint8_t {
+    Out = AIRUSB_DIR_OUT,
+    In  = AIRUSB_DIR_IN,
+};
 
 /// W1's own flags. NOT `USBD_*`: the driver translates, so the host neither
 /// sees nor can forge a kernel constant.
 enum Flags : std::uint8_t {
-    kFlagShortOk = 1u << 0,   ///< the guest set USBD_SHORT_TRANSFER_OK
+    kFlagShortOk = AIRUSB_FLAG_SHORT_OK,   ///< the guest set USBD_SHORT_TRANSFER_OK
 };
+
+// The driver writes these records BY HAND, in C, because a kernel translation
+// unit cannot include <vector>. Deriving both spellings from the same macros in
+// WindowsUsbAbi.h is what stops the two from drifting: a change on one side
+// that is not mirrored is a compile error here rather than a wire mismatch
+// discovered with a kernel in the room.
+static_assert(static_cast<std::uint8_t>(TransferType::Bulk) == AIRUSB_XFER_BULK, "");
+static_assert(static_cast<std::uint8_t>(Direction::In) == AIRUSB_DIR_IN, "");
+static_assert(kVersion == AIRUSB_IPC_VERSION, "");
 
 struct UrbRequest {
     std::uint64_t requestId          = 0;   ///< never reused within a session

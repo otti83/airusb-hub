@@ -48,6 +48,8 @@
 
 #if defined(__linux__)
 #  include "../platform/linux/VhciPresenter.h"
+#elif defined(_WIN32)
+#  include "../platform/windows/UdecxPresenter.h"
 #endif
 
 #include <atomic>
@@ -120,14 +122,10 @@ std::unique_ptr<session::IDevicePresenter> makePresenter()
         "Apple, requested as FB24214361 and not yet granted. This Mac can still "
         "SHARE its own devices, and can read a remote one for diagnostics.");
 #elif defined(_WIN32)
-    // W5 replaces this the moment airusb.sys can be loaded. Until then the
-    // honest answer is that the driver exists, has never been loaded, and
-    // therefore this machine cannot present anything.
-    return std::make_unique<session::UnavailablePresenter>(
-        "unavailable-windows",
-        "Windows cannot present a remote device on this machine yet: the AirUSB "
-        "virtual host controller driver is not installed. This machine can still "
-        "SHARE its own devices, and can read a remote one for diagnostics.");
+    // W5. It reports canPresent() == false — with the reason — on every machine
+    // where airusb.sys is not installed, which today is every machine: the
+    // driver compiles, passes Code Analysis clean, and has never been loaded.
+    return std::make_unique<windows::UdecxPresenter>(Clock::system());
 #else
     return std::make_unique<session::UnavailablePresenter>(
         "unavailable", "This platform has no USB importer.");

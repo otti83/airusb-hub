@@ -68,4 +68,28 @@
 #define AIRUSB_USBD_SHORT_TRANSFER_OK      0x00000002u
 #define AIRUSB_USBD_TRANSFER_DIRECTION_IN  0x00000001u
 
+/* --- OUR OWN ABI, not Microsoft's --------------------------------------------
+ *
+ * These are NOT transcribed constants and `wdk_abi_check.c` cannot check them
+ * against anything — there is nothing to check them against. They are the
+ * driver/host contract, and the thing that keeps them honest is that the C++
+ * side derives from the SAME macros: `UdecxIpc.h` static_asserts its own enum
+ * values against them, so a change here that is not mirrored is a compile
+ * error rather than a wire mismatch discovered on a kernel.
+ */
+#define AIRUSB_IPC_VERSION      1u
+
+/* ipc::TransferType */
+#define AIRUSB_XFER_CONTROL     0u
+#define AIRUSB_XFER_BULK        1u
+#define AIRUSB_XFER_INTERRUPT   2u
+
+/* ipc::Direction */
+#define AIRUSB_DIR_OUT          0u
+#define AIRUSB_DIR_IN           1u
+
+/* ipc::Flags — the guest's USBD_SHORT_TRANSFER_OK, carried abstractly so the
+ * host never sees or forges a kernel constant. */
+#define AIRUSB_FLAG_SHORT_OK    0x01u
+
 #endif /* AIRUSB_PLATFORM_WINDOWS_WINDOWSUSBABI_H */
