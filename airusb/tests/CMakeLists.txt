@@ -36,6 +36,7 @@ airusb_test(test_udecxipc  airusb_windows_udecx)
 airusb_test(test_udecxbridge airusb_windows_udecx)
 airusb_test(test_control  airusb_control)
 airusb_test(test_hub_e2e  airusb_control)
+airusb_test(test_broker   airusb_control)
 
 find_package(Threads REQUIRED)
 target_link_libraries(test_macipc PRIVATE Threads::Threads)
@@ -44,3 +45,6 @@ target_link_libraries(test_macipc PRIVATE Threads::Threads)
 # two machines are two machines, and a single-threaded test would have each side
 # waiting for the other to be scheduled.
 target_link_libraries(test_hub_e2e PRIVATE Threads::Threads)
+# test_broker runs the broker on its own thread for the same reason: a window
+# blocking on a reply and a daemon answering it cannot be one thread.
+target_link_libraries(test_broker PRIVATE Threads::Threads)

@@ -102,6 +102,7 @@ footer{color:var(--muted);font-size:12px;padding:0 20px 24px;max-width:1200px}
     </div>
     <div class="state"><i class="dot" id="shareDot"></i><span id="shareState"></span></div>
     <div class="fp session hidden" id="shareSession"></div>
+    <div class="pair hidden" id="shareHeld"></div>
 
     <div class="pair hidden" id="sharePair">
       <h3>A machine wants to use a device from here</h3>
@@ -129,6 +130,8 @@ footer{color:var(--muted);font-size:12px;padding:0 20px 24px;max-width:1200px}
     </div>
     <div class="state"><i class="dot" id="importDot"></i><span id="importState"></span></div>
     <div class="fp session hidden" id="importSession"></div>
+    <div class="empty hidden" id="importCap"></div>
+    <div class="fp session hidden" id="importVia"></div>
 
     <div class="pair hidden" id="importPair">
       <h3>Is this the machine you meant?</h3>
@@ -246,6 +249,15 @@ function render(s) {
   // check it against.
   show($("shareSession"), !!sh.sas && !sh.needsApproval);
   if (sh.sas) text($("shareSession"), "this connection's number: " + sh.sas);
+
+  // A quarantined lease is not "busy". It means a machine took the device and
+  // stopped answering, and nothing else can have it until somebody here
+  // decides — which is a decision only a person at this screen can make.
+  show($("shareHeld"), sh.lease === "quarantined");
+  if (sh.lease === "quarantined")
+    text($("shareHeld"),
+         "A machine took a device from here and stopped answering. It is being "
+         + "kept for that machine. Taking it back may lose unsaved changes.");
   renderList($("shareDevices"), $("shareEmpty"), sh.devices,
     sh.canShare ? "No device on this machine can be shared right now."
                 : "This build has no capture backend, so it offers nothing.", null);
@@ -259,13 +271,25 @@ function render(s) {
     : im.state === "awaiting-approval" ? "waiting for you to check the number"
     : im.state === "waiting-for-peer" ? "accepted here — waiting for the other machine"
     : im.state === "connected" ? ("connected to " + im.host + ":" + im.port)
-    : ("attached — " + im.manifest));
+    // Never just "attached". The two meanings of that word — a device really
+    // added to this computer, and a device merely opened for a read-only probe
+    // — looked identical here, and a person had no way to tell which they had.
+    : ((im.presented ? "presented to this computer — " : "opened for diagnostics — ")
+        + im.manifest));
   $("connect").disabled = im.state !== "off";
   $("disconnect").disabled = im.state === "off";
   show($("importPair"), im.needsApproval);
   if (im.sas) { text($("importSas"), im.sas); text($("importPeerFp"), im.peerFingerprint); }
   show($("importSession"), !!im.sas && !im.needsApproval);
   if (im.sas) text($("importSession"), "this connection's number: " + im.sas);
+
+  // What this build can actually do, said before anybody presses Attach rather
+  // than after. `cannotPresentBecause` is the daemon's own sentence, rendered
+  // verbatim — the page never decides what this machine is capable of.
+  show($("importCap"), !im.canPresent);
+  if (!im.canPresent) text($("importCap"), im.cannotPresentBecause || "");
+  show($("importVia"), !!im.attachedVia);
+  if (im.attachedVia) text($("importVia"), im.attachedVia);
 
   renderList($("importDevices"), $("importEmpty"), im.devices,
     im.state === "off" ? "Connect to a machine to see what it offers."
@@ -340,15 +364,26 @@ $("shareStart").onclick = function () {
   act("/api/share/start", { port: Number($("sharePort").value) || 7714 });
 };
 $("shareStop").onclick   = function () { act("/api/share/stop"); };
-$("shareAccept").onclick = function () { act("/api/share/approve", { accept: true }); };
-$("shareRefuse").onclick = function () { act("/api/share/approve", { accept: false }); };
+// The answer carries the ticket, the fingerprint and the digits THAT WERE ON
+// SCREEN when it was clicked, not whatever the daemon thinks is current now.
+// A window one session out of date is then refused instead of pinning a machine
+// whose number nobody compared.
+function approval(side, accept) {
+  var v = last ? last[side] : null;
+  return { accept: accept,
+           ticket: v ? v.approvalTicket : "",
+           fingerprint: v ? v.peerFingerprint : "",
+           sas: v ? (v.sas || "") : "" };
+}
+$("shareAccept").onclick = function () { act("/api/share/approve", approval("share", true)); };
+$("shareRefuse").onclick = function () { act("/api/share/approve", approval("share", false)); };
 $("connect").onclick = function () {
   act("/api/import/connect",
       { host: $("host").value.trim(), port: Number($("port").value) || 7714 });
 };
 $("disconnect").onclick   = function () { act("/api/import/disconnect"); };
-$("importAccept").onclick = function () { act("/api/import/approve", { accept: true }); };
-$("importRefuse").onclick = function () { act("/api/import/approve", { accept: false }); };
+$("importAccept").onclick = function () { act("/api/import/approve", approval("import", true)); };
+$("importRefuse").onclick = function () { act("/api/import/approve", approval("import", false)); };
 
 function poll() {
   // Skipped while an action is in flight. The daemon is single-threaded, so a

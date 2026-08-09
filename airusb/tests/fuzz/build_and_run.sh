@@ -122,3 +122,54 @@ clang++ -std=c++20 -g -O1 -fsanitize="$SAN" \
 echo
 echo "running ${RUNS} executions over ${UDECX_CORPUS} (sanitizers: ${SAN})"
 ./build/fuzz_udecxipc -max_len=4096 -runs="${RUNS}" -print_final_stats=1 "$UDECX_CORPUS"
+
+# ---------------------------------------------------------------------------
+# The USB/IP byte layer (L2).
+#
+# Named in LINUX_IMPORTER_PLAN.md §L2 since the plan was written, and absent
+# from the tree until 2026-08-09 — while HANDOFF.md asserted the reference did
+# not exist. Both are now true.
+#
+# It parses bytes the kernel writes, which sounds trusted and is not the useful
+# framing: the header is 48 bytes of BIG-endian fields carrying a payload length,
+# and inside it sits the USB SETUP packet, which is LITTLE-endian and must
+# travel verbatim. One PDU, both orders. The round-trip assertion is what stops
+# a regression into byteswapping the header wholesale, which corrupts
+# enumeration itself.
+# ---------------------------------------------------------------------------
+USBIP_CORPUS="${6:-tests/vectors/corpus_usbip}"
+mkdir -p "$USBIP_CORPUS"
+
+clang++ -std=c++20 -g -O1 -fsanitize="$SAN" \
+    -fno-sanitize-recover=undefined \
+    tests/fuzz/fuzz_usbip.cpp \
+    platform/linux/UsbipCodec.cpp core/Status.cpp core/UsbTypes.cpp \
+    -o build/fuzz_usbip
+
+echo
+echo "running ${RUNS} executions over ${USBIP_CORPUS} (sanitizers: ${SAN})"
+./build/fuzz_usbip -max_len=4096 -runs="${RUNS}" -print_final_stats=1 "$USBIP_CORPUS"
+
+# ---------------------------------------------------------------------------
+# The window <-> broker channel (A1).
+#
+# Same position as the agent IPC: a program an ordinary user runs, talking to a
+# daemon that owns this machine's USB identity, its pinned peers and its leases.
+# A length trusted where it should be checked is a local privilege escalation.
+#
+# It drives the FRAMING as well as the bodies, because the two fail differently:
+# the framing decides how many bytes to hand onward from a length the peer wrote,
+# and that is the one arithmetic that can produce a span nobody owns.
+# ---------------------------------------------------------------------------
+BROKER_CORPUS="${7:-tests/vectors/corpus_broker}"
+mkdir -p "$BROKER_CORPUS"
+
+clang++ -std=c++20 -g -O1 -fsanitize="$SAN" \
+    -fno-sanitize-recover=undefined \
+    tests/fuzz/fuzz_broker.cpp \
+    control/BrokerProtocol.cpp protocol/Codec.cpp core/Status.cpp \
+    -o build/fuzz_broker
+
+echo
+echo "running ${RUNS} executions over ${BROKER_CORPUS} (sanitizers: ${SAN})"
+./build/fuzz_broker -max_len=4096 -runs="${RUNS}" -print_final_stats=1 "$BROKER_CORPUS"

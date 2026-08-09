@@ -100,7 +100,11 @@ private:
         while (!_stop.load()) {
             if (_approve.load()) {
                 std::string why;
-                (void)_hub.shareApprove(true, &why);
+                // The ticket is read from the SAME state the window would
+                // render, which is the whole point of it: an approval that does
+                // not name the question it is answering is refused now.
+                (void)_hub.shareApprove(_hub.shareNonce(), _hub.sharePeerFingerprint(),
+                                        _hub.shareSas(), true, &why);
                 _approve.store(false);
             }
             const int did = _hub.pump();
@@ -215,7 +219,8 @@ void testImporterApprovesFirst()
         CHECK_EQ(imp.hub.importSas(), sharer.sas());
         CHECK(imp.hub.importSas() != 0u);
 
-        CHECK(imp.hub.importApprove(true, &why) == Status::Ok);
+        CHECK(imp.hub.importApprove(imp.hub.importNonce(), imp.hub.importPeerFingerprint(),
+                                    imp.hub.importSas(), true, &why) == Status::Ok);
         CHECK(imp.hub.importState() == ImportState::WaitingForPeer);
 
         // Still connected, deliberately: the other person is still looking at
@@ -274,7 +279,8 @@ void testExporterApprovesFirst()
         CHECK(waitForShare(sharer, ShareState::Serving));
         CHECK_EQ(imp.hub.importSas(), sharer.sas());
 
-        CHECK(imp.hub.importApprove(true, &why) == Status::Ok);
+        CHECK(imp.hub.importApprove(imp.hub.importNonce(), imp.hub.importPeerFingerprint(),
+                                    imp.hub.importSas(), true, &why) == Status::Ok);
         CHECK(waitFor(imp.hub, [&] { return imp.hub.importState() == ImportState::Connected; }));
         attachAndVerify(imp.hub);
     }
@@ -294,7 +300,8 @@ void testRefusalIsFinal()
         CHECK(imp.hub.importConnect("127.0.0.1", sharer.port(), &why) == Status::Ok);
         CHECK(imp.hub.importState() == ImportState::AwaitingApproval);
 
-        CHECK(imp.hub.importApprove(false, &why) == Status::Ok);
+        CHECK(imp.hub.importApprove(imp.hub.importNonce(), imp.hub.importPeerFingerprint(),
+                                    imp.hub.importSas(), false, &why) == Status::Ok);
         CHECK(imp.hub.importState() == ImportState::Off);
         CHECK_EQ(static_cast<int>(imp.peers.size()), 0);
 

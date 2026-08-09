@@ -78,10 +78,65 @@ bool HubState::parseUidHex(const std::string& hex, protocol::DeviceUid& out)
     return true;
 }
 
+bool nonceIsZero(const ApprovalNonce& n) noexcept
+{
+    for (const std::uint8_t b : n) if (b != 0) return false;
+    return true;
+}
+
+void HubState::mintNonce(ApprovalNonce& out)
+{
+    crypto::randomBytes(std::span<std::uint8_t>(out.data(), out.size()));
+    // Astronomically unlikely, and cheap to exclude: all zeroes is the sentinel
+    // for "there is no question pending", so a real ticket must never be it.
+    if (nonceIsZero(out)) out[0] = 1;
+}
+
+void HubState::clearNonce(ApprovalNonce& out) noexcept { out.fill(0); }
+
+Status HubState::checkApproval(const ApprovalNonce& have, const std::string& haveFp,
+                               std::uint32_t haveSas, const ApprovalNonce& said,
+                               const std::string& saidFp, std::uint32_t saidSas,
+                               std::string* why) const
+{
+    auto no = [&](const char* m) { if (why) *why = m; return Status::NotPermitted; };
+
+    if (nonceIsZero(have))
+        return no("there is no pairing question waiting to be answered");
+
+    // Constant time, and not because the nonce is a high-value secret — it
+    // lives for one session and authorises only what the person at the screen
+    // could already do. It is constant time because the day somebody copies
+    // this comparison onto something that IS high-value, nobody will remember
+    // to change it.
+    if (!crypto::constantTimeEquals(
+            std::span<const std::uint8_t>(said.data(), said.size()),
+            std::span<const std::uint8_t>(have.data(), have.size())))
+        return no("that answer is for a pairing question that is no longer on "
+                  "screen — check the number again");
+
+    // The fingerprint and the digits are checked TOO, not just the nonce.
+    // Belt and braces on purpose: the nonce proves which question was asked,
+    // and these prove the window rendered the same answer to it that this side
+    // is about to act on. If they ever disagree, something between the two is
+    // wrong and refusing is the only safe move.
+    if (saidFp != haveFp)
+        return no("the machine on screen is not the machine that is connected");
+    if (saidSas != haveSas)
+        return no("the number on screen is not this session's number");
+
+    return Status::Ok;
+}
+
 Status HubState::begin(const Config& cfg)
 {
     _cfg = cfg;
     if (!_cfg.identity || !_cfg.peers) return Status::BadArgument;
+    // Never null. A build with no real importer gets the diagnostic probe,
+    // which reports canPresent() == false — the alternative is a null check
+    // scattered everywhere and a window that cannot tell the two apart.
+    _presenter = _cfg.presenter ? _cfg.presenter
+                                : static_cast<session::IDevicePresenter*>(&_ownProbe);
     return Status::Ok;
 }
 
@@ -136,6 +191,7 @@ void HubState::shareStop()
     _sharePort   = 0;
     _sharePeerFingerprint.clear();
     _shareSas = 0;
+    clearNonce(_shareNonce);
     setNotice("Sharing is off. Any device this machine had captured has been released.");
 }
 
@@ -145,16 +201,22 @@ void HubState::shareDropPeer(const char* why)
     _shareSecure.reset();
     _sharePeerFingerprint.clear();
     _shareSas = 0;
+    clearNonce(_shareNonce);
     _shareState = platform::isValid(_shareListen) ? ShareState::Listening : ShareState::Off;
     if (why && *why) setNotice(why);
 }
 
-Status HubState::shareApprove(bool accept, std::string* why)
+Status HubState::shareApprove(const ApprovalNonce& nonce, const std::string& fingerprint,
+                              std::uint32_t sas, bool accept, std::string* why)
 {
     if (_shareState != ShareState::AwaitingApproval || !_shareSecure) {
         if (why) *why = "nobody is waiting to be approved";
         return Status::BadArgument;
     }
+
+    if (const Status s = checkApproval(_shareNonce, _sharePeerFingerprint, _shareSas,
+                                       nonce, fingerprint, sas, why); s != Status::Ok)
+        return s;
 
     if (!accept) {
         shareDropPeer("Refused. The other machine was not trusted and has been "
@@ -180,6 +242,23 @@ Status HubState::shareApprove(bool accept, std::string* why)
 int HubState::pump()
 {
     int did = pumpImportPairing();
+
+    // The presenter is a non-blocking event loop of its own — on Linux it is
+    // draining vhci-hcd's socket and the network in the same step. It has to be
+    // pumped from here for the same reason everything else is: this process is
+    // single-threaded above the platform layer.
+    if (_presenter && _presenter->presenting()) {
+        const Status ps = _presenter->pump();
+        if (ps != Status::Ok && ps != Status::Busy) {
+            setNotice("The device stopped being available to this computer: " +
+                      _presenter->statusText());
+            _presenter->withdraw();
+            _attached = session::ImporterClient::BridgeAttach{};
+            if (_importState == ImportState::Attached)
+                _importState = ImportState::Connected;
+        }
+        ++did;
+    }
 
     if (!platform::isValid(_shareListen)) return did;
 
@@ -245,6 +324,10 @@ int HubState::pump()
                 setNotice("A paired machine is connected.");
             } else {
                 _shareState = ShareState::AwaitingApproval;
+                // The ticket is minted WITH the question. It names this session,
+                // and it is what makes an answer that arrives after the session
+                // has been replaced a refusal rather than a pin.
+                mintNonce(_shareNonce);
                 setNotice("A machine wants to use a device from here. Check the number "
                           "matches the one on its screen.");
             }
@@ -283,7 +366,8 @@ int HubState::pump()
 
 void HubState::importDropSession()
 {
-    _port.reset();
+    _presenter->withdraw();
+    _attached = session::ImporterClient::BridgeAttach{};
     _client.reset();
     _offered.clear();
     _importPeerFingerprint.clear();
@@ -327,6 +411,12 @@ int HubState::pumpImportPairing()
         if (importOpen(_importHost, _importPort, &why) != Status::Ok) return 1;
         _importState = _importPinned ? ImportState::WaitingForPeer
                                      : ImportState::AwaitingApproval;
+        // A NEW session means a new number, so the old ticket must die with it.
+        // This is the reconnect that used to leave the window asking "do these
+        // six digits match?" with nothing underneath it (§3.9); the ticket makes
+        // the stale state refuse rather than merely look wrong.
+        if (_importPinned) clearNonce(_importNonce);
+        else               mintNonce(_importNonce);
         if (!_importPinned)
             setNotice("Reconnected. Compare this new number with the one on the "
                       "other machine — it changes with every connection, and that "
@@ -418,6 +508,7 @@ Status HubState::importConnect(const std::string& host, std::uint16_t port, std:
 
     if (_client->trust() != Trust::Paired) {
         _importState = ImportState::AwaitingApproval;
+        mintNonce(_importNonce);
         setNotice("Check that the number below matches the one on the other machine's "
                   "screen before accepting.");
         return Status::Ok;
@@ -445,12 +536,17 @@ Status HubState::importConnect(const std::string& host, std::uint16_t port, std:
     }
 }
 
-Status HubState::importApprove(bool accept, std::string* why)
+Status HubState::importApprove(const ApprovalNonce& nonce, const std::string& fingerprint,
+                               std::uint32_t sas, bool accept, std::string* why)
 {
     if (_importState != ImportState::AwaitingApproval || !_client) {
         if (why) *why = "there is nothing waiting to be approved";
         return Status::BadArgument;
     }
+
+    if (const Status s = checkApproval(_importNonce, _importPeerFingerprint, _importSas,
+                                       nonce, fingerprint, sas, why); s != Status::Ok)
+        return s;
 
     if (!accept) {
         importDisconnect();
@@ -464,6 +560,8 @@ Status HubState::importApprove(bool accept, std::string* why)
     }
     if (!_cfg.peersPath.empty()) (void)_cfg.peers->save(_cfg.peersPath);
     _importPinned = true;
+    // Spent. One use, so a replayed answer cannot pin a later peer.
+    clearNonce(_importNonce);
 
     // The session is NOT dropped here, and that is the whole design.
     //
@@ -529,24 +627,39 @@ Status HubState::importAttach(const std::string& uid, std::string* why)
     DeviceUid parsed{};
     if (!parseUidHex(uid, parsed)) return fail(Status::BadArgument, "that is not a device id");
 
+    // attachForBridge, not attach: it returns the live link and the manifest
+    // WITHOUT building a RemoteDevicePort, so the presenter decides what the
+    // device becomes. Building the synchronous instrument here was the whole
+    // reason the window's "attach" and the product's "attach" were different
+    // verbs — the instrument was the only thing it could ever produce.
     std::string whyNot;
-    std::unique_ptr<RemoteDevicePort> port;
-    if (const Status s = _client->attach(parsed, 1, port, &whyNot); s != Status::Ok)
+    session::ImporterClient::BridgeAttach att;
+    if (const Status s = _client->attachForBridge(parsed, 1, att, &whyNot); s != Status::Ok)
         return fail(s, whyNot.empty()
                         ? "the other machine refused to attach that device"
                         : whyNot);
 
-    _port = std::move(port);
+    _attached = std::move(att);
+
+    std::string pwhy;
+    if (const Status s = _presenter->present(*_client, _attached, &pwhy); s != Status::Ok) {
+        // The device is attached over the network but this computer cannot take
+        // it. Give it straight back rather than holding a lease nothing can use.
+        (void)_client->detach();
+        _attached = session::ImporterClient::BridgeAttach{};
+        return fail(s, pwhy.empty() ? _presenter->whyNot() : pwhy);
+    }
+
     _attachedUid  = uid;
     _attachedName.clear();
     for (const DeviceView& d : _offered)
         if (d.uid == uid) _attachedName = d.name;
 
-    const DeviceIdentity id = _port->manifest().identity();
+    const DeviceIdentity id = _attached.manifest.identity();
     char buf[192];
     std::snprintf(buf, sizeof buf, "%04x:%04x  %s  %u configuration(s)",
                   id.vendorId, id.productId, speedName(id.speed),
-                  static_cast<unsigned>(_port->manifest().configurationCount()));
+                  static_cast<unsigned>(_attached.manifest.configurationCount()));
     _manifestSummary = buf;
 
     _haveProbe = false;
@@ -554,7 +667,10 @@ Status HubState::importAttach(const std::string& uid, std::string* why)
     _probeFailure.clear();
 
     _importState = ImportState::Attached;
-    setNotice("Attached. The device is held for this machine until it is released.");
+    // The notice says WHICH of the two things happened. It used to say
+    // "Attached." for both, and a person reading that had no way to learn that
+    // no device had appeared on their computer.
+    setNotice(_presenter->statusText());
     return Status::Ok;
 }
 
@@ -564,7 +680,8 @@ Status HubState::importDetach(std::string* why)
         if (why) *why = "nothing is attached";
         return Status::BadArgument;
     }
-    _port.reset();
+    _presenter->withdraw();
+    _attached = session::ImporterClient::BridgeAttach{};
     const Status s = _client->detach();
     _attachedUid.clear();
     _attachedName.clear();
@@ -578,7 +695,8 @@ Status HubState::importDetach(std::string* why)
 void HubState::importDisconnect()
 {
     if (_importState == ImportState::Attached && _client) {
-        _port.reset();
+        _presenter->withdraw();
+        _attached = session::ImporterClient::BridgeAttach{};
         (void)_client->detach();
     }
     importDropSession();
@@ -597,13 +715,28 @@ void HubState::importDisconnect()
 
 Status HubState::importVerify(std::string* why)
 {
-    if (_importState != ImportState::Attached || !_port) {
+    if (_importState != ImportState::Attached) {
         if (why) *why = "nothing is attached";
         return Status::BadArgument;
     }
 
+    // Only in diagnostic mode, and this refusal is a feature.
+    //
+    // Once a device is PRESENTED, the operating system owns its endpoints. A
+    // second reader driving the same bulk pipes would desynchronise the
+    // Bulk-Only Transport phase machine underneath a mounted filesystem — the
+    // same class of corruption the "one logical transfer is one call" rule
+    // exists to prevent, arriving from a completely different direction.
+    session::RemoteDevicePort* port = _ownProbe.port();
+    if (_presenter != static_cast<session::IDevicePresenter*>(&_ownProbe) || !port) {
+        if (why) *why = "This device has been added to this computer as a real USB "
+                        "device, so this computer's own tools are what read it. "
+                        "This check only applies to a device opened for diagnostics.";
+        return Status::UnsupportedMessage;
+    }
+
     diag::BotEndpoints eps;
-    if (!diag::findBotInterface(_port->manifest(), 1, eps)) {
+    if (!diag::findBotInterface(port->manifest(), 1, eps)) {
         if (why) *why = "this device is not USB Mass Storage, so there is nothing "
                         "this check knows how to read from it";
         _haveProbe = false;
@@ -614,7 +747,7 @@ Status HubState::importVerify(std::string* why)
     // it cannot damage a drive's contents, and a button in a window is exactly
     // the place that promise has to hold: the person pressing it may have a real
     // disk on the other end and no way to know what the button does.
-    diag::BotProbe probe(*_port, eps);
+    diag::BotProbe probe(*port, eps);
     const diag::BotProbeResult r = probe.run();
 
     _haveProbe       = true;
@@ -633,6 +766,29 @@ Status HubState::importVerify(std::string* why)
     }
     setNotice("Verified — a real USB Mass Storage exchange completed over the "
               "encrypted session.");
+    return Status::Ok;
+}
+
+Status HubState::forceReclaim(std::string* why)
+{
+    if (_leases.state() == session::LeaseState::Free) {
+        if (why) *why = "no machine is holding a device from here";
+        return Status::NotFound;
+    }
+    const bool wasQuarantined = _leases.state() == session::LeaseState::Quarantined;
+    _leases.forceReclaim();
+
+    // Drop whatever session is live too. Reclaiming the lease while a peer is
+    // still driving transfers against it would leave the exporter answering a
+    // machine it no longer believes owns the device — two authorities on one
+    // drive, which is the exact ambiguity the lease exists to remove.
+    shareDropPeer(nullptr);
+
+    setNotice(wasQuarantined
+                  ? "Taken back. The machine that was holding this device had stopped "
+                    "answering; if it had unsaved changes they are lost."
+                  : "Taken back from a machine that was using it. If it had unsaved "
+                    "changes they are lost.");
     return Status::Ok;
 }
 
@@ -656,6 +812,13 @@ Status HubState::importPing(std::string* why)
 // ---------------------------------------------------------------------------
 // Rendering
 // ---------------------------------------------------------------------------
+
+std::string HubState::stateJson()
+{
+    JsonOut j;
+    writeStateJson(j);
+    return j.take();
+}
 
 void HubState::writeStateJson(JsonOut& j) const
 {
@@ -686,7 +849,14 @@ void HubState::writeStateJson(JsonOut& j) const
     } else {
         j.key("sas").null();
     }
+    j.kv("approvalTicket", crypto::toHex(std::span<const std::uint8_t>(_shareNonce.data(),
+                                                              _shareNonce.size())));
     j.kv("needsApproval", _shareState == ShareState::AwaitingApproval);
+    // Who owns the shared device, across sessions. "quarantined" is the state a
+    // person needs to see and could not before: it means a machine took the
+    // drive and stopped answering, and nothing else will get it until somebody
+    // here decides.
+    j.kv("lease", session::leaseStateText(_leases.state()));
     j.kv("transfersServed", _shareTransfers);
     j.kv("messagesHandled", _shareMessages);
     j.key("devices").beginArray();
@@ -721,17 +891,29 @@ void HubState::writeStateJson(JsonOut& j) const
     // true with a null `sas` beside it. A pairing prompt with no number in it
     // is worse than no prompt: it asks a person to compare something that is
     // not on screen, and the honest answer to that question is unavailable.
+    j.kv("approvalTicket", crypto::toHex(std::span<const std::uint8_t>(_importNonce.data(),
+                                                              _importNonce.size())));
     j.kv("needsApproval", _importState == ImportState::AwaitingApproval && _client != nullptr);
     j.kv("pinned", _importPinned);
     j.kv("attachedUid", _attachedUid);
     j.kv("attachedName", _attachedName);
     j.kv("manifest", _manifestSummary);
     j.kv("rttMicros", static_cast<std::uint64_t>(_lastRttNs / 1000));
-    if (_port) {
-        j.kv("transfersIssued", _port->transfersIssued());
-        j.kv("segmentedOut", _port->segmentedOutTransfers());
-        j.kv("segmentedIn", _port->segmentedInTransfers());
-        j.kv("maxSegmentBytes", static_cast<std::uint64_t>(_port->maxSegmentBytes()));
+    // WHAT ACTUALLY HAPPENED TO THE DEVICE, said in the state rather than left
+    // for the window to infer. `presented` is the whole distinction: false means
+    // this computer did not gain a USB device, however green everything looks.
+    j.kv("presenter", _presenter->name());
+    j.kv("canPresent", _presenter->canPresent());
+    j.kv("presented", _presenter->presenting());
+    j.kv("attachedVia", _importState == ImportState::Attached
+                            ? _presenter->statusText() : std::string{});
+    if (!_presenter->canPresent()) j.kv("cannotPresentBecause", _presenter->whyNot());
+
+    if (const session::RemoteDevicePort* dp = _ownProbe.port()) {
+        j.kv("transfersIssued", dp->transfersIssued());
+        j.kv("segmentedOut", dp->segmentedOutTransfers());
+        j.kv("segmentedIn", dp->segmentedInTransfers());
+        j.kv("maxSegmentBytes", static_cast<std::uint64_t>(dp->maxSegmentBytes()));
     }
     j.key("devices").beginArray();
     for (const DeviceView& d : _offered) {

@@ -17,7 +17,7 @@
 #define AIRUSB_CONTROL_CONTROLAPI_H
 
 #include "HttpServer.h"
-#include "HubState.h"
+#include "HubFacade.h"
 
 #include <string>
 
@@ -25,7 +25,7 @@ namespace airusb::control {
 
 class ControlApi {
 public:
-    ControlApi(HubState& hub, GuardConfig guard) noexcept
+    ControlApi(IHubFacade& hub, GuardConfig guard) noexcept
         : _hub(hub), _guard(std::move(guard)) {}
 
     /// The handler to hand to HttpServer::poll.
@@ -41,7 +41,7 @@ private:
     HttpResponse error(int status, std::string_view message) const;
     HttpResponse ok(std::string_view message) const;
 
-    HubState&   _hub;
+    IHubFacade& _hub;
     GuardConfig _guard;
     std::uint64_t _refusals = 0;
 };

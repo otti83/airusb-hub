@@ -38,6 +38,10 @@
 #ifndef AIRUSB_CONTROL_HUBSTATE_H
 #define AIRUSB_CONTROL_HUBSTATE_H
 
+#include "HubFacade.h"
+
+#include "../session/DevicePresenter.h"
+
 #include "../core/Clock.h"
 #include "../core/Platform.h"
 #include "../core/Status.h"
@@ -49,6 +53,7 @@
 #include "../session/PeerStore.h"
 #include "../session/SecureSession.h"
 
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -97,7 +102,22 @@ struct DeviceView {
     std::string   name;
 };
 
-class HubState {
+/// A one-use ticket that says "a person looked at THESE digits, for THIS
+/// session, and said yes".
+///
+/// The reason it exists is that `shareApprove(true)` used to mean "pin whoever
+/// is currently pending", which is a different sentence from the one the person
+/// answered. A window a second out of date — the session replaced underneath
+/// it, a new peer connected, a new SAS computed — would pin a machine whose
+/// number nobody had ever compared, and the person at the screen has no way to
+/// detect that. The nonce turns a stale answer into a refusal.
+using ApprovalNonce = ApprovalTicket;
+
+bool nonceIsZero(const ApprovalNonce& n) noexcept;
+
+/// The authority itself. `IHubFacade` is how the routes reach it when it is in
+/// this process; `BrokerFacade` is how they reach one that is not.
+class HubState final : public IHubFacade {
 public:
     struct Config {
         /// What this machine can offer. Null means "this build shares nothing",
@@ -108,6 +128,11 @@ public:
         std::string                  peersPath;
         /// Shown to the peer, and stored beside its pin. Display only.
         std::string                  machineName;
+        /// How this machine gives a remote device to its own operating system.
+        /// Null means the read-only diagnostic probe, and the window is told so
+        /// rather than left to assume — see DevicePresenter.h for why that
+        /// distinction is the whole point.
+        session::IDevicePresenter*   presenter = nullptr;
     };
 
     Status begin(const Config& cfg);
@@ -118,8 +143,28 @@ public:
 
     // --- sharing ------------------------------------------------------------
 
-    Status shareStart(std::uint16_t port, std::string* why);
+    Status shareStart(std::uint16_t port, std::string* why) override;
     void   shareStop();
+    Status shareStop(std::string* why) override { (void)why; shareStop(); return Status::Ok; }
+    std::string stateJson() override;
+
+    /// The ticket for the question currently on screen, or all zeroes when
+    /// there is no question. The window MUST show no number when this is zero:
+    /// a person trained to answer a security question while looking at nothing
+    /// has lost the whole value of the ceremony (§3.9).
+    ApprovalNonce shareNonce()  const noexcept { return _shareNonce; }
+    ApprovalNonce importNonce() const noexcept { return _importNonce; }
+
+    /// The peer's fingerprint as the window would render it. Part of the
+    /// approval, so it is readable rather than only writable.
+    const std::string& sharePeerFingerprint()  const noexcept { return _sharePeerFingerprint; }
+    const std::string& importPeerFingerprint() const noexcept { return _importPeerFingerprint; }
+
+    /// Who owns the shared device across sessions, for the window.
+    session::LeaseState leaseState() const noexcept { return _leases.state(); }
+
+    /// What the peer is currently offering, as the window lists it.
+    const std::vector<DeviceView>& offeredDevices() const noexcept { return _offered; }
     /// The port actually bound. Differs from what was asked for when 0 was
     /// passed, which is how a test gets a port without racing another test for
     /// a fixed one.
@@ -130,25 +175,56 @@ public:
     std::uint32_t importSas() const noexcept { return _importSas; }
     /// Answers the SAS question for an inbound peer. Accepting pins it and drops
     /// the connection so it can come back paired; refusing drops it unpinned.
-    Status shareApprove(bool accept, std::string* why);
+    ///
+    /// `nonce`, `fingerprint` and `sas` are what the window DISPLAYED, and all
+    /// three are checked against the session they belong to. A mismatch is
+    /// refused rather than resolved in favour of the current session: the whole
+    /// point of the ceremony is that a specific number was compared, and
+    /// pinning a different peer than the one the person looked at is the
+    /// failure it exists to prevent.
+    Status shareApprove(const ApprovalNonce& nonce, const std::string& fingerprint,
+                        std::uint32_t sas, bool accept, std::string* why) override;
 
     // --- importing ----------------------------------------------------------
 
-    Status importConnect(const std::string& host, std::uint16_t port, std::string* why);
+    Status importConnect(const std::string& host, std::uint16_t port,
+                         std::string* why) override;
     /// Accepting pins the peer and reconnects once, so the caller does not have
-    /// to know that a pin needs a fresh session to take effect.
-    Status importApprove(bool accept, std::string* why);
-    Status importRefresh(std::string* why);
-    Status importAttach(const std::string& uidHex, std::string* why);
-    Status importDetach(std::string* why);
+    /// to know that a pin needs a fresh session to take effect. Same three
+    /// checks as `shareApprove`, for the same reason.
+    Status importApprove(const ApprovalNonce& nonce, const std::string& fingerprint,
+                         std::uint32_t sas, bool accept, std::string* why) override;
+    Status importRefresh(std::string* why) override;
+    Status importAttach(const std::string& uidHex, std::string* why) override;
+    Status importDetach(std::string* why) override;
     void   importDisconnect();
+    Status importDisconnect(std::string* why) override
+    {
+        (void)why; importDisconnect(); return Status::Ok;
+    }
 
     /// A read-only Bulk-Only Transport exchange against the attached device.
     /// BotProbe cannot write; this is safe to point at anything.
-    Status importVerify(std::string* why);
+    ///
+    /// Available ONLY when the device was opened for diagnostics. Once it has
+    /// been presented to this computer as a real USB device, the operating
+    /// system owns the endpoints and a second reader driving the same pipes
+    /// would corrupt the phase machine — so this refuses and says to use the
+    /// computer's own tools, which is what a presented device is for.
+    Status importVerify(std::string* why) override;
+
+    /// Takes a quarantined device back from a peer that stopped answering.
+    ///
+    /// Its own verb, not a flag on detach, because it is the one operation here
+    /// that can lose somebody else's data: the machine holding the lease may
+    /// have a filesystem mounted and dirty.
+    Status forceReclaim(std::string* why) override;
+
+    /// What this build can actually do with a remote device. Rendered verbatim.
+    const session::IDevicePresenter& presenter() const noexcept { return *_presenter; }
 
     /// PING/PONG, for the "is the link alive" indicator.
-    Status importPing(std::string* why);
+    Status importPing(std::string* why) override;
 
     // --- what the window renders --------------------------------------------
 
@@ -165,6 +241,14 @@ private:
     void   setNotice(std::string s) { _notice = std::move(s); }
     Status importOpen(const std::string& host, std::uint16_t port, std::string* why);
     void   shareDropPeer(const char* why);
+    /// Mints a fresh ticket for a question about to be asked, or clears it.
+    static void mintNonce(ApprovalNonce& out);
+    static void clearNonce(ApprovalNonce& out) noexcept;
+    /// Checks a window's answer against the session it claims to be answering.
+    Status checkApproval(const ApprovalNonce& have, const std::string& haveFp,
+                         std::uint32_t haveSas, const ApprovalNonce& said,
+                         const std::string& saidFp, std::uint32_t saidSas,
+                         std::string* why) const;
     /// Keeps a half-paired session alive and reconnects when the far side ends
     /// it. Runs from pump(), only while pairing is in progress.
     int    pumpImportPairing();
@@ -185,6 +269,7 @@ private:
     session::LeaseAuthority _leases{Clock::system()};
     std::string   _sharePeerFingerprint;
     std::uint32_t _shareSas = 0;
+    ApprovalNonce _shareNonce{};
     std::uint64_t _shareTransfers = 0;
     std::uint64_t _shareMessages  = 0;
     ContinuousNs  _shareHandshakeStartedNs = 0;
@@ -194,9 +279,15 @@ private:
     std::string _importHost;
     std::uint16_t _importPort = 0;
     std::unique_ptr<session::ImporterClient>   _client;
-    std::unique_ptr<session::RemoteDevicePort> _port;
+    /// How the attached device reached this computer. Never null: a build with
+    /// no real importer gets a ProbePresenter, which reports canPresent() ==
+    /// false rather than quietly looking like one that can.
+    session::IDevicePresenter*                 _presenter = nullptr;
+    session::ProbePresenter                    _ownProbe;
+    session::ImporterClient::BridgeAttach      _attached;
     std::string   _importPeerFingerprint;
     std::uint32_t _importSas = 0;
+    ApprovalNonce _importNonce{};
     std::vector<DeviceView> _offered;
     std::string   _attachedUid;
     std::string   _attachedName;

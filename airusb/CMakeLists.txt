@@ -135,6 +135,7 @@ add_library(airusb_session STATIC
     session/SecureSession.cpp
     session/ExporterSession.cpp
     session/InlineAsyncPort.cpp
+    session/DevicePresenter.cpp
     session/LeaseAuthority.cpp
     session/RemoteDevicePort.cpp
     session/ImporterDataPlane.cpp
@@ -171,6 +172,10 @@ add_library(airusb_linux_usbip STATIC
     platform/linux/LinuxUsb.cpp
     platform/linux/VhciBridge.cpp
     platform/linux/VhciNetBridge.cpp
+    # VhciPresenter is Linux-only: it opens a socketpair and writes vhci-hcd's
+    # sysfs, neither of which has a meaning anywhere else. Everything BELOW it
+    # is portable and stays built and tested on all three platforms.
+    $<$<STREQUAL:${CMAKE_SYSTEM_NAME},Linux>:${CMAKE_CURRENT_SOURCE_DIR}/platform/linux/VhciPresenter.cpp>
 )
 # VhciNetBridge drives session::ImporterDataPlane (the platform/linux -> session
 # arrow the plan sanctions). UsbipCodec/LinuxUsb/VhciBridge themselves stay pure,
@@ -329,12 +334,32 @@ add_library(airusb_control STATIC
     control/ControlApi.cpp
     control/WebUi.cpp
     control/SimulatedDeviceSource.cpp
+    control/BrokerProtocol.cpp
+    control/BrokerServer.cpp
+    control/BrokerClient.cpp
+    control/BrokerFacade.cpp
+    control/LocalEndpoint.cpp
     tests/fakes/ScriptedDevice.cpp
 )
 target_link_libraries(airusb_control PUBLIC airusb_session airusb_diag)
 
 add_executable(airusb-hubd tools/airusb_hubd_main.cpp)
 target_link_libraries(airusb-hubd PRIVATE airusb_control)
+
+# ---------------------------------------------------------------------------
+# airusb-brokerd — THE privileged daemon, and the answer to A1.
+#
+# It owns the machine's identity, its pinned peers, its leases and its
+# importer. On Linux it links platform/linux for the vhci presenter, which is
+# the only presenter that is real today; elsewhere it reports honestly that it
+# cannot present and says why. Read tools/airusb_brokerd_main.cpp's header for
+# why the privileged half cannot be smaller than this.
+# ---------------------------------------------------------------------------
+add_executable(airusb-brokerd tools/airusb_brokerd_main.cpp)
+target_link_libraries(airusb-brokerd PRIVATE airusb_control)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_link_libraries(airusb-brokerd PRIVATE airusb_linux_usbip)
+endif()
 
 # ---------------------------------------------------------------------------
 # tests

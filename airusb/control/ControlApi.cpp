@@ -25,6 +25,44 @@ int httpFor(Status s) noexcept
     }
 }
 
+/// The approval ticket, as 32 hex characters. Anything else is refused rather
+/// than partially parsed: a half-read ticket that happens to match nothing is
+/// indistinguishable from a stale one, and the two deserve different messages.
+bool parseTicket(const std::string& hex, ApprovalTicket& out)
+{
+    if (hex.size() != out.size() * 2) return false;
+    auto nyb = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    };
+    for (std::size_t i = 0; i < out.size(); ++i) {
+        const int hi = nyb(hex[i * 2]);
+        const int lo = nyb(hex[i * 2 + 1]);
+        if (hi < 0 || lo < 0) return false;
+        out[i] = static_cast<std::uint8_t>((hi << 4) | lo);
+    }
+    return true;
+}
+
+/// The six digits as the window rendered them, back into the number.
+///
+/// Leading zeros are significant on screen — 042571 and 42571 are different
+/// strings for two people to compare — so the window sends the STRING and this
+/// parses it, rather than the window sending a number and the leading zero
+/// being a rendering detail nobody checked.
+std::uint32_t parseSas(const std::string& text)
+{
+    std::uint32_t v = 0;
+    for (const char c : text) {
+        if (c < '0' || c > '9') return 0xFFFFFFFFu;   // never a valid SAS
+        v = v * 10 + static_cast<std::uint32_t>(c - '0');
+        if (v > 999999u) return 0xFFFFFFFFu;
+    }
+    return text.empty() ? 0xFFFFFFFFu : v;
+}
+
 } // namespace
 
 HttpResponse ControlApi::error(int status, std::string_view message) const
@@ -43,9 +81,9 @@ HttpResponse ControlApi::ok(std::string_view message) const
 
 HttpResponse ControlApi::state() const
 {
-    JsonOut j;
-    _hub.writeStateJson(j);
-    return HttpResponse::json(200, j.take());
+    // The authority's own document, passed through. The window renders what it
+    // is told and computes nothing about trust, capability or ownership.
+    return HttpResponse::json(200, _hub.stateJson());
 }
 
 HttpResponse ControlApi::handle(const HttpRequest& req)
@@ -108,7 +146,7 @@ HttpResponse ControlApi::handle(const HttpRequest& req)
 
     if (req.path == "/api/share/stop") {
         if (!isPost) return error(405, "POST only");
-        _hub.shareStop();
+        (void)_hub.shareStop(&why);
         return state();
     }
 
@@ -118,7 +156,13 @@ HttpResponse ControlApi::handle(const HttpRequest& req)
         // wrong answer hands a drive to a stranger. A request that forgets the
         // field refuses; it does not accept.
         const bool accept = in.boolean("accept", false);
-        if (const Status s = _hub.shareApprove(accept, &why); s != Status::Ok)
+        ApprovalTicket nonce{};
+        if (!parseTicket(in.string("ticket"), nonce))
+            return error(400, "that approval is missing the ticket for the question "
+                              "it is answering");
+        if (const Status s = _hub.shareApprove(nonce, in.string("fingerprint"),
+                                               parseSas(in.string("sas")), accept, &why);
+            s != Status::Ok)
             return error(httpFor(s), why);
         return state();
     }
@@ -138,7 +182,22 @@ HttpResponse ControlApi::handle(const HttpRequest& req)
     if (req.path == "/api/import/approve") {
         if (!isPost) return error(405, "POST only");
         const bool accept = in.boolean("accept", false);
-        if (const Status s = _hub.importApprove(accept, &why); s != Status::Ok)
+        ApprovalTicket nonce{};
+        if (!parseTicket(in.string("ticket"), nonce))
+            return error(400, "that approval is missing the ticket for the question "
+                              "it is answering");
+        if (const Status s = _hub.importApprove(nonce, in.string("fingerprint"),
+                                                parseSas(in.string("sas")), accept, &why);
+            s != Status::Ok)
+            return error(httpFor(s), why);
+        return state();
+    }
+
+    if (req.path == "/api/share/reclaim") {
+        if (!isPost) return error(405, "POST only");
+        // Its own route, not a flag, because it is the one action here that can
+        // lose somebody else's data.
+        if (const Status s = _hub.forceReclaim(&why); s != Status::Ok)
             return error(httpFor(s), why);
         return state();
     }
@@ -168,7 +227,7 @@ HttpResponse ControlApi::handle(const HttpRequest& req)
 
     if (req.path == "/api/import/disconnect") {
         if (!isPost) return error(405, "POST only");
-        _hub.importDisconnect();
+        (void)_hub.importDisconnect(&why);
         return state();
     }
 

@@ -1,19 +1,37 @@
-// airusb-hubd — the window, and the thing behind it.
+// airusb-hubd — the window.
 //
-//   airusb-hubd [--ui-port N] [--share-port N] [--share] [--open|--no-open]
+//   airusb-hubd [--ui-port N] [--broker PATH] [--standalone]
+//               [--share-port N] [--share] [--open|--no-open]
 //               [--id PATH] [--peers PATH] [--token PATH] [--name TEXT]
 //
 // Runs an HTTP control plane on 127.0.0.1 and prints a URL. Opening that URL
 // gives the product's interface on macOS, Linux and Windows, from one binary,
 // with no toolkit and no installed dependency.
 //
+// TWO MODES, AND THE DIFFERENCE IS NOT COSMETIC
+//
+// **Attached to a broker** (the default). `airusb-brokerd` owns the machine's
+// identity, its pinned peers, its leases and its importer; this process holds
+// none of those and can only propose. The six digits a person compares belong
+// to the session that really moves a filesystem, because there is only one
+// session.
+//
+// **Standalone** (`--standalone`, or no broker running). This process runs the
+// same state machine in-process with the DIAGNOSTIC presenter: it can pair,
+// list, and read a remote device, and it cannot add one to this computer. That
+// is genuinely useful on a machine with no driver, and it is a different thing
+// from the product — so it says so, in the window, in its own words rather
+// than by omission.
+//
+// The distinction used to be invisible, and that was the defect: the window
+// had its OWN identity and pin store, so a person compared six digits
+// belonging to a diagnostic connection while `airusb-exportd` and
+// `airusb-vhci` paired with a different key and never showed anybody anything.
+//
 // WHAT IT DOES NOT NEED
 //
-// Root. Nothing here captures a device from the local OS or presents one to it —
-// those are `airusb-exportd` on macOS and `airusb-vhci` on Linux, and both are
-// privileged for reasons recorded in their own files. This process speaks the
-// protocol, which needs no privilege at all, and that is why it is the half a
-// person can safely be given.
+// Root, in either mode. Presenting a device to an operating system is the
+// broker's job and is privileged for reasons recorded in its own file.
 //
 // THE TOKEN, AND WHY IT IS IN THE FRAGMENT
 //
@@ -24,8 +42,11 @@
 // access log, out of Referer, and out of anything else that records URLs. The
 // page lifts it out of `location.hash` and puts it in a header.
 
+#include "../control/BrokerClient.h"
+#include "../control/BrokerFacade.h"
 #include "../control/ControlApi.h"
 #include "../control/HubState.h"
+#include "../control/LocalEndpoint.h"
 #include "../control/HttpServer.h"
 #include "../control/SimulatedDeviceSource.h"
 #include "../core/Platform.h"
@@ -120,6 +141,9 @@ void usage(const char* argv0)
         "usage: %s [options]\n"
         "\n"
         "  --ui-port N     the loopback port for the window   (default 0 = pick one)\n"
+        "  --broker PATH   the privileged broker's socket     (default %s)\n"
+        "  --standalone    do not use a broker: run the read-only diagnostic\n"
+        "                  half in this process, and say so in the window\n"
         "  --share-port N  the LAN port devices are offered on (default 7714)\n"
         "  --share         start sharing immediately, without waiting for a click\n"
         "  --no-open       print the URL instead of opening a browser\n"
@@ -130,7 +154,8 @@ void usage(const char* argv0)
         "  --token PATH    control token          (default airusb-hub.token)\n"
         "\n"
         "The window is served on 127.0.0.1 only. It needs the token printed at\n"
-        "startup, which is why the URL has to be used as printed.\n", argv0);
+        "startup, which is why the URL has to be used as printed.\n",
+        argv0, defaultBrokerPath().c_str());
 }
 
 } // namespace
@@ -147,6 +172,8 @@ int main(int argc, char* argv[])
     std::string   peersPath = "airusb-hub.peers";
     std::string   tokenPath = "airusb-hub.token";
     std::string   name      = machineName();
+    std::string   brokerPath = defaultBrokerPath();
+    bool          standalone = false;
 
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -161,6 +188,8 @@ int main(int argc, char* argv[])
         else if (a == "--id"    && i + 1 < argc) idPath    = argv[++i];
         else if (a == "--peers" && i + 1 < argc) peersPath = argv[++i];
         else if (a == "--token" && i + 1 < argc) tokenPath = argv[++i];
+        else if (a == "--broker" && i + 1 < argc) brokerPath = argv[++i];
+        else if (a == "--standalone") standalone = true;
         else { usage(argv[0]); return 64; }
     }
 
@@ -169,23 +198,50 @@ int main(int argc, char* argv[])
     std::signal(SIGTERM, onSignal);
 #endif
 
+    // Which half is behind the window, decided by looking rather than by a flag
+    // alone: `--standalone` forces the diagnostic mode, and otherwise the broker
+    // is used if one is actually listening.
+    BrokerClient broker;
+    std::string brokerWhy;
+    bool attached = false;
+    if (!standalone) {
+        attached = broker.open(brokerPath, &brokerWhy) == Status::Ok;
+        if (!attached)
+            std::fprintf(stderr,
+                "airusb-hubd: no broker at %s (%s)\n"
+                "airusb-hubd: falling back to the read-only diagnostic half. This "
+                "window can pair with another machine and READ a device from it; "
+                "it cannot add one to this computer. Start airusb-brokerd for that.\n",
+                brokerPath.c_str(), brokerWhy.c_str());
+    }
+
+    // The standalone half. Its identity is SEPARATE from the machine's on
+    // purpose and is named so: it authorises a diagnostic session and nothing
+    // that touches an operating system, and conflating the two is the defect
+    // this whole change exists to remove.
     LocalIdentity identity = loadOrCreateIdentity(idPath);
     PeerStore peers;
     (void)peers.load(peersPath);
-
     SimulatedDeviceSource devices;
 
     HubState hub;
-    HubState::Config hc;
-    hc.devices     = &devices;
-    hc.identity    = &identity;
-    hc.peers       = &peers;
-    hc.peersPath   = peersPath;
-    hc.machineName = name;
-    if (hub.begin(hc) != Status::Ok) {
-        std::fprintf(stderr, "airusb-hubd: could not start\n");
-        return 1;
+    if (!attached) {
+        HubState::Config hc;
+        hc.devices     = &devices;
+        hc.identity    = &identity;
+        hc.peers       = &peers;
+        hc.peersPath   = peersPath;
+        hc.machineName = name;
+        hc.presenter   = nullptr;      // the diagnostic probe, which says so
+        if (hub.begin(hc) != Status::Ok) {
+            std::fprintf(stderr, "airusb-hubd: could not start\n");
+            return 1;
+        }
     }
+
+    BrokerFacade viaBroker(broker);
+    IHubFacade& facade = attached ? static_cast<IHubFacade&>(viaBroker)
+                                  : static_cast<IHubFacade&>(hub);
 
     const std::string token = freshToken();
     // 0600 where the OS has such a thing. On Windows `privateToOwner` is a
@@ -204,13 +260,27 @@ int main(int argc, char* argv[])
     GuardConfig guard;
     guard.token = token;
     guard.port  = server.port();
-    ControlApi api(hub, guard);
+    ControlApi api(facade, guard);
 
     const std::string url = "http://127.0.0.1:" + std::to_string(server.port()) +
                             "/#t=" + token;
 
-    std::printf("@@AIRUSB_HUB@@ identity %s\n",
-                fingerprintText(fingerprint(identity.identityKey())).c_str());
+    // The MACHINE's identity when there is a broker, this window's diagnostic
+    // one when there is not — and the line says which, because a fingerprint
+    // with no owner named is the ambiguity that started all of this.
+    if (attached) {
+        std::printf("@@AIRUSB_HUB@@ broker %s\n", brokerPath.c_str());
+        std::printf("@@AIRUSB_HUB@@ identity %s (this machine's, held by the broker)\n",
+                    broker.hello().fingerprint.c_str());
+        std::printf("@@AIRUSB_HUB@@ presenter %s canPresent=%s\n",
+                    broker.hello().presenter.c_str(),
+                    broker.hello().canPresent ? "yes" : "no");
+    } else {
+        std::printf("@@AIRUSB_HUB@@ standalone — DIAGNOSTIC ONLY, no device is added "
+                    "to this computer\n");
+        std::printf("@@AIRUSB_HUB@@ identity %s (this window's, not this machine's)\n",
+                    fingerprintText(fingerprint(identity.identityKey())).c_str());
+    }
     std::printf("@@AIRUSB_HUB@@ ui http://127.0.0.1:%u/\n",
                 static_cast<unsigned>(server.port()));
     std::printf("@@AIRUSB_HUB@@ token-file %s\n", tokenPath.c_str());
@@ -219,7 +289,7 @@ int main(int argc, char* argv[])
 
     if (shareNow) {
         std::string why;
-        if (hub.shareStart(sharePort, &why) != Status::Ok)
+        if (facade.shareStart(sharePort, &why) != Status::Ok)
             std::fprintf(stderr, "airusb-hubd: could not start sharing: %s\n", why.c_str());
         else
             std::printf("@@AIRUSB_HUB@@ sharing on port %u\n",
@@ -231,7 +301,10 @@ int main(int argc, char* argv[])
 
     while (!gStop.load()) {
         int did = server.poll([&api](const HttpRequest& r) { return api.handle(r); });
-        did += hub.pump();
+        // Only the standalone half has a state machine to pump. With a broker,
+        // the broker pumps its own — and that is the point: the sessions, the
+        // leases and the device live over there.
+        if (!attached) did += hub.pump();
         // 5 ms when something is happening, 20 when nothing is. A USB session
         // that is actively moving data is driven inside its own request, so this
         // interval bounds the window's responsiveness rather than throughput.
@@ -239,8 +312,15 @@ int main(int argc, char* argv[])
     }
 
     std::printf("\n@@AIRUSB_HUB@@ stopping — releasing anything held\n");
-    hub.importDisconnect();
-    hub.shareStop();
+    if (!attached) {
+        hub.importDisconnect();
+        hub.shareStop();
+    } else {
+        // The broker keeps running and keeps its leases. Closing the window
+        // must NOT hand somebody's drive back: that decision belongs to the
+        // person, not to whether a browser tab is open.
+        broker.close();
+    }
     server.stop();
     return 0;
 }
