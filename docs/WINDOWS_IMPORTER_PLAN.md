@@ -302,18 +302,48 @@ is a wrong belief about the system rather than a typo:
 
 **PASS.**
 
-### W4 — `airusb.sys` · NOT STARTED, and not buildable here
+### W4 — `airusb.sys` · **BUILDS, 2026-08-09. NOT LOADED, deliberately.**
 
-**Goal.** The KMDF client driver: UdeCx callbacks, the endpoint queues, the
-inverted-call channel, the arena, and an INF.
+**Compiling is safe. Loading is not.** A KMDF fault is a bugcheck, and on a
+machine reachable only over the network a boot loop is unrecoverable — SSH does
+not exist in a boot loop. So this gate stops at a `.sys` file on disk, and
+installation is a separate step taken with somebody at the keyboard, on a
+machine nobody minds losing.
 
-**Cannot be done on this machine.** It needs the WDK, and it cannot be tested
-without the target. CI *may* be able to build it — the WDK is installable on a
-`windows-latest` runner — and getting it to COMPILE in CI is worth doing on its
-own, because it is what turns the W2 `static_assert`s from aspiration into a
-check that runs.
+```
+SDK 10.0.28000.0   KMDF 1.35   UdeCx 1.1   MSVC 14.44.35207
+DRIVER BUILD PASS - build-drv\airusb.sys
+  19,968 bytes   machine 0x8664   subsystem 1 (NATIVE)
+  sha256 3558f73fabdb1998339418137ba20bcec22c35970c4520183aae723b48cd6b14
+testsigning: (off)      loaded: 0
+```
 
-**Evidence.** A driver that builds, and `AIRUSB_WITH_WDK` compiled at least once.
+`scripts/wdk-build-driver.ps1`, at `/kernel /W4 /WX` on our code and
+`/external:W0` on the kit's. No `.vcxproj`, same reason as the ABI check.
+
+**What is real in it, and what is a stub — stated plainly rather than implied
+by a build that passes.** Real: `DriverEntry`, the UdeCx controller creation,
+the device-add path, the control queue, the manual FETCH queue for the inverted
+call, the per-`WDFFILEOBJECT` session, and the teardown — including the one
+IRQL rule that is easy to get wrong and only bites on a path nobody tests twice
+(`UdecxUsbDevicePlugOutAndDelete` is `PASSIVE_LEVEL`, so it is called OUTSIDE
+the spin lock). Stubbed and returning `STATUS_NOT_IMPLEMENTED`: the five IOCTL
+bodies. The endpoint callbacks are not written yet.
+
+**Three link-time facts worth not rediscovering:**
+
+* `udecxstub.lib` resolves `UdecxFunctions` / `UdecxDriverGlobals` — a class
+  extension is LINKED, not merely included, and it is versioned next to its
+  headers (`Lib\<sdk>\km\x64\ude\1.1\`).
+* `bufferoverflowfastfailk.lib` supplies `__security_init_cookie`, which
+  `FxDriverEntry` references and `/NODEFAULTLIB` otherwise leaves dangling.
+* `/kernel` already defines `_KERNEL_MODE`; defining it again on the command
+  line is C4117 on a reserved macro, and `/WX` makes that fatal.
+
+**Before it is ever loaded: run Static Driver Verifier and Code Analysis.** SDV
+exists precisely for this situation — it checks KMDF rules WITHOUT running the
+driver, which is the only kind of verification available when a mistake costs a
+reboot somebody has to be present for.
 
 ### W5 — `airusb-winhost.exe` · NOT STARTED
 
