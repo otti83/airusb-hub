@@ -82,6 +82,20 @@ public:
                        std::uint32_t negotiatedMaxRecordBytes);
     std::uint32_t maxRecordBytes() const noexcept { return _maxRecord; }
 
+    /// Adopts a record size the two peers have AGREED, after HELLO.
+    ///
+    /// Separate from `adoptCipher` because the two happen at different moments
+    /// and for different reasons: the cipher changes when the handshake ends,
+    /// and the size changes when the negotiation does. Folding them together is
+    /// what forced the old code to guess a size before the peer had said
+    /// anything — which is exactly how two builds that disagreed could complete
+    /// a handshake and fail later, obscurely.
+    ///
+    /// Refuses a size outside the legal range rather than clamping: a clamp
+    /// would leave the two ends believing different numbers, which is the one
+    /// outcome worse than refusing.
+    Status adoptRecordSize(std::uint32_t bytes) noexcept;
+
     /// The most PLAINTEXT body bytes a single record can carry: the record
     /// ceiling minus this cipher's per-record overhead. Segmentation sizes its
     /// records against this rather than maxRecordBytes(), because sendRecord()

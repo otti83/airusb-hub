@@ -21,6 +21,7 @@
 
 #include "../TestHarness.h"
 #include "../fakes/ScriptedDevice.h"
+#include "../../protocol/ManifestCodec.h"
 #include "../../protocol/Segmentation.h"
 #include "../../session/ExporterSession.h"
 #include "../../session/InlineAsyncPort.h"
@@ -359,6 +360,142 @@ Status remoteTransfer(Rig& r, std::uint8_t ep, std::uint8_t dir, std::uint32_t b
     return static_cast<Status>(rh.status);
 }
 
+/// A manifest that cannot fit in one record, so the control plane has to
+/// segment it. Eight configurations is legal USB and is exactly the case the
+/// exporter used to refuse outright with "too large to send".
+DeviceManifest fatManifest()
+{
+    DeviceManifest m;
+    std::vector<std::uint8_t> dev = {
+        18, 0x01, 0x00, 0x03, 0x00, 0x00, 0x00, 9,
+        0x8f, 0x05, 0x87, 0x63, 0x00, 0x01, 0, 0, 0, 8   // bNumConfigurations = 8
+    };
+    m.setSpeed(Speed::Super);
+    m.setDeviceDescriptor(dev);
+    // SuperSpeed requires a BOS descriptor, and validate() says so — which is
+    // the manifest validator earning its place: the first version of this
+    // fixture built an eight-configuration SuperSpeed device with no BOS and
+    // would have been refused by a real importer for a reason the test would
+    // have reported as "segmentation is broken".
+    m.setBos(std::vector<std::uint8_t>{
+        5, 0x0F, 12, 0x00, 1,                 // BOS, wTotalLength 12, 1 capability
+        7, 0x10, 0x03, 0x0E, 0x00, 0x00, 0x00 // SuperSpeed USB device capability
+    });
+
+    for (int c = 1; c <= 8; ++c) {
+        std::vector<std::uint8_t> cfg = {
+            9, 0x02, 0, 0, 1, static_cast<std::uint8_t>(c), 0, 0x80, 50,
+            9, 0x04, 0, 0, 2, 0x08, 0x06, 0x50, 0,
+            7, 0x05, 0x81, 0x02, 0x00, 0x04, 0,
+            6, 0x30, 15, 0, 0, 0,
+            7, 0x05, 0x02, 0x02, 0x00, 0x04, 0,
+            6, 0x30, 15, 0, 0, 0,
+        };
+        // Padded with a vendor-specific descriptor so the set is genuinely
+        // larger than a small record, rather than only just over the line.
+        for (int pad = 0; pad < 24; ++pad) {
+            cfg.push_back(64);
+            cfg.push_back(0xFF);
+            for (int k = 0; k < 62; ++k) cfg.push_back(static_cast<std::uint8_t>(k));
+        }
+        cfg[2] = static_cast<std::uint8_t>(cfg.size() & 0xFF);
+        cfg[3] = static_cast<std::uint8_t>((cfg.size() >> 8) & 0xFF);
+        m.addConfiguration(cfg);
+    }
+    return m;
+}
+
+void testSegmentedManifest()
+{
+    std::printf("a manifest too big for one record\n");
+
+    TEST_CASE("an eight-configuration manifest crosses records and arrives whole") {
+        const DeviceManifest fat = fatManifest();
+        CHECK(fat.validate(nullptr) == Status::Ok);
+
+        std::vector<std::uint8_t> encoded;
+        CHECK(encodeManifest(fat, 1, encoded) == Status::Ok);
+        // The premise of the case. If this ever stops holding, the test is
+        // passing for the wrong reason and would keep passing if segmentation
+        // were removed.
+        CHECK(encoded.size() > 8192);
+
+        Rig r(8192, fat);
+        CHECK(r.ok);
+        if (!r.ok) return;
+
+        AttachBody ab;
+        ab.uid        = uidOf(1);
+        ab.attachSlot = kSlot;
+        ab.importerMaxTransferBytes = 1u << 20;
+        std::vector<std::uint8_t> req;
+        encodeAttach(ab, req);
+
+        Header h;
+        std::vector<std::uint8_t> body;
+        CHECK(ask(r, wire::Type::Attach, req, h, body, 0) == Status::Ok);
+        CHECK_EQ(h.type, static_cast<std::uint8_t>(wire::Type::AttachOk));
+        AttachOkBody ok;
+        CHECK(decodeAttachOk(body, ok));
+        CHECK(ok.attachId != 0);
+        CHECK_EQ(static_cast<long long>(ok.manifestLen),
+                 static_cast<long long>(encoded.size()));
+
+        // Read the manifest off the wire and reassemble it the way
+        // ImporterClient does, so what is asserted is the BYTES rather than a
+        // verdict about them.
+        std::vector<std::uint8_t> in;
+        CHECK(r.a.transport()->receiveRecord(in) == Status::Ok);
+        Header mh;
+        CHECK(decodeHeader(in, mh));
+        CHECK_EQ(mh.type, static_cast<std::uint8_t>(wire::Type::DeviceManifest));
+        // The premise again, from the other side: it really did segment.
+        CHECK(mh.segMore());
+        CHECK_EQ(static_cast<long long>(mh.totalLen),
+                 static_cast<long long>(encoded.size()));
+
+        Reassembler::Limits rl;
+        rl.maxTransferBytes = wire::kManifestBytesMax;
+        rl.arenaBytes       = wire::kManifestBytesMax;
+        rl.maxInFlight      = 1;
+        Reassembler ra(rl);
+        Status e = Status::Ok;
+        Reassembler::Outcome o = ra.accept(
+            mh, std::span<const std::uint8_t>(in).subspan(wire::kHeaderSize, mh.bodyLen), e);
+        CHECK(o != Reassembler::Outcome::Rejected);
+
+        int records = 1;
+        while (o == Reassembler::Outcome::NeedMore) {
+            std::vector<std::uint8_t> more;
+            CHECK(r.a.transport()->receiveRecord(more) == Status::Ok);
+            if (more.empty()) break;
+            Header dh;
+            CHECK(decodeHeader(more, dh));
+            CHECK_EQ(dh.type, static_cast<std::uint8_t>(wire::Type::Data));
+            CHECK_EQ(static_cast<long long>(dh.requestId),
+                     static_cast<long long>(mh.requestId));
+            o = ra.accept(dh, std::span<const std::uint8_t>(more)
+                                  .subspan(wire::kHeaderSize, dh.bodyLen), e);
+            CHECK(o != Reassembler::Outcome::Rejected);
+            ++records;
+        }
+        CHECK(o == Reassembler::Outcome::Complete);
+        CHECK(records > 1);
+
+        const std::vector<std::uint8_t> got = ra.take(mh);
+        CHECK_EQ(static_cast<long long>(got.size()),
+                 static_cast<long long>(encoded.size()));
+        CHECK(got == encoded);
+
+        // And it still decodes to the device it started as.
+        DeviceManifest back;
+        ManifestHeader mhdr;
+        std::string why;
+        CHECK(decodeManifest(got, back, mhdr, &why) == Status::Ok);
+        CHECK_EQ(static_cast<long long>(back.configurationCount()), 8);
+    }
+}
+
 void testExporterEndToEnd()
 {
     std::printf("the real exporter, reassembling OUT and segmenting IN\n");
@@ -579,6 +716,7 @@ int main()
 {
     std::printf("test_l5_segmentation\n");
     testExporterEndToEnd();
+    testSegmentedManifest();
     testRemoteDevicePort();
     TEST_MAIN_END();
 }

@@ -476,6 +476,118 @@ void testAttacks()
     }
 }
 
+// ---------------------------------------------------------------------------
+// The greeting
+// ---------------------------------------------------------------------------
+
+void testGreeting()
+{
+    std::printf("HELLO, which used to be defined and exchanged by nobody\n");
+
+    LocalIdentity idA = LocalIdentity::generate();
+    LocalIdentity idB = LocalIdentity::generate();
+
+    TEST_CASE("two builds that disagree about the record size agree on the smaller") {
+        Pair p;
+        auto ca = cfgFor(idA, true);
+        auto cb = cfgFor(idB, false);
+        ca.negotiatedMaxRecordBytes = 32768;
+        cb.negotiatedMaxRecordBytes = 8192;
+        CHECK(p.a.begin(p.pipe.endpointA(), ca) == Status::Busy);
+        CHECK(p.b.begin(p.pipe.endpointB(), cb) == Status::Busy);
+        CHECK(converge(p));
+
+        // BOTH sides, and they must be the same number. This is the whole
+        // point: before HELLO each adopted its own preference, so the two ends
+        // believed 32768 and 8192 and the first record between the two sizes
+        // was rejected by one of them, obscurely and much later.
+        CHECK_EQ(static_cast<long long>(p.a.negotiated().maxRecordBytes), 8192);
+        CHECK_EQ(static_cast<long long>(p.b.negotiated().maxRecordBytes), 8192);
+        CHECK_EQ(static_cast<long long>(p.a.transport()->maxRecordBytes()), 8192);
+        CHECK_EQ(static_cast<long long>(p.b.transport()->maxRecordBytes()), 8192);
+    }
+
+    TEST_CASE("the smaller max transfer wins too, and capabilities intersect") {
+        Pair p;
+        auto ca = cfgFor(idA, true);
+        auto cb = cfgFor(idB, false);
+        ca.maxTransferBytes = 1u << 20;
+        cb.maxTransferBytes = 64u * 1024u;
+        ca.capabilities = wire::kCapCancel | wire::kCapReset;
+        cb.capabilities = wire::kCapCancel;                 // no reset over there
+        CHECK(p.a.begin(p.pipe.endpointA(), ca) == Status::Busy);
+        CHECK(p.b.begin(p.pipe.endpointB(), cb) == Status::Busy);
+        CHECK(converge(p));
+
+        CHECK_EQ(static_cast<long long>(p.a.negotiated().maxTransferBytes),
+                 static_cast<long long>(64u * 1024u));
+        CHECK((p.a.negotiated().capabilities & wire::kCapCancel) != 0);
+        // Intersection, not union: a capability only one side has is one the
+        // pair does not have.
+        CHECK((p.a.negotiated().capabilities & wire::kCapReset) == 0);
+        // Segmentation is mandatory and is always in the result.
+        CHECK((p.a.negotiated().capabilities & wire::kCapSegmentation) != 0);
+    }
+
+    TEST_CASE("keepalive takes the FASTER of the two, not the slower") {
+        Pair p;
+        auto ca = cfgFor(idA, true);
+        auto cb = cfgFor(idB, false);
+        ca.keepaliveMs = 2000;
+        cb.keepaliveMs = 500;
+        CHECK(p.a.begin(p.pipe.endpointA(), ca) == Status::Busy);
+        CHECK(p.b.begin(p.pipe.endpointB(), cb) == Status::Busy);
+        CHECK(converge(p));
+        // Each side is saying how often it needs to HEAR from the other.
+        // Honouring the slower one would leave the impatient side declaring a
+        // perfectly healthy peer dead.
+        CHECK_EQ(static_cast<long long>(p.a.negotiated().keepaliveMs), 500);
+    }
+
+    TEST_CASE("nothing is established until the greeting finishes") {
+        Pair p;
+        CHECK(p.a.begin(p.pipe.endpointA(), cfgFor(idA, true)) == Status::Busy);
+        CHECK(p.b.begin(p.pipe.endpointB(), cfgFor(idB, false)) == Status::Busy);
+
+        // Pump only until the crypto is done. `established()` must still be
+        // false, because a caller that acted here would be acting on limits
+        // the two ends have not agreed.
+        bool sawGreeting = false;
+        for (int i = 0; i < 40; ++i) {
+            (void)p.a.pump();
+            (void)p.b.pump();
+            if (p.a.state() == SecureSession::State::Greeting ||
+                p.b.state() == SecureSession::State::Greeting) {
+                sawGreeting = true;
+                break;
+            }
+            if (p.bothEstablished()) break;
+        }
+        // Either we caught the intermediate state or it passed within one pump;
+        // what must hold in both cases is that Greeting is never Established.
+        if (sawGreeting) {
+            const bool aGreeting = p.a.state() == SecureSession::State::Greeting;
+            CHECK(!(aGreeting && p.a.established()));
+        }
+        CHECK(converge(p));
+        CHECK(p.bothEstablished());
+    }
+
+    TEST_CASE("a peer proposing an illegal record size is refused") {
+        // Driven through the config, which is the only door a caller has —
+        // and it must not be able to open a session whose numbers are nonsense.
+        Pair p;
+        auto ca = cfgFor(idA, true);
+        auto cb = cfgFor(idB, false);
+        cb.negotiatedMaxRecordBytes = 16;         // far below the floor
+        CHECK(p.a.begin(p.pipe.endpointA(), ca) == Status::Busy);
+        CHECK(p.b.begin(p.pipe.endpointB(), cb) == Status::Busy);
+        CHECK(!converge(p));
+        CHECK(!p.a.established());
+        CHECK(!p.b.established());
+    }
+}
+
 void testPeerStorePersistence()
 {
     std::printf("the pin store on disk\n");
@@ -593,6 +705,7 @@ int main()
     testHappyPath();
     testPairingAndTrust();
     testAttacks();
+    testGreeting();
     testPeerStorePersistence();
     TEST_MAIN_END();
 }

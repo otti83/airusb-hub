@@ -467,18 +467,41 @@ Status ExporterSession::handleAttach(const Header& h, std::span<const std::uint8
         s != Status::Ok)
         return s;
 
-    if (const Status s = sendSimple(wire::Type::DeviceManifest, Status::Ok,
-                                    h.requestId, manifestBody); s != Status::Ok) {
-        // A manifest larger than one record needs segmentation, which the data
-        // plane has and the control plane does not yet. A device with eight
-        // configurations and a full string table could reach it. Failing here
-        // with a clear status beats a truncated manifest.
-        _leases->release(_secure->peerIdentity().identityKey);
-        _devices->release(_uid);
-        _port = nullptr;
-        _attachId = 0;
-        _state = State::Idle;
-        return refuse(h, s, "This device's descriptor set is too large to send.");
+    // The manifest is SEGMENTED if it does not fit in one record.
+    //
+    // It used to be sent with sendSimple and fail outright when it did not fit,
+    // with a comment saying a device with eight configurations and a full
+    // string table could reach the limit. It can: at the 1 KiB floor two peers
+    // may legitimately agree on, almost any real device reaches it. The data
+    // plane has had `emitTransfer`/`Reassembler` since L5 and they are not
+    // data-plane-specific, so the control plane uses the same pair.
+    //
+    // The fixed body is empty and the whole manifest is the DATA payload, which
+    // is what makes `total_len` mean the manifest's length on every record —
+    // exactly the shape R4's exactness rule wants.
+    {
+        Header base;
+        base.type      = static_cast<std::uint8_t>(wire::Type::DeviceManifest);
+        base.channel   = 0;
+        base.attachId  = _attachId;
+        base.requestId = h.requestId;
+        base.status    = 0;
+
+        const std::uint32_t maxPlain = _secure->transport()->maxPlaintextBytes();
+        if (maxPlain <= wire::kHeaderSize) return Status::Internal;
+        const std::uint32_t maxSeg =
+            maxPlain - static_cast<std::uint32_t>(wire::kHeaderSize);
+
+        if (const Status s = emitTransfer(base, {}, manifestBody, maxSeg,
+                [this](std::span<const std::uint8_t> rec) { return sendRecord(rec); });
+            s != Status::Ok) {
+            _leases->release(_secure->peerIdentity().identityKey);
+            _devices->release(_uid);
+            _port = nullptr;
+            _attachId = 0;
+            _state = State::Idle;
+            return refuse(h, s, "This device's descriptor set could not be sent.");
+        }
     }
 
     _state = State::Leased;

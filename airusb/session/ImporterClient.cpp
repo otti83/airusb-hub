@@ -4,6 +4,7 @@
 #include "../core/Platform.h"
 #include "../core/Watchdog.h"
 #include "../protocol/ManifestCodec.h"
+#include "../protocol/Segmentation.h"
 
 #include <cstring>
 
@@ -303,8 +304,59 @@ Status ImporterClient::doAttach(const DeviceUid& uid, std::uint8_t slot,
     if (mh.type != static_cast<std::uint8_t>(wire::Type::DeviceManifest))
         return Status::MalformedFrame;
     if (in.size() - wire::kHeaderSize < mh.bodyLen) return Status::MalformedFrame;
-    mbody.assign(in.begin() + static_cast<std::ptrdiff_t>(wire::kHeaderSize),
-                 in.begin() + static_cast<std::ptrdiff_t>(wire::kHeaderSize + mh.bodyLen));
+
+    if (!mh.segMore()) {
+        // The whole manifest is in one record — the common case, and byte for
+        // byte what happened before segmentation existed here.
+        mbody.assign(in.begin() + static_cast<std::ptrdiff_t>(wire::kHeaderSize),
+                     in.begin() + static_cast<std::ptrdiff_t>(wire::kHeaderSize + mh.bodyLen));
+    } else {
+        // SEGMENTED. A device with eight configurations and a full string table
+        // exceeds one record, and at the 1 KiB floor two peers may legitimately
+        // agree on, almost any real device does. The exporter used to fail
+        // outright here with "too large to send"; the same
+        // `emitTransfer`/`Reassembler` pair the data plane has used since L5
+        // carries it now, because neither is data-plane-specific.
+        Reassembler::Limits rl;
+        rl.maxTransferBytes = wire::kManifestBytesMax;
+        rl.arenaBytes       = wire::kManifestBytesMax;
+        rl.maxInFlight      = 1;
+        Reassembler ra(rl);
+
+        Status e = Status::Ok;
+        Reassembler::Outcome o = ra.accept(
+            mh, std::span<const std::uint8_t>(in).subspan(wire::kHeaderSize, mh.bodyLen), e);
+        if (o == Reassembler::Outcome::Rejected) return e;
+
+        std::vector<std::uint8_t> more;
+        while (o == Reassembler::Outcome::NeedMore) {
+            const Status r = link->receiveRecord(more);
+            if (r != Status::Busy && r != Status::Ok) return r;
+            if (r != Status::Ok || more.empty()) {
+                if (manifestBy.expired(clock)) {
+                    _why = "the peer started sending the device's descriptors and "
+                           "stopped partway";
+                    if (whyNot) *whyNot = _why;
+                    return Status::XferTimeout;
+                }
+                continue;
+            }
+            Header dh;
+            if (!decodeHeader(more, dh)) return Status::MalformedFrame;
+            if (more.size() - wire::kHeaderSize < dh.bodyLen) return Status::MalformedFrame;
+            // A continuation is a Data record on the same request. Anything
+            // else means the stream is misaligned, and with one exchange
+            // outstanding there is no other legitimate thing to see.
+            if (dh.type != static_cast<std::uint8_t>(wire::Type::Data))
+                return Status::MalformedFrame;
+            if (dh.requestId != mh.requestId || dh.channel != mh.channel)
+                return Status::MalformedFrame;
+            o = ra.accept(dh, std::span<const std::uint8_t>(more)
+                                  .subspan(wire::kHeaderSize, dh.bodyLen), e);
+            if (o == Reassembler::Outcome::Rejected) return e;
+        }
+        mbody = ra.take(mh);
+    }
 
     std::string mwhy;
     if (const Status s = decodeManifest(mbody, manifest, mhdr, &mwhy); s != Status::Ok) {

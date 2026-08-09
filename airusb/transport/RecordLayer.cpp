@@ -35,6 +35,14 @@ void RecordLayer::setHandshakeComplete(std::uint32_t negotiated) noexcept
                                                         : negotiated;
 }
 
+Status RecordLayer::adoptRecordSize(std::uint32_t bytes) noexcept
+{
+    if (bytes < wire::kRecordBytesFloor) return Status::BadArgument;
+    if (bytes > wire::kRecordBytesCeiling) return Status::LimitExceeded;
+    _maxRecord = bytes;
+    return Status::Ok;
+}
+
 Status RecordLayer::adoptCipher(std::unique_ptr<IRecordCipher> cipher,
                                 std::uint32_t negotiated)
 {

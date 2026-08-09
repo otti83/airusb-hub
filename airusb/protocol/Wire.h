@@ -56,6 +56,21 @@ inline constexpr std::uint32_t kRecordBytesDefault   = 16640;
 inline constexpr std::uint32_t kRecordBytesCeiling   = 65519;   // Noise plaintext limit
 inline constexpr std::size_t   kAeadTagSize          = 16;
 
+/// The smallest record size two peers may agree on.
+///
+/// NOT `kHandshakeRecordMax`. The 8 KiB handshake ceiling is a cap on what may
+/// be sent BEFORE the greeting; the negotiated size is free to be smaller, and
+/// the L5 segmentation tests deliberately drive 4 KiB to prove the segmenter
+/// works when almost nothing fits in one record. Confusing the two makes a
+/// legal small size a refusal, which is how a guard meant to catch nonsense
+/// starts rejecting the interesting case.
+///
+/// The floor that DOES matter is arithmetic: a record must hold the 32-byte
+/// header, the largest fixed body, the AEAD tag, and enough payload for
+/// segmentation to make progress rather than emitting infinitely many empty
+/// continuations.
+inline constexpr std::uint32_t kRecordBytesFloor     = 1024;
+
 // ---------------------------------------------------------------------------
 // L1 — message header, exactly 32 bytes
 // ---------------------------------------------------------------------------
@@ -74,6 +89,8 @@ inline constexpr std::size_t kOffDeviceEpoch = 26;  // u16
 inline constexpr std::size_t kOffTotalLen    = 28;  // u32
 
 static_assert(kOffTotalLen + 4 == kHeaderSize, "header layout must be exactly 32 bytes");
+static_assert(kRecordBytesFloor > kHeaderSize + 56 /*kBodyHello*/ + kAeadTagSize,
+              "the smallest legal record must still hold a HELLO");
 
 /// Header flag bits. Bits 4-7 are MBZ and are rejected on data-plane types.
 enum HeaderFlags : std::uint8_t {

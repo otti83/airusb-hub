@@ -254,9 +254,14 @@ Status SecureSession::finish()
         return fail(s, "could not derive transport keys");
 
     // The last handshake record is already flushed, so the swap is safe.
+    //
+    // The record size stays at the PRE-HELLO ceiling here, not at whatever this
+    // build prefers. Adopting our own preference before the peer has said
+    // anything is what let two builds that disagreed complete a handshake and
+    // then fail on a record one of them thought was legal.
     if (const Status s = _record->adoptCipher(
             std::make_unique<transport::NoiseCipher>(send, recv),
-            _cfg.negotiatedMaxRecordBytes);
+            wire::kHandshakeRecordMax);
         s != Status::Ok)
         return fail(s, "could not install the transport cipher");
 
@@ -276,8 +281,161 @@ Status SecureSession::finish()
         }
     }
 
+    // Encrypted and authenticated, and NOT yet usable. `established()` stays
+    // false until the two ends have agreed their limits.
+    _state = State::Greeting;
+    return driveGreeting();
+}
+
+// ---------------------------------------------------------------------------
+// HELLO
+// ---------------------------------------------------------------------------
+
+Status SecureSession::sendHello(wire::Type type, const Negotiated* agreed)
+{
+    protocol::HelloBody h;
+    h.protoMin      = wire::kProtoVersionV1;
+    h.protoMax      = wire::kProtoVersionV1;
+    // Segmentation is added unconditionally and is not a preference: a peer
+    // that cannot segment cannot carry a 1 MiB URB, and finding that out on the
+    // first real transfer instead of at the greeting is the whole failure mode
+    // this exchange exists to remove.
+    h.caps          = _cfg.capabilities | wire::kCapSegmentation;
+    h.maxTransfer   = agreed ? agreed->maxTransferBytes : _cfg.maxTransferBytes;
+    h.maxRecord     = agreed ? agreed->maxRecordBytes   : _cfg.negotiatedMaxRecordBytes;
+    h.maxSegment    = h.maxRecord;
+    h.maxIsoPackets = 0;                     // v1 carries no isochronous transfers
+    h.maxChannels   = static_cast<std::uint16_t>(wire::kMaxChannels);
+    h.maxLinks      = 1;
+    h.keepaliveMs   = agreed ? agreed->keepaliveMs : _cfg.keepaliveMs;
+#if defined(__APPLE__)
+    h.platformId    = wire::kPlatformMacos;
+#elif defined(_WIN32)
+    h.platformId    = wire::kPlatformWindows;
+#else
+    h.platformId    = wire::kPlatformLinux;
+#endif
+    h.roleBits      = _cfg.roleBits;
+    if (agreed) h.caps = agreed->capabilities;
+
+    // The session id binds this greeting to this handshake. Taken from the
+    // channel binding rather than generated, so it cannot be replayed into a
+    // different session: an attacker who records a HELLO has one that only
+    // matches the handshake it came from.
+    std::memcpy(h.sessionId, _channelBinding.data(), wire::kSessionIdBytes);
+
+    std::vector<std::uint8_t> body;
+    protocol::encodeHello(h, body);
+
+    protocol::Header hdr;
+    hdr.type     = static_cast<std::uint8_t>(type);
+    hdr.flags    = wire::kFlagSegFirst;
+    hdr.bodyLen  = static_cast<std::uint32_t>(body.size());
+    hdr.totalLen = 0;
+
+    std::vector<std::uint8_t> rec;
+    protocol::encodeHeader(hdr, rec);
+    rec.insert(rec.end(), body.begin(), body.end());
+
+    if (const Status s = _record->sendRecord(rec); s != Status::Ok) return s;
+    return _record->flush();
+}
+
+Status SecureSession::applyNegotiated()
+{
+    if (const Status s = _record->adoptRecordSize(_negotiated.maxRecordBytes);
+        s != Status::Ok)
+        return fail(s, "the agreed record size is not one this build can use");
     _state = State::Established;
     return Status::Ok;
+}
+
+Status SecureSession::driveGreeting()
+{
+    // The INITIATOR speaks first and adopts what comes back. The RESPONDER
+    // computes the agreement. One side deciding removes the tie-break question
+    // entirely, and the alternative — both computing it — is two
+    // implementations of one rule that must never disagree.
+    if (_cfg.initiator && !_helloSent) {
+        if (const Status s = sendHello(wire::Type::Hello, nullptr); s != Status::Ok)
+            return fail(s, "could not send HELLO");
+        _helloSent = true;
+    }
+
+    std::vector<std::uint8_t> rec;
+    const Status r = _record->receiveRecord(rec);
+    if (r == Status::Busy) return Status::Busy;
+    if (r != Status::Ok) return fail(r, "the peer did not complete the greeting");
+    if (rec.empty()) return Status::Busy;
+
+    protocol::Header hdr;
+    if (!protocol::decodeHeader(rec, hdr))
+        return fail(Status::MalformedFrame, "unparseable greeting");
+    if (rec.size() - wire::kHeaderSize < hdr.bodyLen)
+        return fail(Status::MalformedFrame, "greeting shorter than declared");
+
+    const auto want = _cfg.initiator ? wire::Type::HelloOk : wire::Type::Hello;
+    if (hdr.type != static_cast<std::uint8_t>(want))
+        return fail(Status::MalformedFrame, "the peer said something other than hello");
+
+    protocol::HelloBody peer;
+    if (!protocol::decodeHello(
+            std::span<const std::uint8_t>(rec).subspan(wire::kHeaderSize, hdr.bodyLen),
+            peer))
+        return fail(Status::MalformedFrame, "malformed HELLO");
+
+    // Version fixes semantics and is REFUSED rather than negotiated. A peer
+    // outside our range is not accommodated, because what a message means is
+    // not a number to split the difference on.
+    if (peer.protoMax < wire::kProtoVersionV1 || peer.protoMin > wire::kProtoVersionV1)
+        return fail(Status::UnsupportedVersion,
+                    "the other machine speaks a different version of this protocol");
+
+    // The session id must be THIS handshake's. A greeting replayed from another
+    // session is refused here rather than becoming a session with somebody
+    // else's agreed limits.
+    if (std::memcmp(peer.sessionId, _channelBinding.data(), wire::kSessionIdBytes) != 0)
+        return fail(Status::AuthFailed, "the greeting does not belong to this session");
+
+    if ((peer.caps & wire::kCapSegmentation) == 0)
+        return fail(Status::UnsupportedVersion,
+                    "the other machine cannot split large transfers, so it cannot "
+                    "carry a real USB device");
+
+    if (peer.maxRecord < wire::kRecordBytesFloor ||
+        peer.maxRecord > wire::kRecordBytesCeiling)
+        return fail(Status::LimitExceeded, "the peer proposed an illegal record size");
+
+    if (_cfg.initiator) {
+        // The responder already computed the agreement; adopt it verbatim
+        // rather than recomputing, so there is exactly one answer.
+        _negotiated.maxRecordBytes   = peer.maxRecord;
+        _negotiated.maxTransferBytes = peer.maxTransfer;
+        _negotiated.capabilities     = peer.caps;
+        _negotiated.keepaliveMs      = peer.keepaliveMs;
+        _negotiated.peerRoleBits     = peer.roleBits;
+        _negotiated.peerPlatform     = peer.platformId;
+        return applyNegotiated();
+    }
+
+    // Responder: minimum for sizes, intersection for capabilities.
+    const auto minU32 = [](std::uint32_t a, std::uint32_t b) { return a < b ? a : b; };
+    _negotiated.maxRecordBytes   = minU32(_cfg.negotiatedMaxRecordBytes, peer.maxRecord);
+    _negotiated.maxTransferBytes = minU32(_cfg.maxTransferBytes, peer.maxTransfer);
+    _negotiated.capabilities     = (_cfg.capabilities | wire::kCapSegmentation) & peer.caps;
+    // Keepalive is the FASTER of the two, not the slower: each side is saying
+    // how often it needs to hear from the other to believe the link is alive,
+    // and honouring the slower one would leave the impatient side declaring a
+    // healthy peer dead.
+    _negotiated.keepaliveMs      = _cfg.keepaliveMs < peer.keepaliveMs
+                                       ? _cfg.keepaliveMs : peer.keepaliveMs;
+    _negotiated.peerRoleBits     = peer.roleBits;
+    _negotiated.peerPlatform     = peer.platformId;
+
+    if (const Status s = sendHello(wire::Type::HelloOk, &_negotiated); s != Status::Ok)
+        return fail(s, "could not send HELLO_OK");
+
+    return applyNegotiated();
 }
 
 Status SecureSession::pump()
@@ -293,6 +451,9 @@ Status SecureSession::pump()
         }
         case State::Handshaking:
             return driveHandshake();
+
+        case State::Greeting:
+            return driveGreeting();
 
         case State::Established:
             return Status::Ok;
