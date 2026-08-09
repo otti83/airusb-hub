@@ -291,8 +291,12 @@ jobs:
       - name: Confirm the binaries exist without publishing them
         shell: pwsh
         run: |
-          foreach ($f in @('airusb\build\Release\airusb-net.exe',
-                           'airusb\build\Release\airusb-hubd.exe')) {
+          # Paths are relative to the job's working-directory (airusb), NOT to
+          # the repo root. The upload-artifact action this replaced took
+          # repo-root paths, so copying them across produced airusb\airusb\... —
+          # caught by CI on the first run, which is what the check is for.
+          foreach ($f in @('build\Release\airusb-net.exe',
+                           'build\Release\airusb-hubd.exe')) {
             if (-not (Test-Path $f)) { throw "MSVC did not produce $f" }
             $len = (Get-Item $f).Length
             Write-Host ("{0}  {1:N0} bytes" -f $f, $len)
@@ -585,8 +589,9 @@ jobs:
       - name: Confirm the cross-build produced binaries without publishing them
         run: |
           set -eu
-          for f in airusb/build-win/airusb-net.exe airusb/build-win/airusb-hubd.exe \
-                   airusb/build-win/airusb-brokerd.exe; do
+          # Relative to the job's working-directory (airusb), not the repo root.
+          for f in build-win/airusb-net.exe build-win/airusb-hubd.exe \
+                   build-win/airusb-brokerd.exe; do
             [ -s "$f" ] || { echo "the cross-build did not produce $f"; exit 1; }
             printf '%s  %s bytes\n' "$f" "$(stat -c%s "$f")"
           done
