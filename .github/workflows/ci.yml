@@ -159,6 +159,110 @@ jobs:
             if (Test-Path serve.err) { Get-Content serve.err }
           }
 
+      # ---------------------------------------------------------------------
+      # The window, on Windows, as two real processes.
+      #
+      # There is no Windows machine this project can drive interactively — the
+      # one it has is reachable by RDP and nothing else — so every claim about
+      # the interface on Windows would otherwise be "it compiles". This makes
+      # two daemons pair with each other over loopback and read a device
+      # through the control API, using a client that is not the one that wrote
+      # the server.
+      #
+      # PowerShell, not bash, on purpose: the GitHub runner has both, and the
+      # bash one would test a POSIX shell's idea of Windows rather than
+      # Windows. CP932 already caught this project out once (§ the em dash in
+      # the SAS line), and the SAS is exactly what this step reads back.
+      # ---------------------------------------------------------------------
+      - name: The hub daemon, two processes, driven over its own HTTP API
+        shell: pwsh
+        run: |
+          $exe = (Resolve-Path .\build\Release\airusb-hubd.exe).Path
+          New-Item -ItemType Directory -Force -Path hubA, hubB | Out-Null
+
+          $a = Start-Process -FilePath $exe -WorkingDirectory (Resolve-Path hubA) `
+                 -ArgumentList '--ui-port','8801','--share-port','7745','--share',
+                               '--no-open','--name','sharer' `
+                 -PassThru -NoNewWindow -RedirectStandardOutput hubA.out -RedirectStandardError hubA.err
+          $b = Start-Process -FilePath $exe -WorkingDirectory (Resolve-Path hubB) `
+                 -ArgumentList '--ui-port','8802','--no-open','--name','importer' `
+                 -PassThru -NoNewWindow -RedirectStandardOutput hubB.out -RedirectStandardError hubB.err
+
+          try {
+            foreach ($i in 1..50) {
+              if ((Test-Path hubA\airusb-hub.token) -and (Test-Path hubB\airusb-hub.token)) { break }
+              Start-Sleep -Milliseconds 200
+            }
+            $TA = (Get-Content hubA\airusb-hub.token -Raw).Trim()
+            $TB = (Get-Content hubB\airusb-hub.token -Raw).Trim()
+            $hA = @{ 'X-AirUSB-Token' = $TA }
+            $hB = @{ 'X-AirUSB-Token' = $TB }
+
+            function Get-State($port, $hdr) {
+              Invoke-RestMethod -Uri "http://127.0.0.1:$port/api/state" -Headers $hdr
+            }
+            function Post($port, $hdr, $path, $body) {
+              Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$port/api/$path" `
+                -Headers $hdr -ContentType 'application/json' -Body $body
+            }
+
+            # The refusals first. A guard whose checks have quietly stopped
+            # firing looks exactly like one that is working.
+            $r = Invoke-WebRequest -Uri 'http://127.0.0.1:8801/api/state' -SkipHttpErrorCheck
+            if ($r.StatusCode -ne 401) { throw "a request with no token got $($r.StatusCode), wanted 401" }
+            $r = Invoke-WebRequest -Uri 'http://127.0.0.1:8801/api/state' `
+                   -Headers (@{ 'X-AirUSB-Token' = $TA; 'Host' = 'rebind.example:8801' }) -SkipHttpErrorCheck
+            if ($r.StatusCode -ne 403) { throw "the Host check did not fire ($($r.StatusCode))" }
+            $r = Invoke-WebRequest -Method Post -Uri 'http://127.0.0.1:8801/api/share/stop' `
+                   -Headers (@{ 'X-AirUSB-Token' = $TA; 'Origin' = 'https://evil.example' }) -SkipHttpErrorCheck
+            if ($r.StatusCode -ne 403) { throw "the Origin check did not fire ($($r.StatusCode))" }
+            $page = Invoke-WebRequest -Uri 'http://127.0.0.1:8801/'
+            if ($page.Content -notmatch '<title>AirUSB Hub</title>') { throw "the page was not served" }
+            Write-Host "guard: no-token 401, rebinding 403, cross-origin 403, page $($page.RawContentLength) bytes"
+
+            Post 8802 $hB 'import/connect' '{"host":"127.0.0.1","port":7745}' | Out-Null
+            $sasB = (Get-State 8802 $hB).import.sas
+            $sasA = (Get-State 8801 $hA).share.sas
+            Write-Host "importer $sasB / sharer $sasA"
+            if (-not $sasA -or $sasA -ne $sasB) { throw "the two sides showed different numbers" }
+
+            # Exporter first — the order that tears the session down while the
+            # other side is still deciding, and the one a naive implementation
+            # never recovers from.
+            Post 8801 $hA 'share/approve' '{"accept":true}' | Out-Null
+            $ok = $false
+            foreach ($i in 1..40) {
+              Start-Sleep -Milliseconds 500
+              $im = (Get-State 8802 $hB).import
+              Write-Host "  importer $($im.state) sas=$($im.sas)"
+              if ($im.state -eq 'awaiting-approval' -and $im.sas -and $im.sas -ne $sasB) {
+                $sh = (Get-State 8801 $hA).share
+                if ($sh.sas -ne $im.sas) { throw "after the reconnect the numbers disagree" }
+                Write-Host "  reconnected with a new number, matching on both sides: $($im.sas)"
+                Post 8802 $hB 'import/approve' '{"accept":true}' | Out-Null
+              }
+              if ($im.state -eq 'connected' -or $im.state -eq 'attached') { $ok = $true; break }
+            }
+            if (-not $ok) { throw "the two hubs never finished pairing" }
+
+            $uid = (Get-State 8802 $hB).import.devices[0].uid
+            if (-not $uid) { throw "the sharer offered nothing" }
+            Post 8802 $hB 'import/attach' (@{ uid = $uid } | ConvertTo-Json -Compress) | Out-Null
+            $res = Post 8802 $hB 'import/verify' '{}'
+            if (-not $res.import.probe.passed) { throw "the verification failed: $($res.import.probe.failure)" }
+            Write-Host "device: $($res.import.manifest)"
+            Write-Host "probe : $($res.import.probe.summary.Split([char]10)[0])"
+            Write-Host 'PASS: two hubs paired on Windows and read a device through the control API.'
+          }
+          finally {
+            foreach ($p in @($a, $b)) {
+              if ($p -and -not $p.HasExited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
+            }
+            foreach ($f in @('hubA.out','hubA.err','hubB.out','hubB.err')) {
+              if (Test-Path $f) { Write-Host "--- $f ---"; Get-Content $f }
+            }
+          }
+
       - name: Publish the binary MSVC actually produced
         uses: actions/upload-artifact@v4
         with:

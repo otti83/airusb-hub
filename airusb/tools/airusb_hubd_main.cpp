@@ -104,7 +104,14 @@ void openInBrowser(const std::string& url)
 #else
     const std::string cmd = "xdg-open \"" + url + "\" >/dev/null 2>&1";
 #endif
-    (void)std::system(cmd.c_str());
+    // Assigned rather than cast to void: glibc marks system() warn_unused_result
+    // and a (void) cast does not satisfy GCC's version of that attribute. The
+    // result really is ignored on purpose — a browser that fails to open is not
+    // a reason to refuse to run, and the URL has already been printed.
+    const int rc = std::system(cmd.c_str());
+    if (rc != 0)
+        std::fprintf(stderr, "airusb-hubd: could not open a browser; use the "
+                             "address above.\n");
 }
 
 void usage(const char* argv0)
