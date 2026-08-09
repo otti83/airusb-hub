@@ -1,11 +1,11 @@
 # AirUSB Hub — Session Handoff
 
-**Written:** 2026-08-08
+**Written:** 2026-08-09
 **Purpose:** resume this project in a fresh session with no access to the previous
 conversation. Everything load-bearing is here or in the documents it points to.
-**Repo:** `/Users/mba/Desktop/AirUSB Hub` — **now public** at
+**Repo:** `/Users/mba/Desktop/AirUSB Hub` — public at
 <https://github.com/otti83/airusb-hub> (Apache-2.0, branch `main`, `gh`
-authenticated as `otti83`).
+authenticated as `otti83`). Everything below is pushed.
 
 ---
 
@@ -16,47 +16,35 @@ authenticated as `otti83`).
 | Sharing a USB device from a Mac | **works on real hardware** (058f:6387 SuperSpeed) |
 | Encryption + authentication | **done** — Noise_XX / Noise_IK, official vectors matched |
 | Session layer, L1 protocol, manifest | **done** |
-| Networking | **done** — real TCP, macOS↔macOS and macOS↔Linux |
-| Windows client | **works** — MSVC 19.51 builds it, 13/13 suites pass natively, full BOT exchange over a real socket |
-| Receiving on a Mac | **blocked on Apple** — FB24214361, see §2 |
-| **Receiving on Linux** | **WORKS** — the kernel enumerates it, binds usb-storage, and mounts a filesystem on it (§3.5) |
-| Receiving on Windows | driver half not written |
+| Networking | **done** — real TCP; macOS↔macOS, macOS↔Linux, **Windows↔macOS on two machines** |
+| Windows client | **done** — MSVC 19.51 builds it, 13/13 native, full BOT exchange |
+| **Receiving on Linux** | **WORKS** — the kernel enumerates it, binds `usb-storage`, mounts a filesystem (§3.6) |
+| Receiving on a Mac | **blocked on Apple** — FB24214361, §2 |
+| Receiving on Windows | UdeCx driver not written. **Not blocked by anyone** |
 
 ```
-19 test suites / 0 failures
+19 test suites / 0 failures        CI: 4/4 green on every push
 3 fuzz targets / 0 crashes / 0 UB findings
-Zero warnings: macOS (Clang, full flag set), Linux (GCC 12, -Wall -Wextra),
-               Windows (MinGW, full flag set — -Wpedantic -Wconversion
-               -Wsign-conversion -Wshadow, not just -Wall -Wextra),
-               Windows (MSVC 19.51, /W4 /permissive-) — measured in CI
-CI: 4/4 green — Windows/MSVC, Linux/ASan+UBSan, macOS/Clang, MinGW cross
-~21,500 lines ours + 10 vendored files
+Zero warnings: macOS (Clang, full set), Linux (GCC, ASan+UBSan),
+               Windows (MinGW, full set), Windows (MSVC 19.51, /W4 /permissive-)
+~28,000 lines ours + 10 vendored files
 ```
 
-### Windows is DONE. THE NEXT TASK is the UdeCx driver.
+### THE ONE THING ONLY A HUMAN CAN DO
 
-CI ran on 2026-08-09 and **all four jobs are green**, and the two-machine run was
-then done on real hardware (§3.4). Measured on Windows Server 2025 with
-**MSVC 19.51.36252.0**:
+**Post `FB24214361` in <https://developer.apple.com/forums/thread/802495>.**
+Filing put it in the ordinary queue; posting the number is what routes it to the
+engineer who approves these. Ready-to-paste text is in `ENTITLEMENT_REQUEST.md`.
+It has been outstanding since 2026-08-08. §2 has the evidence for why there is no
+portal checkbox to look for instead.
 
-```
-13/13 suites pass natively on Windows      zero MSVC warnings at /W4 /permissive-
-verdict=PASS  cbw=6 data=5 csw=6 stallRecoveries=0 shortReads=0
-RESULT=PASS — a USB Mass Storage exchange completed over an encrypted,
-              authenticated network session
-```
+### THE NEXT TASK: finish Mac × Linux (§4.1)
 
-**ASan ran for the first time in this project's life**, on Linux, and found
-nothing: 13/13 plus its own `RESULT=PASS` under `address,undefined`.
-
-And the part CI structurally cannot do — **two machines, two operating systems,
-a real network** — was done by hand the same day and passed, with the SAS
-confirmed identical on both consoles (§3.4).
-
-**Nothing about the portable half is unmeasured any more.** The next task is
-§5.1, the UdeCx driver: the piece that makes Windows *enumerate* the device
-rather than merely drive it. Windows' gate is self-service (`bcdedit /set
-testsigning on`), so unlike the macOS importer it waits on nobody's decision.
+`airusb-vhci` already makes Linux enumerate a **simulated** device. Pointing the
+same bridge at a **real drive on the Mac, across the encrypted session**, is two
+pieces of work — wiring segmentation in, and a data plane that can pipeline
+(§4.1). That is the whole product working, on hardware, with macOS as the
+exporter and Linux as the importer, and **nothing about it waits on Apple.**
 
 ---
 
@@ -75,6 +63,8 @@ Governing rules from the master prompt:
 - **Phase Gate.** Goal / Implementation / Evidence / PASS-FAIL / Known Issues /
   Next. A failed gate does not advance.
 - Correctness > Compatibility > Reliability > Latency > Throughput.
+
+---
 
 ---
 
@@ -211,83 +201,121 @@ here, before the App Group was added, signed cleanly and produced nothing.
 
 ---
 
-## 3. Cross-platform status in detail
+### 2.6 What is NOT blocked by Apple — read this before deciding to wait
 
-### 3.1 What has actually been run
+Apple gates exactly one thing: **macOS as the importer**. It gates nothing else,
+and the project has since proven that the rest of the stack works without it.
 
-| combination | result |
+| | needs Apple? |
 |---|---|
-| macOS exporter ↔ macOS client, TCP loopback | **PASS** |
-| macOS exporter ↔ Linux client, real network | **PASS** |
-| Windows, built with MSVC 19.51, loopback | **PASS** — 13/13 suites + a full BOT exchange, in CI |
-| Linux under ASan + UBSan, loopback | **PASS** — 13/13 + BOT exchange, no sanitizer findings |
-| Windows client, cross-compiled to a PE | **builds** (CI job `windows-cross`) |
-| **Windows exporter ↔ macOS importer, two machines, real network** | **PASS** — 2026-08-09, see §3.4 |
+| macOS as the **exporter**, on real hardware | no — done, P2.8 |
+| The protocol, crypto, session layer, networking | no — done on three OSes |
+| Windows client, MSVC | no — done |
+| **Linux as the importer** | **no — done** (§3.6) |
+| Windows as the importer (UdeCx) | no — self-service test signing |
+| macOS as the **importer** | **yes, and only this** |
 
-The passing runs end with a complete USB Mass Storage exchange:
+An entitlement that never arrives costs this project the macOS importer. It does
+not cost it a working product: a Mac can already share a drive, and a Linux box
+can already receive one as a real USB device. §4 is a queue of work that exists
+regardless of Apple's answer, and it is long enough to be worth starting now.
 
-```
-verdict=PASS  cbw=6 data=5 csw=6 stallRecoveries=0 shortReads=0 boundariesIntact=yes
-  GET_MAX_LUN            ok   bMaxLUN=0
-  TEST_UNIT_READY        ok
-  INQUIRY                ok   'AirUSB' 'Scripted Device' rev '0001'
-  READ_CAPACITY_10       ok   lastLBA=61439 blockSize=512 -> 61440 blocks
-  READ_10_LBA0           ok   512 bytes, residue=0
-  SHORT_READ_FIDELITY    ok   offered 1024, device sent 512 — short read preserved
-  READ_10_MULTIBLOCK     ok   2048 bytes in one transfer, residue=0
-RESULT=PASS — a USB Mass Storage exchange completed over an encrypted,
-              authenticated network session
-```
+### 2.7 If Apple says no
 
-Different compilers, different libc, different kernels, byte-identical protocol.
-The instrument is `diag/BotProbe`, the same one that drove a physical drive during
-the P2.8 hardware gate — so a failure means the network is wrong, not the probe.
+Nothing needs re-deriving; the options were already established.
 
-### 3.2 Linux — how to reproduce
+1. **Ship without the macOS importer.** macOS exports, Linux and Windows import.
+   That is a coherent product and most of the value.
+2. **Re-file as an Organization.** `teamType = Individual` is the honest statement
+   of the risk (§2.3): every confirmed holder found during Phase 0 is an
+   Organization. Publishing the repository was the cheapest available mitigation
+   and has been done.
+3. **Do not look for a technical workaround.** §2.4's matrix is the measurement
+   that closes this off: a *fabricated* `com.apple.developer.*` entitlement is
+   SIGKILLed by AMFI exactly as the real one is, so this is a generic restricted-
+   prefix rule and not a targeted block with a seam in it. The Natural Path Only
+   rule forbids the alternatives anyway.
 
-A Lima VM already exists on this Mac, named **`kbuild`** (Debian 12, aarch64,
-GCC 12.2). It belongs to another project; nothing here modified it.
+---
+
+## 3. Cross-device status — what has actually been run
+
+### 3.1 The matrix, and which cells need Apple
+
+Rows are the machine holding the device (**exporter**); columns are the machine
+that wants to use it (**importer**). "Importer works" means the OS enumerates it
+as a real USB device and binds its own drivers, not merely that bytes moved.
+
+| exporter ↓ / importer → | macOS | Linux | Windows |
+|---|---|---|---|
+| **macOS** (real hardware) | protocol PASS (loopback) · importer **BLOCKED ON APPLE** | protocol PASS · **importer exists** → §4.1 is finishing this | protocol PASS (two machines) · importer needs UdeCx |
+| **Linux** | not written | — | not written |
+| **Windows** (simulated device) | **PASS, two machines, 2026-08-09** (§3.6) | **importer exists on both sides — §4.3** | — |
+
+Read the matrix this way:
+
+* **Only one cell is blocked by Apple**: macOS as the *importer*. Every other cell
+  is work, not permission.
+* **macOS × Linux is the valuable one** and is the next task: a real drive, real
+  hardware, real network, and an OS that really enumerates it.
+* **Windows × Linux is the cell that needs no Mac at all** — both halves already
+  exist and are proven separately. See §4.3 for why it is scheduled *after* the
+  macOS pairs rather than before.
+
+### 3.2 What "PASS" means in each row
+
+| run | date | evidence |
+|---|---|---|
+| macOS exporter ↔ macOS client, loopback | earlier | `RESULT=PASS`, full BOT exchange |
+| macOS exporter ↔ Linux client, real network | earlier | `RESULT=PASS` |
+| Windows exporter ↔ macOS importer, **two machines, different subnets** | 2026-08-09 | §3.5 — SAS `927920` matched on both consoles |
+| Windows, MSVC 19.51, loopback | 2026-08-09 | 13/13 native + `verdict=PASS` + write probe |
+| Linux, ASan+UBSan, loopback | 2026-08-09 | 13/13 + `RESULT=PASS`, no sanitizer findings |
+| **Linux kernel enumerated a device** | 2026-08-09 | §3.6 — `Attached SCSI removable disk`, then `mkfs`/`mount`/write/read-back |
+
+---
+
+### 3.3 Linux — how to reproduce, on the VM that matters
+
+Use Lima **`airusb`** (Ubuntu 24.04 aarch64). `kbuild` is another project's and
+cannot do vhci-hcd at all — its Debian `cloud` kernel is built with
+`CONFIG_USB_SUPPORT` unset, so no package can ever supply the module.
 
 ```bash
-limactl start kbuild
-limactl shell kbuild bash -lc '
-SRC="/Users/mba/Desktop/AirUSB Hub/airusb"; mkdir -p /tmp/airusb-linux; cd /tmp/airusb-linux
+limactl start airusb
+limactl shell airusb bash -lc 'sudo modprobe vhci-hcd && cat /sys/devices/platform/vhci_hcd.0/status | head -3'
+```
+
+If `modinfo -n vhci_hcd` comes up empty on a fresh VM:
+`sudo apt-get install -y linux-modules-extra-$(uname -r)` — **no kernel change and
+no reboot**, because the Lima cloud image already runs the `generic` kernel via
+`linux-image-virtual` and only the `-extra` module set is missing. On Ubuntu 26.04
+it is in the base package and even that is unnecessary. **Resolve it at runtime
+with `modinfo -n vhci_hcd`; do not encode either case as a rule.**
+
+The VM has `build-essential` and `cmake`. `/Users/mba` is mounted read-only, so
+build into `/tmp`:
+
+```bash
+limactl shell airusb bash -lc '
+SRC="/Users/mba/Desktop/AirUSB Hub/airusb"; mkdir -p /tmp/vhci && cd /tmp/vhci
 g++ -std=c++20 -O1 -I"$SRC" -Wall -Wextra \
-  "$SRC"/tools/airusb_net_main.cpp "$SRC"/tests/fakes/ScriptedDevice.cpp \
-  "$SRC"/core/*.cpp "$SRC"/crypto/*.cpp "$SRC"/protocol/*.cpp \
-  "$SRC"/transport/*.cpp "$SRC"/session/*.cpp "$SRC"/diag/*.cpp \
-  -x c "$SRC"/third_party/monocypher/monocypher.c \
-       "$SRC"/third_party/monocypher/monocypher-ed25519.c \
-       "$SRC"/third_party/blake2s/blake2s-ref.c \
-  -o airusb-net'
+  "$SRC"/platform/linux/airusb_vhci_main.cpp "$SRC"/platform/linux/UsbipCodec.cpp \
+  "$SRC"/platform/linux/LinuxUsb.cpp "$SRC"/platform/linux/VhciBridge.cpp \
+  "$SRC"/tests/fakes/ScriptedDevice.cpp \
+  "$SRC"/core/*.cpp "$SRC"/crypto/*.cpp "$SRC"/protocol/*.cpp "$SRC"/transport/*.cpp \
+  -x c "$SRC"/third_party/monocypher/*.c "$SRC"/third_party/blake2s/blake2s-ref.c \
+  -o airusb-vhci'
 ```
 
-The Mac host is reachable from the VM at **192.168.5.2**. There is no cmake in
-that VM; the direct `g++` line above doubles as proof that nothing depends on
-cmake.
+Then, as root inside the VM, `./airusb-vhci` — and in another shell `dmesg | tail`,
+`lsusb`, `lsblk`. §3.6 is what you should see.
 
-Then, with `./build/airusb-net serve --port 7714` running on the Mac:
+The portable client still builds the same way it always did (swap
+`airusb_vhci_main.cpp` + `platform/linux/*` for `tools/airusb_net_main.cpp`), and
+that direct `g++` line doubles as proof that nothing depends on cmake.
 
-```bash
-limactl shell kbuild bash -lc \
-  'cd /tmp/airusb-linux && ./airusb-net connect --host 192.168.5.2 --port 7714 --probe'
-```
-
-The first run pairs and disconnects; the second attaches and reads.
-
-**vhci-hcd, for a Linux importer later:** the VM's running `cloud` kernel does NOT
-ship it, but Debian's standard kernel does — verified by unpacking the package:
-
-```
-./lib/modules/6.1.0-50-arm64/kernel/drivers/usb/usbip/vhci-hcd.ko
-```
-
-So a Linux importer needs `apt install linux-image-arm64`, a reboot, then
-`modprobe vhci-hcd`. **No permission from anyone, no signing, no special boot
-mode.** That makes Linux the cheapest route to a working importer if Apple
-declines.
-
-### 3.3 Windows — exactly what is and is not verified
+### 3.4 Windows — exactly what is and is not verified
 
 `mingw-w64` is installed via Homebrew. `scripts/cross-build-windows.sh` produces a
 statically linked `airusb-net.exe` (PE32+ x86-64).
@@ -371,7 +399,7 @@ user as a copy-pasteable command.
 
 ---
 
-### 3.4 The two-machine run — PASS, 2026-08-09
+### 3.5 The two-machine run — PASS, 2026-08-09
 
 Roles reversed deliberately: **Windows was the exporter, the Mac the importer.**
 The documented direction could not run, because Windows has no route back to the
@@ -408,7 +436,7 @@ Two details worth keeping:
 
 ---
 
-### 3.5 Linux enumerated it — 2026-08-09
+### 3.6 Linux enumerated it — 2026-08-09
 
 The thing this project exists to do, done for the first time on any platform.
 `platform/linux/airusb-vhci` attaches a socketpair to vhci-hcd and runs
@@ -464,253 +492,226 @@ segmentation, and a data plane that can pipeline.
 
 ---
 
-## 4. Verifying Windows again (all of this now passes)
+### 3.7 The Linux importer, gate by gate
+Full plan with staged evidence gates in
+[`LINUX_IMPORTER_PLAN.md`](LINUX_IMPORTER_PLAN.md). This is the only importer
+path that waits on nobody, and it is the one that would make this project do
+the thing it exists to do for the first time on any platform.
 
-### 4.0 Done — CI covers it
+**Feasibility settled by measurement, not argument.** vhci-hcd accepts an
+`AF_UNIX` **socketpair** — the only checks are `sockfd_lookup()` and
+`SOCK_STREAM`, with no address-family test anywhere in `drivers/usb/usbip/`.
+That kills the TCP-loopback fallback the P1 plan assumed (§4.7, OQ-3) and,
+better, means **no plaintext USB/IP ever exists on a socket anyone can reach**.
+A full enumeration was driven over such a socketpair at both HS and SS during
+the design pass, ending in `Attached SCSI removable disk` and `/dev/ttyACM0`.
 
-`.github/workflows/ci.yml` builds with MSVC, runs the suites natively on Windows,
-and requires a full BOT exchange over a loopback socket; it also runs Linux under
-ASan. All four jobs are green (§0). Push and it re-verifies itself. What follows
-is only the part CI structurally cannot do.
+**Three prerequisites are ours, not the kernel's**, and none is a blocker of
+the approach: manifest/transfer **segmentation is unimplemented** (usb-storage
+asks for 122 880 B per URB at HS and **1 MiB at SuperSpeed**, against a 65 431 B
+record ceiling — raising the ceiling cannot close it); `RemoteDevicePort`
+**cannot pipeline** (one SUBMIT at a time, any other `request_id` is fatal);
+and **`airusb::Speed` does not match Linux's `usb_device_speed`** — see §8 R3,
+it is the nastiest of the three.
 
-### 4.1 The two-machine run — MEASURE THE NETWORK FIRST
+**The environment claim in older notes was wrong in two ways.** Debian's
+genericcloud kernel is not merely missing vhci-hcd: it is built with
+`CONFIG_USB_SUPPORT` unset, so no package can ever supply it. And no reboot is
+needed anywhere — Ubuntu 26.04 ships vhci-hcd in base `linux-modules`, 24.04
+needs one `linux-modules-extra`. Resolve it at runtime with
+`modinfo -n vhci_hcd` rather than encoding either as a rule.
 
-**The addresses in older notes are stale, and this cost real time once already.**
-Measured 2026-08-09:
+A working VM already exists on this Mac: Lima **`airusb`** (Ubuntu 24.04,
+aarch64), vhci-hcd loaded, `nports=16` as 8 `hs` + 8 `ss`, lockdown `[none]`,
+with `build-essential` and `cmake` installed.
 
-| | |
-|---|---|
-| Mac, LAN (`en0`) | `192.168.2.15` |
-| Mac, Tailscale | `100.120.39.113` |
-| Windows box (`GMKtec`) | `192.168.0.109` — **a different LAN**, reached through `utun8`. NOT `.225`, which is some other machine that also answers on 445/3389 |
-| Windows box on Tailscale? | **no** — every Windows peer in `tailscale status` is offline |
-| open on it | 3389 (RDP), 445 (SMB). 22 closed |
+**L1 PASSED on 2026-08-09, at both speeds.** `platform/linux/vhci_probe_main.cpp`
+opens a socketpair, hands one end to vhci-hcd through sysfs `attach`, and reads
+what the kernel says first. It says:
 
-The two machines are **not on the same LAN**. The Mac reaches the Windows box
-only because `ts-464` (`100.67.175.141`) is a Tailscale subnet router advertising
-`192.168.0.0/24`. Subnet routers SNAT by default, so:
-
-- **Mac → Windows works** (ping, 3389 and 445 all verified).
-- **Windows → Mac probably does not.** The Windows box has no route to
-  `100.120.39.113` and none to `192.168.2.15`.
-
-That matters because the documented direction — Mac serves, Windows connects —
-runs the wrong way down that path. **Measure before assuming.** On the Windows
-box:
-
-```powershell
-Test-NetConnection 100.120.39.113 -Port 7714 -InformationLevel Detailed
+```
+0000  00 00 00 01 00 00 00 01 00 02 00 02 00 00 00 01
+0010  00 00 00 00 00 00 02 00 00 00 00 40 00 00 00 00
+0020  00 00 00 00 00 00 00 00 80 06 00 01 00 00 40 00
+CMD_SUBMIT=yes ep0-IN=yes GET_DESCRIPTOR(DEVICE)=yes devid-echoed=yes
 ```
 
-- **reachable** → the documented direction works. Mac runs `serve`, Windows runs
-  `connect --host 100.120.39.113`.
-- **not reachable** → **reverse the roles.** `airusb-net` is symmetric and
-  `serve` is fully portable, so run `serve --port 7714` on Windows and `connect`
-  from the Mac. It proves the same protocol, crypto and session layer across two
-  operating systems and a real network; the only difference is which side drives
-  the exporter FSM and which drives the importer. Note it in the result.
-- To get the documented direction instead, install Tailscale on the Windows box —
-  it then has a `100.x` address both ways.
+That dump is the byte-order rule made visible, and worth keeping for whoever
+doubts it: `transfer_buffer_length` = 64 appears at 0x18 as `00 00 00 40`
+BIG-endian, and the same value 64 appears sixteen bytes later inside `setup`
+as `40 00` LITTLE-endian. One PDU, both orders. A codec that byteswaps the
+header wholesale corrupts enumeration itself.
 
-`serve` binds `INADDR_ANY`, so it accepts on the LAN and Tailscale addresses
-alike — verified on this Mac.
+High speed asks `wLength=64`, SuperSpeed asks `wLength=8` — the design
+predicted both. SuperSpeed correctly took port 8, the first of the `ss` half;
+`dmesg` confirms `new SuperSpeed USB device number 2 using vhci_hcd`. After
+exit all 16 ports return to `sta 004` with no leak.
 
-⚠️ **Do not test with the published preview binary.** The release at
-<https://github.com/otti83/airusb-hub/releases/tag/v0.1.0-preview>
-(`airusb-net.exe`, sha256
-`a450f90f780d98282e781d2a994444e003dcf3f129fa59005eb4b332181b4ecc`) predates the
-`<string>`, ATTACH-reject and handshake-timeout fixes — that build does not even
-compile under MSVC. Take the `airusb-net-msvc-x64` artifact from a CI run, or
-rebuild. **Re-cutting the release is worth doing now that CI is green.**
+**L2 DONE:** `platform/linux/UsbipCodec` — 117 checks, built and tested on
+macOS, Linux and Windows/MSVC in CI. It has no sockets, no sysfs and no Linux
+headers on purpose: a kernel-ABI bug found on the development Mac costs a
+rebuild, and the same bug found with a kernel in the loop costs a VM reboot per
+iteration.
 
-**On the Mac:**
+**L3 DONE:** `platform/linux/VhciBridge` translates USB/IP into transfers on an
+`IUsbDevicePort`, and enumeration is proven byte-for-byte with no kernel in the
+loop — 72 checks, plus `LinuxUsb` (128 checks) for the speed and errno tables.
+The device descriptor the bridge returns is `memcmp`-identical to the
+manifest's, which is the verbatim rule asserted rather than asserted about.
 
+**R3 is closed.** `toKernelSpeed()` is a written-out table with a test that
+asserts the DISAGREEMENT: `Full→LOW`, `Low→FULL`, `Super→WIRELESS` are what a
+cast would have produced, and the test fails if anyone ever "simplifies" it
+back into one.
+
+**L4 PASSED, and it went straight through L7 on the way.** See §3.5.
+
+---
+
+## 4. THE WORK QUEUE while Apple decides
+
+Apple's answer has no timeline and may be "no". **Nothing in this section waits on
+it.** The order below is deliberate; §4.3 in particular is scheduled where it is
+for a reason, not by accident.
+
+### 4.1 NEXT — macOS × Linux, on real hardware
+
+**Goal.** A real USB drive plugged into the Mac, enumerated by Linux as a real USB
+device, across the encrypted session. That is the entire product working end to
+end, with the only blocked half (the macOS importer) simply not participating.
+
+Both halves already exist and are proven separately: the macOS exporter drives
+real hardware (P2.8, 058f:6387), and `platform/linux/airusb-vhci` makes the Linux
+kernel enumerate a device (§3.6). What is missing is between them.
+
+**Two pieces of work, both ours, neither blocked:**
+
+1. **Wire segmentation in.** `protocol/Segmentation` is written and tested (139
+   checks): `planSegments` splits at the record ceiling, `Reassembler` puts it
+   back with exact-contiguity enforcement and a bounded arena. It is **not yet
+   connected** to `ExporterSession` or `RemoteDevicePort`.
+
+   Why it is mandatory rather than an optimisation: a record cannot exceed 65 519
+   bytes — Noise's plaintext ceiling, not a tuning parameter — and `usb-storage`
+   asks for 122 880 bytes in one URB at high speed and **a megabyte** once
+   `slave_configure()` raises `max_sectors` on a SuperSpeed link.
+
+   **Reassembly must complete before the device sees anything.** Handing the
+   exporter three segments to issue as three `bulkOut` calls injects a short
+   packet at each seam, and a short packet is how USB signals the end of a data
+   phase — the device reads the first seam as the end of the transfer and the
+   next segment as a new command. Silent corruption. This is why
+   `IUsbDevicePort` documents one call as ONE logical transfer.
+
+2. **A data plane that can pipeline.** `RemoteDevicePort` sends one SUBMIT and
+   treats any other `request_id` as a fatal `MalformedFrame`
+   (`RemoteDevicePort.cpp:88`). The kernel has many URBs in flight at once.
+
+   The hazard is not throughput, it is deadlock: vhci-hcd writes CMD_SUBMIT into
+   the socket and reads RET_SUBMIT from the same socket. If the bridge blocks on
+   the network while the kernel's socket buffer fills, both sides wait for each
+   other. `VhciBridge` is single-strand today, which is correct only because L3/L4
+   drive a *local* `IUsbDevicePort` that never blocks on a network.
+   `LINUX_IMPORTER_PLAN.md` §4.2 is about exactly this.
+
+**Gates:** L5 then L6 in `LINUX_IMPORTER_PLAN.md` §7. L6's evidence is
+`sha256sum /dev/sdX` matching a known image and `dmesg` free of `usb-storage`
+resets.
+
+### 4.2 macOS × Windows — as far as it can currently go
+
+The protocol half is **done and measured** (§3.6). It cannot go further until the
+Windows importer exists, and that is §4.4.
+
+There is one cheap, unblocked follow-up: the Windows box currently serves a
+simulated device only. A **Windows exporter for real hardware** (WinUSB/UsbDk
+capture) is a separate piece nobody has started, and is not required for anything
+below.
+
+### 4.3 Windows × Linux — the pair that needs no Mac, and why it comes third
+
+**Do this after §4.1 and §4.2.**
+
+Both halves already exist and are proven independently: `airusb-net serve` runs on
+Windows under MSVC and completed a two-machine exchange (§3.6), and
+`airusb-vhci` makes Linux enumerate a device (§3.6). Connecting them gives an
+**end-to-end run with zero macOS and zero Apple involvement**: Windows serves,
+Linux enumerates, a filesystem mounts.
+
+Its value is real and specific:
+
+* it proves the protocol and the importer are genuinely platform-independent
+  rather than accidentally macOS-shaped;
+* it is the only full-stack configuration that could plausibly run **unattended in
+  CI**, since both ends are commodity runners and no hardware is involved;
+* it survives Apple saying no.
+
+**Why it is third and not first.** The device it can carry is *simulated* — the
+real-hardware capture path only exists on macOS today. So Windows × Linux
+exercises the network, the session, the bridge and the kernel, but never a real
+USB device. §4.1 does exercise one. Doing §4.1 first means that when §4.3 runs,
+any failure it finds is a Windows-or-Linux failure rather than an ambiguity
+between "the pair is broken" and "the stack is broken" — the same reasoning that
+made `diag/BotProbe` run against `ScriptedDevice` in CI before it was ever pointed
+at a drive.
+
+**Concretely, once §4.1 lands:**
+
+```powershell
+# Windows (the exporter). Use the v0.2.1 release binary or a fresh CI artifact.
+.\airusb-net-msvc-x64.exe serve --port 7714
+```
 ```bash
-cd "/Users/mba/Desktop/AirUSB Hub/airusb"
-cmake -S . -B build && cmake --build build --target airusb-net
-./build/airusb-net serve --port 7714
-ipconfig getifaddr en0        # the IP to use below
+# Linux (the importer), in the airusb VM
+sudo ./airusb-vhci --host <WINDOWS-IP> --port 7714     # the --host form is §4.1 work
+dmesg | tail ; lsblk ; sudo mount /dev/sdX /mnt/x
 ```
 
-Allow the incoming-connection prompt if the firewall asks.
+The `--host` form does not exist yet: `airusb-vhci` currently instantiates a local
+`ScriptedDevice`. Giving it an `ImporterClient` instead is the same change §4.1
+needs, so §4.3 costs almost nothing extra once §4.1 is done.
 
-**On Windows** (PowerShell, in the folder holding the exe):
+**Route first, as always.** The Mac and the Windows box are not on the same LAN
+(§6). Whether Windows and the Linux VM can reach each other is a separate
+question that has never been measured — the Lima guest reaches the host via
+`host.lima.internal`, and reaching the Windows box beyond that is unproven.
+Measure before assuming; §3.4 records what that cost last time.
 
-```powershell
-.\airusb-net.exe connect --host <MAC-IP> --port 7714 --probe
-```
+### 4.4 The Windows importer — UdeCx
 
-First run pairs and disconnects — that is trust-on-first-use. **Both sides print a
-six-digit SAS; confirm they match.** Run it a second time to attach and read.
-Success ends with `RESULT=PASS`.
+`UdecxHostBackend` + `airusb.sys`, KMDF, design in `P1_IMPLEMENTATION_PLAN.md`
+§4.6. **Windows' gate is self-service:** `bcdedit /set testsigning on` for
+development, EV certificate + Microsoft attestation for distribution — a paid
+process, not a discretionary approval. **Nothing about the Windows path waits on
+anyone's decision.**
 
-### 4.2 Building it with MSVC by hand
+Much of the work is now cheaper than it was: `VhciBridge` proved that the
+translation layer can be written against `IUsbDevicePort` and tested with no
+kernel in the loop, and the same split applies to UdeCx.
 
-CI does this for you now. Do it by hand only if CI is red and you need the full
-compiler output, or if you want the Windows box's own toolchain in the loop.
+### 4.5 Smaller, fully unblocked
 
-*Developer PowerShell for VS 2022*, needs the "Desktop development with C++"
-workload:
-
-```powershell
-git clone https://github.com/otti83/airusb-hub
-cd airusb-hub\airusb
-cmake -S . -B build
-cmake --build build --config Release --target airusb-net
-.\build\Release\airusb-net.exe connect --host <MAC-IP> --port 7714 --probe
-```
-
-Expect MSVC to find things MinGW did not. Paste whatever it says.
-
-### 4.3 How to read the result
-
-| outcome | meaning |
-|---|---|
-| `RESULT=PASS` | the protocol, crypto and session layer work on Windows. Next: the UdeCx driver. |
-| handshake fails | the crypto or the preamble differs on Windows — compare the SAS on both sides first |
-| MSVC compile errors | portability gaps MinGW cannot see; fix, then re-verify all three platforms |
-| **SAS mismatch** | **stop.** That is either a man in the middle or a real protocol bug. |
+* **`PAIR_*` handlers.** The opcodes are reserved in `Wire.h` (0x10/0x11/0x12) and
+  the trust gate already refuses everything else to an Unpaired peer, but no
+  handler exists. The rate limiter half is done (`session/PairingGate`).
+* **Manifest segmentation on the control plane.** `protocol/Segmentation` now
+  exists; the manifest path still has none. An 8-configuration device with a full
+  string table could exceed one record. The attach currently fails with a clear
+  status rather than truncating.
+* **`kXfShortNotOk` / `kXfZeroPacket` / `kXfIsoAsap` have no consumer.**
+  `Codec.cpp` round-trips `xflags`; nothing reads it. Both ends need wiring in one
+  commit. `ZERO_PACKET` matters for real writes: dropped, a device waits for ever
+  for a terminating ZLP after an exact-multiple OUT.
+* **Interrupt and isochronous endpoints.** `ExporterSession::handleSubmit`
+  dispatches on direction only and discards `sb.xferType`;
+  `RemoteDevicePort::bulkIn/bulkOut` hardcode `XferType::Bulk`. An interrupt IN
+  that legitimately idles forever wedges the exporter's serial read loop with no
+  deadline anywhere. Either promote `submit()` or refuse ATTACH for such devices
+  in v1 and say so.
 
 ---
 
-## 5. What is left
-
-### 5.1 THE NEXT TASK — the UdeCx driver
-
-1. **UdeCx driver** — `UdecxHostBackend` + `airusb.sys`, KMDF, design in
-   `P1_IMPLEMENTATION_PLAN.md` §4.6. Windows' gate is self-service:
-   `bcdedit /set testsigning on` for development; EV certificate + Microsoft
-   attestation for distribution — a paid process, not a discretionary approval.
-   **Nothing about the Windows path waits on anyone's decision.**
-2. **Linux importer** — vhci-hcd shim. **L0, L1 and L2 of the plan are DONE.**
-   Full plan with staged evidence gates in
-   [`LINUX_IMPORTER_PLAN.md`](LINUX_IMPORTER_PLAN.md). This is the only importer
-   path that waits on nobody, and it is the one that would make this project do
-   the thing it exists to do for the first time on any platform.
-
-   **Feasibility settled by measurement, not argument.** vhci-hcd accepts an
-   `AF_UNIX` **socketpair** — the only checks are `sockfd_lookup()` and
-   `SOCK_STREAM`, with no address-family test anywhere in `drivers/usb/usbip/`.
-   That kills the TCP-loopback fallback the P1 plan assumed (§4.7, OQ-3) and,
-   better, means **no plaintext USB/IP ever exists on a socket anyone can reach**.
-   A full enumeration was driven over such a socketpair at both HS and SS during
-   the design pass, ending in `Attached SCSI removable disk` and `/dev/ttyACM0`.
-
-   **Three prerequisites are ours, not the kernel's**, and none is a blocker of
-   the approach: manifest/transfer **segmentation is unimplemented** (usb-storage
-   asks for 122 880 B per URB at HS and **1 MiB at SuperSpeed**, against a 65 431 B
-   record ceiling — raising the ceiling cannot close it); `RemoteDevicePort`
-   **cannot pipeline** (one SUBMIT at a time, any other `request_id` is fatal);
-   and **`airusb::Speed` does not match Linux's `usb_device_speed`** — see §8 R3,
-   it is the nastiest of the three.
-
-   **The environment claim in older notes was wrong in two ways.** Debian's
-   genericcloud kernel is not merely missing vhci-hcd: it is built with
-   `CONFIG_USB_SUPPORT` unset, so no package can ever supply it. And no reboot is
-   needed anywhere — Ubuntu 26.04 ships vhci-hcd in base `linux-modules`, 24.04
-   needs one `linux-modules-extra`. Resolve it at runtime with
-   `modinfo -n vhci_hcd` rather than encoding either as a rule.
-
-   A working VM already exists on this Mac: Lima **`airusb`** (Ubuntu 24.04,
-   aarch64), vhci-hcd loaded, `nports=16` as 8 `hs` + 8 `ss`, lockdown `[none]`,
-   with `build-essential` and `cmake` installed.
-
-   **L1 PASSED on 2026-08-09, at both speeds.** `platform/linux/vhci_probe_main.cpp`
-   opens a socketpair, hands one end to vhci-hcd through sysfs `attach`, and reads
-   what the kernel says first. It says:
-
-   ```
-   0000  00 00 00 01 00 00 00 01 00 02 00 02 00 00 00 01
-   0010  00 00 00 00 00 00 02 00 00 00 00 40 00 00 00 00
-   0020  00 00 00 00 00 00 00 00 80 06 00 01 00 00 40 00
-   CMD_SUBMIT=yes ep0-IN=yes GET_DESCRIPTOR(DEVICE)=yes devid-echoed=yes
-   ```
-
-   That dump is the byte-order rule made visible, and worth keeping for whoever
-   doubts it: `transfer_buffer_length` = 64 appears at 0x18 as `00 00 00 40`
-   BIG-endian, and the same value 64 appears sixteen bytes later inside `setup`
-   as `40 00` LITTLE-endian. One PDU, both orders. A codec that byteswaps the
-   header wholesale corrupts enumeration itself.
-
-   High speed asks `wLength=64`, SuperSpeed asks `wLength=8` — the design
-   predicted both. SuperSpeed correctly took port 8, the first of the `ss` half;
-   `dmesg` confirms `new SuperSpeed USB device number 2 using vhci_hcd`. After
-   exit all 16 ports return to `sta 004` with no leak.
-
-   **L2 DONE:** `platform/linux/UsbipCodec` — 117 checks, built and tested on
-   macOS, Linux and Windows/MSVC in CI. It has no sockets, no sysfs and no Linux
-   headers on purpose: a kernel-ABI bug found on the development Mac costs a
-   rebuild, and the same bug found with a kernel in the loop costs a VM reboot per
-   iteration.
-
-   **L3 DONE:** `platform/linux/VhciBridge` translates USB/IP into transfers on an
-   `IUsbDevicePort`, and enumeration is proven byte-for-byte with no kernel in the
-   loop — 72 checks, plus `LinuxUsb` (128 checks) for the speed and errno tables.
-   The device descriptor the bridge returns is `memcmp`-identical to the
-   manifest's, which is the verbatim rule asserted rather than asserted about.
-
-   **R3 is closed.** `toKernelSpeed()` is a written-out table with a test that
-   asserts the DISAGREEMENT: `Full→LOW`, `Low→FULL`, `Super→WIRELESS` are what a
-   cast would have produced, and the test fails if anyone ever "simplifies" it
-   back into one.
-
-   **L4 PASSED, and it went straight through L7 on the way.** See §3.5.
-3. **P2.9 `CiHostBackend`** — blocked on Apple only.
-4. ~~**The exporter's write path**~~ — **DONE, 2026-08-09.** It was going to be
-   "tested for free" by a real importer mounting a filesystem, which is a bad way
-   to find out: the free test is performed on somebody's data. `diag/WriteProbe`
-   now exercises it deliberately, and `airusb-net connect --write-test` runs it
-   over the network in CI on every commit.
-
-   Measured over a loopback session: `outTransfers=4 largestOut=16384
-   bytesWritten=35328 mismatched=0 outBoundariesIntact=yes restored=yes`. The
-   16384-byte run matters — it exceeds the record payload ceiling, so a single
-   logical OUT transfer has to be fragmented and reassembled, and nothing had ever
-   made the record layer do that in this direction. It came back byte-identical.
-
-   **It is a SEPARATE class from BotProbe on purpose.** BotProbe's header promises
-   without qualification that pointing it at a drive cannot damage its contents.
-   An opt-in flag would have turned an absolute guarantee into a conditional one,
-   which is the kind a tired person misreads with a drive attached. The write
-   instrument is a different type, and the only entry point is named
-   `runDestructiveWriteTest`.
-5. **`PAIR_*` messages** — the opcodes are reserved in `Wire.h` (0x10/0x11/0x12)
-   and the trust gate already refuses everything else to an Unpaired peer, but no
-   handler exists. **The rate limiter half is now DONE**: `session/PairingGate`,
-   40 checks.
-
-   Two design points worth not re-deriving. **The counter is global, not
-   per-peer** — a peer identity is an Ed25519 key the peer generates for itself,
-   so an attacker mints a fresh one per attempt and per-peer counting sees a first
-   offence every time. It would look like protection and be none. **And it runs on
-   the continuous clock**, so closing a laptop lid does not clear a lockout; a
-   clock that appears to move backwards fails closed for the same reason.
-
-   `serialize`/`deserialize` exist so a daemon can persist it beside the pin
-   store. A gate held only in memory is reset by anything that can restart the
-   daemon, and that is the reset an attacker would look for.
-6. **Segmentation** — `protocol/Segmentation` (139 checks) is DONE: `planSegments`
-   splits a logical transfer at the record ceiling, and `Reassembler` puts it back
-   with exact-contiguity enforcement and a bounded arena. Still to do is WIRING it
-   into `ExporterSession` and `RemoteDevicePort`, which is what L5/L6 need.
-
-   **The bug this found is worth keeping.** The LAST segment of a multi-segment
-   transfer carries neither `SEG_FIRST` nor `SEG_MORE` — byte-identical in flags
-   to a message that was never segmented. Flags alone cannot tell them apart; the
-   transfer already in flight on that key is what decides. Reading it the other
-   way treats every final segment as a fresh unsegmented message and silently
-   discards everything received before it.
-
-   Reassembly must also COMPLETE before the transfer reaches the device. Handing
-   the exporter three segments to issue as three `bulkOut` calls would inject a
-   short packet at each seam, and a short packet is how USB signals the end of a
-   data phase — the device would read it as the end of the transfer and the next
-   segment as a new command. That is why `IUsbDevicePort` documents one call as
-   ONE logical transfer.
-
----
-
-## 6. Environment (verified, not assumed)
+## 5. Environment (verified, not assumed)
 
 | Property | Value |
 |---|---|
@@ -720,30 +721,40 @@ Expect MSVC to find things MinGW did not. Paste whatever it says.
 | Secure Boot | **Reduced**. Full Security NOT tested — re-verify before release |
 | Signing identities | `Apple Development … (WT36SR3Q23)`, `Apple Distribution … (GZUV3UMV3B)` |
 | Test USB device | `058f:6387` Generic Mass Storage, 31.5 GB exFAT, **SuperSpeed**, `disk22` |
-| Linux VM | Lima `kbuild`, Debian 12 aarch64, GCC 12.2; Mac host at 192.168.5.2 |
+| **Working Linux VM** | Lima **`airusb`** — Ubuntu 24.04 aarch64, kernel 6.8.0-134-generic, GCC 13.3, cmake 3.28. **vhci-hcd loaded**, `nports=16` (8 `hs` + 8 `ss`), lockdown `[none]`. This is the one to use |
+| Other Linux VM | Lima `kbuild`, Debian 12 aarch64, GCC 12.2 — **belongs to another project, do not modify.** Its `cloud` kernel is built with `CONFIG_USB_SUPPORT` unset, so it can never do vhci-hcd |
+| Mac LAN / Tailscale | `192.168.2.15` (en0) / `100.120.39.113` (utun8) |
 | Windows box | `GMKtec`, **192.168.0.109**, RDP + SMB open, **SSH closed**, no Tailscale. Different LAN from the Mac — reached only via the `ts-464` subnet router. `.225` is a DIFFERENT machine |
 | Cross-compiler | `x86_64-w64-mingw32-g++` (Homebrew mingw-w64) |
 | GitHub | `gh` authenticated as `otti83` |
 
 ### Tooling constraints learned the hard way
 
-- **`sudo` is blocked for the assistant.** Every root experiment is handed to the
-  user as a copy-pasteable command.
+- **`sudo` is blocked for the assistant ON THE MAC.** Every root experiment on
+  macOS is handed to the user as a copy-pasteable command. **Inside a Lima VM
+  passwordless sudo works**, which is what made the whole Linux importer possible
+  without the user in the loop — the old note said "sudo is blocked" without that
+  qualifier and it cost a session's worth of hesitation.
 - **AddressSanitizer hangs on this host** — any `-fsanitize=address` binary hangs
   before `main()`, including a hello-world with no libFuzzer. Bisected: `fuzzer`
   works, `fuzzer,undefined` works, `address` hangs. Fuzzing defaults to
   `fuzzer,undefined`; `AIRUSB_FUZZ_ASAN=1` opts back in. **Linux CI now enables
   ASan** (`.github/workflows/ci.yml`, job `linux-asan`) — UBSan does not catch
-  heap out-of-bounds, which is exactly what R2/R5/R6 exist to stop. That job has
-  never run; it is the likeliest of the four to go red first, and that would be
-  a finding rather than a broken workflow.
-- **`timeout(1)` does not exist on macOS.**
+  heap out-of-bounds, which is exactly what R2/R5/R6 exist to stop. **It has now
+  run and is clean**, including a 16 KB OUT transfer through the write probe.
+- **`timeout(1)` does not exist on macOS.** It does exist in the Linux VMs.
+- **Do not run `usbip bind` or load `usbip-host` in a Lima `vz` guest.** It wedged
+  a guest during the design pass: the command never returned, SSH hung, no ICMP,
+  empty journal, `limactl stop -f` required. Undiagnosed, and irrelevant to us —
+  `usbip-host` is the *exporter* side and we never need it. `usbipd`, `usbip
+  attach` and `usbip list -r` are equally unnecessary: we replace USB/IP's
+  userspace handshake with AirUSB and write the sysfs `attach` line ourselves.
 - **`.gitignore` has no trailing comments.** `path/  # note` matches nothing.
 - Objective-C files compile as C, not C++: no declaration-in-`if`.
 
 ---
 
-## 7. Code map
+## 6. Code map
 
 ```
 airusb/
@@ -751,17 +762,25 @@ airusb/
                Ep0Arbiter, RequestTable, CreditController, IUsbDevicePort,
                Platform (the only place three OSes differ)
   crypto/      Primitives (the ONLY caller of third_party), Identity
-  protocol/    Wire.h, Codec, Validate (R1–R12), Messages, ManifestCodec, Noise
+  protocol/    Wire.h, Codec, Validate (R1–R12), Messages, ManifestCodec, Noise,
+               Segmentation (split/reassemble; written, NOT yet wired in)
   transport/   RecordLayer, FrameScheduler, TcpTransport, FaultTransport,
                NoiseCipher
-  session/     SecureSession, PeerStore, ExporterSession, ImporterClient,
-               RemoteDevicePort
-  diag/        BotProbe — read-only BOT prober. A test instrument, NOT the data
-               path; nothing in core/protocol/transport includes it
+  session/     SecureSession, PeerStore, PairingGate (the SAS attempt budget),
+               ExporterSession, ImporterClient, RemoteDevicePort
+  diag/        BotProbe — read-only BOT prober, and its header promises WITHOUT
+               QUALIFICATION that it cannot damage a drive. WriteProbe is a
+               SEPARATE type so that promise stays absolute rather than becoming
+               conditional on a flag. Test instruments, NOT the data path;
+               nothing in core/protocol/transport includes them
   tools/       airusb_net_main — serve/connect over a real socket
   platform/macos/  StatusMapMacos, MacUsbCommon, DiskGuard, AgentUsbIo,
                HostDeviceExporter, airusb_exportd_main, airusb_agent_main,
                AgentProtocol (portable) + AgentLink (POSIX only)
+  platform/linux/  UsbipCodec (the USB/IP byte layer, built and fuzzed on EVERY
+               platform), LinuxUsb (the speed and errno tables), VhciBridge (the
+               translation), FdStream, vhci_probe_main (the L1 gate),
+               airusb_vhci_main (L4 — makes Linux enumerate a device)
   third_party/ Monocypher 4.0.3, BLAKE2s reference — pinned, checksummed
   scripts/     cross-build-windows.sh
 apple/         SwiftUI app (device list, detail, eject) + the entitlement probe
@@ -799,7 +818,7 @@ sudo ./platform/macos/scripts/p28_run.sh 058f:6387
 
 ---
 
-## 8. Decisions and findings not to re-derive
+## 7. Decisions and findings not to re-derive
 
 ### The exporter is two processes — measured, binding
 
@@ -860,7 +879,7 @@ one and Super in the other. Read `USBSpeed`, cross-check `UsbLinkSpeed`.
 - **Descriptor bytes travel verbatim.** Never re-serialized, reordered or
   normalised — the moment this layer rewrites a descriptor, the importer presents a
   device that does not exist.
-- **A second ATTACH gets BUSY and is never queued** (§7.7).
+- **A second ATTACH gets BUSY and is never queued** (`P1_IMPLEMENTATION_PLAN.md` §7.7).
 - **A stale attach id is dropped SILENTLY and is not fatal** (R12). Escalating it
   turns every legitimate reset into a session teardown.
 - **`clearHalt` must wait for CTRL_ACK.** Fire-and-forget leaves the verb's reply in
@@ -889,5 +908,5 @@ one and Super in the other. Read `USBSpeed`, cross-check `UsbLinkSpeed`.
 | new | does the Windows client actually run? | **ANSWERED: yes.** MSVC 19.51, 13/13 suites, RESULT=PASS over a real socket, in CI |
 | new | does MSVC accept the sources? | **ANSWERED: yes**, after one missing `<string>` was fixed. Zero warnings at /W4 /permissive- |
 | new | does anything break under ASan? | **ANSWERED: no.** First ASan run ever, Linux, 13/13 + RESULT=PASS, no findings |
-| new | two machines, real network, one Windows | **ANSWERED: PASS** (§3.4), SAS confirmed on both consoles |
+| new | two machines, real network, one Windows | **ANSWERED: PASS** (§3.6), SAS confirmed on both consoles |
 | new | does the console mangle user-facing text on a Japanese Windows? | **it did** — CP932 read the em dash as `窶・` in the SAS line. Fixed with `platform::ConsoleUtf8` |
