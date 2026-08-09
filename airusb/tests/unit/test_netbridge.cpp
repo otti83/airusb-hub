@@ -471,6 +471,92 @@ void testFatalDrainTeardown()
     }
 }
 
+DeviceManifest makeIsoManifest()
+{
+    DeviceManifest m;
+    m.setSpeed(Speed::High);
+    // A minimal high-speed device with one interface carrying one ISOCHRONOUS IN
+    // endpoint (0x83) — the class usb-storage never has, but the class the bridge
+    // must refuse cleanly instead of hanging vhci_rx.
+    const std::uint8_t dev[18] = {
+        0x12, 0x01, 0x00, 0x02, 0x00, 0x00, 0x00, 0x40,
+        0x8f, 0x05, 0x87, 0x63, 0x02, 0x00, 0x00, 0x00, 0x00, 0x01 };
+    m.setDeviceDescriptor(std::span<const std::uint8_t>(dev, sizeof dev));
+    const std::uint8_t cfg[25] = {
+        0x09, 0x02, 0x19, 0x00, 0x01, 0x01, 0x00, 0x80, 0x32,   // config, wTotalLength 25, value 1
+        0x09, 0x04, 0x00, 0x00, 0x01, 0xFF, 0x00, 0x00, 0x00,   // interface 0, 1 endpoint
+        0x07, 0x05, 0x83, 0x01, 0x08, 0x00, 0x01 };             // ep 0x83 IN, iso, wMaxPacket 8
+    m.addConfiguration(std::span<const std::uint8_t>(cfg, sizeof cfg));
+    return m;
+}
+
+void testIsoRefusal()
+{
+    std::printf("an iso submit is refused WITH its descriptor array (no vhci_rx hang, §5.8)\n");
+
+    TEST_CASE("refuseIso emits number_of_packets descriptors, byte-exact") {
+        MemoryPipe kpipe, npipe;
+        auto kBridge = kpipe.endpointA();
+        auto kSim    = kpipe.endpointB();
+        RecordLayer planeLink(npipe.endpointA(), std::make_unique<NullCipher>());
+        RecordLayer peerLink(npipe.endpointB(), std::make_unique<NullCipher>());
+        planeLink.setHandshakeComplete(wire::kRecordBytesDefault);
+        peerLink.setHandshakeComplete(wire::kRecordBytesDefault);
+        ManualClock clock{1000};
+        ImporterDataPlane plane(&planeLink, &clock, planeCfg());
+        DeviceManifest m = makeIsoManifest();
+        VhciNetBridge bridge(*kBridge, plane, m, clock, VhciNetBridge::Config{});
+
+        // Configure, so the iso endpoint resolves.
+        const std::array<std::uint8_t, 8> setCfg{ 0x00, 0x09, 0x01, 0x00, 0, 0, 0, 0 };
+        kSubmit(*kSim, 1, 0, kDirOut, 0, setCfg.data());
+        CHECK(bridge.poll() == Status::Ok);
+        UsbipPdu cfgRet; std::vector<std::uint8_t> cp;
+        CHECK(kReadPdu(*kSim, cfgRet, cp, false));
+        CHECK_EQ(cfgRet.status, 0);
+
+        // An iso IN submit to ep3 carrying two packet descriptors.
+        UsbipPdu iso;
+        iso.command = kCmdSubmit; iso.seqnum = 2; iso.devid = kDevId;
+        iso.direction = kDirIn; iso.ep = 3;
+        iso.transferBufferLength = 16; iso.numberOfPackets = 2;
+        std::vector<std::uint8_t> b;
+        encodeCmdSubmit(iso, b);
+        const std::vector<UsbipIsoDesc> inDescs = { {0, 8, 0, 0}, {8, 8, 0, 0} };
+        encodeIsoDescs(inDescs, b);
+        kWriteRaw(*kSim, b);
+
+        CHECK(bridge.poll() == Status::Ok);
+
+        // The header is a clean refusal that will not make vhci_rx wait forever.
+        UsbipPdu ret; std::vector<std::uint8_t> pl;
+        CHECK(kReadPdu(*kSim, ret, pl, false));
+        CHECK_EQ(ret.command, kRetSubmit);
+        CHECK_EQ(ret.seqnum, 2u);
+        CHECK_EQ(ret.status, -kEPipe);
+        CHECK_EQ(ret.actualLength, 0);
+        CHECK_EQ(ret.numberOfPackets, 2);
+        CHECK_EQ(ret.errorCount, 2);
+
+        // ...followed by exactly two descriptors: offset/length echoed, actual 0, -EPROTO.
+        std::uint8_t raw[32];
+        std::size_t got = 0;
+        while (got < sizeof raw) {
+            const IoResult r = kSim->read(std::span<std::uint8_t>(raw + got, sizeof raw - got));
+            if (r.status != Status::Ok || r.bytes == 0) break;
+            got += r.bytes;
+        }
+        CHECK_EQ(got, std::size_t{32});
+        std::vector<UsbipIsoDesc> out;
+        CHECK(decodeIsoDescs(std::span<const std::uint8_t>(raw, sizeof raw), 2, out));
+        CHECK_EQ(out.size(), std::size_t{2});
+        CHECK_EQ(out[0].offset, 0u);       CHECK_EQ(out[0].length, 8u);
+        CHECK_EQ(out[0].actualLength, 0u); CHECK_EQ(out[0].status, -kEProto);
+        CHECK_EQ(out[1].offset, 8u);       CHECK_EQ(out[1].length, 8u);
+        CHECK_EQ(out[1].actualLength, 0u); CHECK_EQ(out[1].status, -kEProto);
+    }
+}
+
 } // namespace
 
 int main()
@@ -483,5 +569,6 @@ int main()
     testQueuedDeadline();
     testSetConfiguration();
     testFatalDrainTeardown();
+    testIsoRefusal();
     TEST_MAIN_END();
 }

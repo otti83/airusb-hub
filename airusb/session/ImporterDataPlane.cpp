@@ -153,6 +153,20 @@ Status ImporterDataPlane::handleComplete(const Header& h, const std::vector<std:
     OutstandingRequest req;
     if (!_table.get(h.channel, h.requestId, req)) return Status::Ok;
 
+    // Redundant-identity defense (response confusion / URB aliasing). The COMPLETE
+    // echoes the transfer's attach, endpoint, type, direction and requested length
+    // precisely so a stale or misrouted reply — e.g. a delayed completion from a
+    // PREVIOUS attach that reused this (channel, request_id) — cannot be applied to
+    // the wrong URB. Every echoed field must equal the request we are holding, or the
+    // bytes could land in the wrong kernel buffer. Non-destructive: a mismatch leaves
+    // the request in the table for teardown.
+    if (h.attachId     != req.attachId
+        || cb.epAddr   != req.epAddr
+        || cb.xferType != static_cast<std::uint8_t>(req.xferType)
+        || cb.dir      != static_cast<std::uint8_t>(req.dir)
+        || cb.requestedLen != req.requestedLen)
+        return Status::MalformedFrame;
+
     // R5 at the copy site: a completion can never claim more than we offered.
     if (cb.actualLen > req.requestedLen) return Status::MalformedFrame;
 
@@ -195,6 +209,12 @@ Status ImporterDataPlane::handleData(const Header& h, const std::vector<std::uin
     const auto pit = _pendingReply.find(ReplyKey{h.channel, h.requestId});
     if (pit == _pendingReply.end())
         return Status::MalformedFrame;   // a DATA continuation with no reply in progress
+
+    // A continuation must belong to the same attach as the record-0 COMPLETE that
+    // opened this reassembly (whose identity was already verified). This blocks a
+    // spoofed continuation from injecting bytes into a legitimate reply.
+    if (OutstandingRequest req; _table.get(h.channel, h.requestId, req) && h.attachId != req.attachId)
+        return Status::MalformedFrame;
 
     const auto dbody = std::span<const std::uint8_t>(rec).subspan(wire::kHeaderSize, h.bodyLen);
     Status e = Status::Ok;

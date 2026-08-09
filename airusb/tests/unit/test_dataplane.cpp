@@ -287,6 +287,25 @@ void testAdmissionAndCancel()
         CHECK_EQ(td.count(), std::size_t{1});                         // teardown can retire it
         CHECK(td.comps[0].status == Status::DeviceGone);
     }
+
+    TEST_CASE("a completion whose echoed endpoint does not match is rejected and kept") {
+        // Right (channel, requestId), but the COMPLETE claims a different endpoint —
+        // what a stale reply from another transfer that reused this key looks like.
+        // The redundant-identity check must catch it so bytes never land in the wrong
+        // URB, and it must stay in I1 tracking for teardown.
+        Pair p(16384);
+        ImporterDataPlane plane(&p.planeLink, &p.clock, cfg1());
+        std::uint16_t ch = 0; std::uint64_t rid = 0;
+        CHECK(plane.submit(kEpIn, kBulk, kIn, 512, nullptr, {}, 45000, &ch, &rid) == Status::Ok);
+        SubmitBody sb; std::vector<std::uint8_t> ig;
+        CHECK(peerReadSubmit(p.peerLink, sb, ig) > 0);
+
+        peerComplete(p.peerLink, ch, rid, /*epAddr*/ 0x82, kIn, 512, pattern(512, 5));
+        Collector col;
+        CHECK(plane.pump(std::ref(col)) == Status::MalformedFrame);
+        CHECK_EQ(col.count(), std::size_t{0});
+        CHECK_EQ(plane.outstanding(), std::size_t{1});               // kept for teardown
+    }
 }
 
 void testDeadline()
