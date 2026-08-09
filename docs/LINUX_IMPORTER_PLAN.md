@@ -566,6 +566,16 @@ network, and the async data plane), and is not yet done.
 **Evidence.** `dmesg` enumeration lines; `lsblk`; `mount -o ro`; `ls`; `sha256sum /dev/sdX` against a known image; `descriptors` `cmp` again, now against a real device's real bytes.
 **PASS** iff the checksum matches and `dmesg` is free of `usb-storage` resets and I/O errors.
 
+**Progress, 2026-08-09.** The three hard-correctness prerequisites are built and
+proven with no kernel in the loop: segmentation (L5), the non-blocking
+`ImporterDataPlane` (§4.3 item 2), and the event-driven `platform/linux/VhciNetBridge`
+(`tests/unit/test_netbridge.cpp`, 68 checks). `VhciNetBridge` is the FSM this
+section needs — R-A drain-first, R-B buffered replies, R-C deadlines, immediate
+`CMD_UNLINK`, depth-1 admission queue — and the §4.2 deadlock/D-state is proven
+unreachable against a `MemoryPipe` kernel. **What is left is integration only:** the
+`--host` form of `airusb-vhci` (`ImporterClient` → `ImporterDataPlane` →
+`VhciNetBridge` → `FdStream`/socketpair behind `poll(2)`), then this run on the VM.
+
 ---
 
 ### L7 — The write path

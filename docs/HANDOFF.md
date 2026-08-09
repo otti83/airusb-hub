@@ -49,11 +49,17 @@ of the three sub-parts are now done and proven hosted:
 * **The async data plane — `session/ImporterDataPlane`, built + 82-check hosted
   proof (2026-08-09; §4.1 item 2).** Non-blocking, one-terminal-outcome-per-submit,
   deadline-swept, tested against the real `ExporterSession`.
+* **The event-driven bridge — `platform/linux/VhciNetBridge`, built + 68-check
+  hosted proof (2026-08-09; §4.1 item 2).** Non-blocking `poll()`, `CMD_UNLINK`
+  answered before the network, network-drop → -ENODEV, deadline → -ETIMEDOUT,
+  depth-1 admission queue. The D-state deadlock is proven unreachable with no
+  kernel in the loop.
 
-**What remains for L6 is the event-driven bridge** that wires the kernel's
-`vhci-hcd` socket to `ImporterDataPlane` while never blocking on the network (the
-R-A/R-B/R-C rules of `LINUX_IMPORTER_PLAN.md` §4.2) and answers `CMD_UNLINK`
-immediately — plus the `--host` form of `airusb-vhci`. That is the whole product
+**What remains for L6 is integration, not new correctness cores:** the `--host`
+form of `airusb-vhci` — `ImporterClient` (connect/handshake/attach) →
+`ImporterDataPlane` → `VhciNetBridge` → the real socketpair (`FdStream`) behind a
+`poll(2)` loop — and then the real run on the Lima `airusb` VM against the macOS
+exporter with a real drive (L6's `sha256sum` gate). That is the whole product
 working on hardware, macOS exporter → Linux importer, and **nothing about it waits
 on Apple.** The blocking-vs-liveness reasoning was cross-checked with GPT-5.6 and
 is recorded in §7 (Decisions not to re-derive).
@@ -655,15 +661,27 @@ kernel enumerate a device (§3.6). What is missing is between them.
    a stalled socket, R-C timeout, cancel-drops-the-late-completion, and I1 on
    teardown.
 
-   **What remains for L6: the event-driven bridge.** `VhciBridge` is still
-   single-strand (`pumpOnce` reads one PDU, calls the device synchronously, replies,
-   repeats) — correct only for L4's *local* `ScriptedDevice`. The remaining work is
-   an event-driven importer bridge that drains `sv[1]` first and unconditionally
-   every loop (R-A), buffers replies to the kernel non-blocking (R-B), answers
-   `CMD_UNLINK` immediately, admits from a pending queue under the data plane's
-   depth, and drives `ImporterDataPlane` for everything the `Ep0Arbiter` does not
-   answer locally. Then the `--host` form of `airusb-vhci` and the real run.
-   `LINUX_IMPORTER_PLAN.md` §4.2 is the spec.
+   **The event-driven bridge — DONE, hosted PASS 2026-08-09: `platform/linux/VhciNetBridge`.**
+   The synchronous `VhciBridge` stays as-is (it is L4's proof against a local
+   device); `VhciNetBridge` is the networked one. One non-blocking `poll()` step:
+   drain `sv[1]` FIRST and unconditionally (R-A), answer ep0 from the manifest
+   locally, admit data/forwarded transfers to `ImporterDataPlane` or queue them,
+   answer `CMD_UNLINK` immediately, turn completions/timeouts into buffered
+   RET_SUBMITs (R-B), and complete every outstanding URB with -ENODEV if the network
+   dies. `tests/unit/test_netbridge.cpp` (68 checks) proves it with a MemoryPipe
+   standing in for the kernel: a forwarded round trip, a local GET_DESCRIPTOR with
+   ZERO network traffic, **CMD_UNLINK answered with -ECONNRESET before any completion
+   and the late completion dropped** (the D-state test), an already-completed
+   unlink → status 0, a network drop → RET_SUBMIT{-ENODEV}, a deadline →
+   RET_SUBMIT{-ETIMEDOUT}, and a depth-1 admission queue.
+
+   **What remains for L6:** the `--host` form of `airusb-vhci` — wire
+   `ImporterClient` (connect/handshake/attach) → `ImporterDataPlane` →
+   `VhciNetBridge` → the real socketpair (`FdStream`) behind a `poll(2)` loop — and
+   then the real run on the Lima `airusb` VM against the macOS exporter (L6's
+   `sha256sum` gate). Every hard-correctness core (segmentation, the non-blocking
+   data plane, the non-blocking bridge) is now built and proven with no kernel in
+   the loop.
 
 **Gates:** L5 then L6 in `LINUX_IMPORTER_PLAN.md` §7. L6's evidence is
 `sha256sum /dev/sdX` matching a known image and `dmesg` free of `usb-storage`

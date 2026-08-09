@@ -168,8 +168,12 @@ add_library(airusb_linux_usbip STATIC
     platform/linux/UsbipCodec.cpp
     platform/linux/LinuxUsb.cpp
     platform/linux/VhciBridge.cpp
+    platform/linux/VhciNetBridge.cpp
 )
-target_link_libraries(airusb_linux_usbip PUBLIC airusb_core airusb_transport)
+# VhciNetBridge drives session::ImporterDataPlane (the platform/linux -> session
+# arrow the plan sanctions). UsbipCodec/LinuxUsb/VhciBridge themselves stay pure,
+# so the fuzzed codec is unaffected.
+target_link_libraries(airusb_linux_usbip PUBLIC airusb_core airusb_transport airusb_session)
 
 # The L1 gate. Linux only, because it writes to vhci-hcd's sysfs and there is
 # nothing to point it at anywhere else.
