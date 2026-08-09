@@ -23,6 +23,8 @@
 #include "../fakes/ScriptedDevice.h"
 #include "../../protocol/Segmentation.h"
 #include "../../session/ExporterSession.h"
+#include "../../session/InlineAsyncPort.h"
+#include "../../session/LeaseAuthority.h"
 #include "../../session/RemoteDevicePort.h"
 #include "../../transport/RecordLayer.h"
 #include "../../transport/TcpTransport.h"
@@ -129,14 +131,15 @@ public:
         return { r };
     }
 
-    Status claim(const DeviceUid& uid, IUsbDevicePort** portOut, DeviceManifest& m,
+    Status claim(const DeviceUid& uid, IAsyncUsbDevicePort** portOut, DeviceManifest& m,
                  std::uint8_t* cfg, std::string* whyNot) override
     {
         if (!(uid == uidOf(1))) {
             if (whyNot) *whyNot = "no such device";
             return Status::NotFound;
         }
-        *portOut = _dev;
+        _async   = std::make_unique<InlineAsyncPort>(*_dev);
+        *portOut = _async.get();
         m        = _dev->manifest();
         if (cfg) *cfg = 1;
         return Status::Ok;
@@ -146,6 +149,7 @@ public:
 
 private:
     EchoDevice* _dev;
+    std::unique_ptr<InlineAsyncPort> _async;
 };
 
 // ---------------------------------------------------------------------------
@@ -162,6 +166,7 @@ struct Rig {
     EchoSource      source;
     ExporterSession exporter;
     ManualClock     clock{1000};
+    LeaseAuthority  leases{clock};
     bool            ok    = false;
     std::uint64_t   reqId = 0;
 
@@ -194,6 +199,7 @@ struct Rig {
         ExporterSession::Config ec;
         ec.devices = &source;
         ec.clock   = &clock;
+        ec.leases  = &leases;
         if (exporter.begin(&b, ec) != Status::Ok) return;
         ok = true;
     }

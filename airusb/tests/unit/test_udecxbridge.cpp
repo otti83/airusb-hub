@@ -16,6 +16,8 @@
 #include "../fakes/ScriptedDevice.h"
 #include "../../platform/windows/UdecxBridge.h"
 #include "../../session/ExporterSession.h"
+#include "../../session/InlineAsyncPort.h"
+#include "../../session/LeaseAuthority.h"
 #include "../../transport/RecordLayer.h"
 #include "../../transport/TcpTransport.h"
 
@@ -101,12 +103,15 @@ struct Peer {
 
     struct Source final : IDeviceSource {
         fakes::ScriptedDevice* dev;
+        std::unique_ptr<InlineAsyncPort> async;
         std::vector<DeviceRecord> list() override { return {}; }
-        Status claim(const protocol::DeviceUid&, IUsbDevicePort** p, DeviceManifest& m,
+        Status claim(const protocol::DeviceUid&, IAsyncUsbDevicePort** p, DeviceManifest& m,
                      std::uint8_t* c, std::string*) override
-        { *p = dev; m = dev->manifest(); if (c) *c = 1; return Status::Ok; }
+        { async = std::make_unique<InlineAsyncPort>(*dev);
+          *p = async.get(); m = dev->manifest(); if (c) *c = 1; return Status::Ok; }
         void release(const protocol::DeviceUid&) override {}
     } source;
+    LeaseAuthority leases{clock};
 
     Peer()
     {
@@ -121,7 +126,7 @@ struct Peer {
             (void)a.pump(); (void)b.pump();
         }
         if (!(a.established() && b.established())) return;
-        ExporterSession::Config ec; ec.devices = &source; ec.clock = &clock;
+        ExporterSession::Config ec; ec.devices = &source; ec.clock = &clock; ec.leases = &leases;
         if (exporter.begin(&b, ec) != Status::Ok) return;
 
         attachId = doAttach();

@@ -45,6 +45,7 @@
 #include "../diag/BotProbe.h"
 #include "../session/ExporterSession.h"
 #include "../session/ImporterClient.h"
+#include "../session/LeaseAuthority.h"
 #include "../session/PeerStore.h"
 #include "../session/SecureSession.h"
 
@@ -180,6 +181,8 @@ private:
     platform::SocketHandle _shareListen = platform::kInvalidSocket;
     std::unique_ptr<session::SecureSession>   _shareSecure;
     std::unique_ptr<session::ExporterSession> _shareExporter;
+    /// Outlives every exporter session, deliberately. See LeaseAuthority.h.
+    session::LeaseAuthority _leases{Clock::system()};
     std::string   _sharePeerFingerprint;
     std::uint32_t _shareSas = 0;
     std::uint64_t _shareTransfers = 0;

@@ -72,6 +72,22 @@ public:
                                             std::uint8_t interfaceNumber,
                                             std::uint8_t altSetting) const;
 
+    /// Finds ONE endpoint by bEndpointAddress in the given configuration, using
+    /// `altOf` to say which alternate setting each interface is currently in.
+    ///
+    /// It exists because both bridges grew the same loop and both got the same
+    /// thing wrong: they scanned interface numbers 0..31 for a field that is
+    /// EIGHT BITS. A composite device with an interface numbered 32 or above has
+    /// its endpoints silently invisible, which presents as "no such endpoint" —
+    /// an error that points at the guest rather than at the scan. Walking the
+    /// configuration descriptor once, in the order the device wrote it, has no
+    /// range to get wrong and is also faster than 32 × endpointsFor().
+    ///
+    /// `altOf` may be null, which means alternate setting 0 everywhere.
+    bool findEndpoint(std::uint8_t configValue, std::uint8_t epAddr,
+                      const std::function<std::uint8_t(std::uint8_t)>& altOf,
+                      EndpointModel& out) const;
+
     /// Total serialized size, checked against the 256 KiB manifest ceiling (R9).
     std::size_t byteSize() const noexcept;
 

@@ -22,6 +22,8 @@
 #include "../../crypto/Identity.h"
 #include "../../diag/BotProbe.h"
 #include "../../session/ExporterSession.h"
+#include "../../session/InlineAsyncPort.h"
+#include "../../session/LeaseAuthority.h"
 #include "../../session/PeerStore.h"
 #include "../../session/SecureSession.h"
 #include "../../transport/TcpTransport.h"
@@ -210,7 +212,7 @@ crypto::LocalIdentity loadOrCreateIdentity(const std::string& path)
 /// documented order (§7.6), not a network session's.
 class CapturedDeviceSource final : public session::IDeviceSource {
 public:
-    explicit CapturedDeviceSource(HostDeviceExporter& ex) : _ex(ex) {}
+    explicit CapturedDeviceSource(HostDeviceExporter& ex) : _ex(ex), _async(ex) {}
 
     std::vector<protocol::DeviceRecord> list() override
     {
@@ -225,12 +227,12 @@ public:
         return { r };
     }
 
-    Status claim(const protocol::DeviceUid& u, IUsbDevicePort** portOut,
+    Status claim(const protocol::DeviceUid& u, IAsyncUsbDevicePort** portOut,
                  DeviceManifest& m, std::uint8_t* cfg, std::string* whyNot) override
     {
         if (!(u == uid())) { if (whyNot) *whyNot = "No such device on this Mac."; return Status::NotFound; }
         if (!_ex.attached()) { if (whyNot) *whyNot = "The drive is no longer captured."; return Status::DeviceGone; }
-        *portOut = &_ex;
+        *portOut = &_async;
         m        = _ex.manifest();
         if (cfg) *cfg = _ex.configValue();
         return Status::Ok;
@@ -247,6 +249,15 @@ public:
 
 private:
     HostDeviceExporter& _ex;
+    /// `HostDeviceExporter` is synchronous: ep0 goes to the captured device
+    /// object in this process, and bulk goes to the agent over a blocking
+    /// request/reply socket. So it is adapted rather than reimplemented, and
+    /// `canIdle() == false` means the exporter REFUSES a device with an
+    /// interrupt or isochronous endpoint instead of accepting it and wedging on
+    /// the first idle transfer. The BOT flash drive this project is proven
+    /// against has neither, so nothing that works today stops working; what
+    /// changes is that a keyboard now gets a sentence rather than a hang.
+    session::InlineAsyncPort _async;
 };
 
 int runServe(HostDeviceExporter& exporter, std::uint16_t port, bool trustOnFirstUse,
@@ -267,6 +278,16 @@ int runServe(HostDeviceExporter& exporter, std::uint16_t port, bool trustOnFirst
     logLine("ATTACH", @"serving the captured drive on TCP port %u", port);
 
     CapturedDeviceSource source(exporter);
+    // ONE authority, outside the accept loop, for the life of the capture.
+    //
+    // This is the fix for the worst bug an adversarial read found in this
+    // project (GPT-5.6, 2026-08-09). `ExporterSession` correctly refused to
+    // release the capture when its importer vanished — and then the session
+    // OBJECT was destroyed by the loop below, taking with it the only record of
+    // who owned the drive, and the next paired peer to connect was handed it.
+    // The physical capture was retained; the remote exclusivity it existed to
+    // provide was not. Ownership has to outlive the session, so it does.
+    session::LeaseAuthority leases(Clock::system());
 
     while (exporter.attached() && exporter.agentAlive()) {
         std::unique_ptr<transport::TcpStream> conn;
@@ -331,6 +352,7 @@ int runServe(HostDeviceExporter& exporter, std::uint16_t port, bool trustOnFirst
         session::ExporterSession::Config ec;
         ec.devices = &source;
         ec.clock   = &Clock::system();
+        ec.leases  = &leases;
         if (expSess.begin(&secure, ec) != Status::Ok) continue;
 
         for (;;) {
@@ -346,6 +368,16 @@ int runServe(HostDeviceExporter& exporter, std::uint16_t port, bool trustOnFirst
         logLine("ATTACH", @"served %llu transfer(s)",
                 static_cast<unsigned long long>(expSess.transfersServed()));
         expSess.close();
+
+        // What the drive's ownership looks like now, said out loud. A
+        // quarantined lease is the difference between "waiting for that machine
+        // to come back" and "available", and an operator watching this log is
+        // the person who has to decide whether to force it back.
+        const session::LeaseAuthority::Snapshot ls = leases.snapshot();
+        if (ls.state == session::LeaseState::Quarantined)
+            logLine("ATTACH", @"the drive is HELD for the importer that just left. "
+                              @"No other machine can take it until that one comes "
+                              @"back, detaches, or this daemon is stopped.");
     }
     return 0;
 }

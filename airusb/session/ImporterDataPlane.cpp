@@ -183,6 +183,16 @@ Status ImporterDataPlane::pump(const OnComplete& onComplete, const OnVerb& onVer
             case wire::Type::CtrlAck:
                 if (const Status s = handleCtrlAck(h, onVerb); s != Status::Ok) return s;
                 break;
+            case wire::Type::CancelAck:
+                // Informational, and deliberately not acted on. The transfer it
+                // refers to was retired locally the instant `cancel()` was
+                // called — that is what keeps a guest URB from ever waiting on
+                // the network — so there is nothing left here for the count to
+                // change. It is decoded rather than ignored only so that a
+                // future diagnostic can report "the exporter stopped 0 of 1",
+                // which is the honest and useful thing to say when a backend
+                // could not abort a transfer already on the bus.
+                break;
             case wire::Type::Error:
                 // We send SUBMIT, DATA and EP_CLEAR_HALT, all supported, so a
                 // protocol-level ERROR means the session is broken. Surface it as
@@ -349,6 +359,46 @@ bool ImporterDataPlane::cancel(std::uint16_t channel, std::uint64_t requestId)
     const bool was = _table.take(channel, requestId, &gone);
     _pendingReply.erase(ReplyKey{channel, requestId});
     _reasm.forget(channel, requestId);
+
+    // Tell the exporter, which used to be missing entirely.
+    //
+    // Retiring the local record is what the KERNEL needs — the guest's URB gets
+    // its terminal outcome immediately and never waits on the network, which is
+    // the rule that keeps a dead link from wedging the USB stack. But it is only
+    // half the transaction: without a CANCEL on the wire, the exporter goes on
+    // driving a transfer nobody is waiting for, holds that endpoint's slot while
+    // it does, and eventually answers a request id that no longer exists. On a
+    // depth-1 endpoint that is every subsequent transfer queued behind a ghost.
+    //
+    // BEST EFFORT, and deliberately so: the local retirement above has already
+    // happened and is not conditional on this reaching anybody. A send failure
+    // here means the link is dying, and the link dying is already handled.
+    if (was && _link) {
+        protocol::CancelBody cb;
+        cb.targetRequestId = requestId;
+        cb.epAddr          = gone.epAddr;
+        cb.scope           = static_cast<std::uint8_t>(protocol::CancelScope::Request);
+
+        std::vector<std::uint8_t> body;
+        protocol::encodeCancel(cb, body);
+
+        protocol::Header h;
+        h.type      = static_cast<std::uint8_t>(wire::Type::Cancel);
+        // EXPEDITE, because a cancel that queues behind the very transfers it is
+        // trying to stop is a cancel that arrives after they finish.
+        h.flags     = wire::kFlagSegFirst | wire::kFlagExpedite;
+        h.channel   = channel;
+        h.attachId  = _cfg.attachId;
+        h.requestId = requestId;
+        h.bodyLen   = static_cast<std::uint32_t>(body.size());
+        h.totalLen  = 0;
+
+        std::vector<std::uint8_t> rec;
+        protocol::encodeHeader(h, rec);
+        rec.insert(rec.end(), body.begin(), body.end());
+        (void)_link->sendRecord(rec);
+        (void)_link->flush();
+    }
     return was;
 }
 

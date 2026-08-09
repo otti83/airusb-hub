@@ -18,6 +18,8 @@
 #include "../diag/BotProbe.h"
 #include "../diag/WriteProbe.h"
 #include "../session/ExporterSession.h"
+#include "../session/InlineAsyncPort.h"
+#include "../session/LeaseAuthority.h"
 #include "../session/ImporterClient.h"
 #include "../session/PeerStore.h"
 #include "../session/SecureSession.h"
@@ -52,6 +54,8 @@ std::string hex(std::span<const std::uint8_t> b) { return toHex(b); }
 class FakeDeviceSource final : public IDeviceSource {
 public:
     fakes::ScriptedDevice device{61440, 512};   // 31.5 MB of RAM disk
+    /// The RAM disk always returns, so an inline adapter is honest here.
+    InlineAsyncPort async{device};
 
     std::vector<DeviceRecord> list() override
     {
@@ -65,7 +69,7 @@ public:
         return { r };
     }
 
-    Status claim(const DeviceUid& u, IUsbDevicePort** portOut,
+    Status claim(const DeviceUid& u, IAsyncUsbDevicePort** portOut,
                  DeviceManifest& manifestOut, std::uint8_t* cfgOut,
                  std::string* whyNot) override
     {
@@ -73,7 +77,7 @@ public:
             if (whyNot) *whyNot = "No such device on this Mac.";
             return Status::NotFound;
         }
-        *portOut    = &device;
+        *portOut    = &async;
         manifestOut = device.manifest();
         *cfgOut     = 1;
         logLine("ATTACH", "claimed the simulated device");
@@ -143,6 +147,11 @@ int runServe(std::uint16_t port, const std::string& idPath, const std::string& p
     logLine("ATTACH", "listening on port " + std::to_string(port));
 
     FakeDeviceSource source;
+    // ONE authority for the whole life of the process, deliberately outside the
+    // accept loop. Inside it, an ownership record would die with each session —
+    // which is exactly the bug that let a disconnected importer's drive be
+    // handed to the next peer that connected.
+    LeaseAuthority leases(Clock::system());
 
     for (;;) {
         std::unique_ptr<TcpStream> conn;
@@ -197,6 +206,7 @@ int runServe(std::uint16_t port, const std::string& idPath, const std::string& p
         ExporterSession::Config ec;
         ec.devices = &source;
         ec.clock   = &Clock::system();
+        ec.leases  = &leases;
         if (exporter.begin(&secure, ec) != Status::Ok) continue;
 
         for (;;) {

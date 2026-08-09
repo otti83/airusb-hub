@@ -272,11 +272,32 @@ Status ImporterClient::doAttach(const DeviceUid& uid, std::uint8_t slot,
     std::vector<std::uint8_t> mbody;
     transport::RecordLayer* link = _secure.transport();
     std::vector<std::uint8_t> in;
+
+    // BOUNDED, which it was not.
+    //
+    // `Busy` means the socket has nothing yet, so the loop that used to be here
+    // spun at full speed for ever against an exporter that sent ATTACH_OK and
+    // then stopped — a hang with no message, burning a core, on the one code
+    // path a user reaches by typing somebody else's address. Found by an
+    // adversarial read (GPT-5.6, 2026-08-09); it is the same defect class as the
+    // `Busy` spins already fixed in `ImporterClient::call()` and
+    // `RemoteDevicePort::submit()`, and this was the one instance left.
+    //
+    // T_net_ctrl is the right ceiling: the manifest is already built and is
+    // being sent by a peer that has just answered, so this is a control-plane
+    // exchange, not a device transfer.
+    const Clock& clock = Clock::system();
+    const Deadline manifestBy = Deadline::afterMs(clock, watchdog::kNetCtrl);
     for (;;) {
         const Status r = link->receiveRecord(in);
-        if (r == Status::Busy) continue;
-        if (r != Status::Ok) return r;
-        if (!in.empty()) break;
+        if (r != Status::Busy && r != Status::Ok) return r;
+        if (r == Status::Ok && !in.empty()) break;
+        if (manifestBy.expired(clock)) {
+            _why = "the peer accepted the attach and then never sent the device's "
+                   "descriptors";
+            if (whyNot) *whyNot = _why;
+            return Status::XferTimeout;
+        }
     }
     if (!decodeHeader(in, mh)) return Status::MalformedFrame;
     if (mh.type != static_cast<std::uint8_t>(wire::Type::DeviceManifest))

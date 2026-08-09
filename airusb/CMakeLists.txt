@@ -134,6 +134,8 @@ add_library(airusb_session STATIC
     session/PeerStore.cpp
     session/SecureSession.cpp
     session/ExporterSession.cpp
+    session/InlineAsyncPort.cpp
+    session/LeaseAuthority.cpp
     session/RemoteDevicePort.cpp
     session/ImporterDataPlane.cpp
     session/ImporterClient.cpp

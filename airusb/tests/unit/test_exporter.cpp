@@ -12,6 +12,8 @@
 #include "../fakes/ScriptedDevice.h"
 #include "../../diag/BotProbe.h"
 #include "../../session/ExporterSession.h"
+#include "../../session/InlineAsyncPort.h"
+#include "../../session/LeaseAuthority.h"
 #include "../../protocol/ManifestCodec.h"
 #include "../../transport/TcpTransport.h"
 
@@ -39,6 +41,7 @@ DeviceUid uidOf(std::uint8_t seed)
 class FakeSource final : public IDeviceSource {
 public:
     ScriptedDevice device;
+    std::unique_ptr<InlineAsyncPort> async;
     bool           claimRefused = false;
     Status         refuseWith   = Status::MountedLocally;
     int            claims = 0, releases = 0;
@@ -55,7 +58,7 @@ public:
         return { r };
     }
 
-    Status claim(const DeviceUid& uid, IUsbDevicePort** portOut,
+    Status claim(const DeviceUid& uid, IAsyncUsbDevicePort** portOut,
                  DeviceManifest& manifestOut, std::uint8_t* cfgOut,
                  std::string* whyNot) override
     {
@@ -68,7 +71,8 @@ public:
             return refuseWith;
         }
         ++claims;
-        *portOut    = &device;
+        async       = std::make_unique<InlineAsyncPort>(device);
+        *portOut    = async.get();
         manifestOut = device.manifest();
         *cfgOut     = 1;
         return Status::Ok;
@@ -87,6 +91,7 @@ struct Rig {
     FakeSource    source;
     ExporterSession exporter;
     ManualClock   clock{1000};
+    LeaseAuthority leases{clock};
     bool          ok = false;
     std::uint64_t _reqId = 0;
 
@@ -115,6 +120,7 @@ struct Rig {
         ExporterSession::Config ec;
         ec.devices = &source;
         ec.clock   = &clock;
+        ec.leases  = &leases;
         if (exporter.begin(&b, ec) != Status::Ok) return;
         ok = true;
     }

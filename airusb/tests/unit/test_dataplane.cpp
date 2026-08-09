@@ -18,6 +18,8 @@
 #include "../../protocol/Codec.h"
 #include "../../protocol/Segmentation.h"
 #include "../../session/ExporterSession.h"
+#include "../../session/InlineAsyncPort.h"
+#include "../../session/LeaseAuthority.h"
 #include "../../session/ImporterDataPlane.h"
 #include "../../transport/RecordLayer.h"
 #include "../../transport/TcpTransport.h"
@@ -479,15 +481,17 @@ public:
         r.speed = static_cast<std::uint8_t>(Speed::Super); r.flags = kDevHasStorage | kDevShareable;
         r.name = "Echo"; return { r };
     }
-    Status claim(const DeviceUid& uid, IUsbDevicePort** port, DeviceManifest& m,
+    Status claim(const DeviceUid& uid, IAsyncUsbDevicePort** port, DeviceManifest& m,
                  std::uint8_t* cfg, std::string*) override
     {
         if (!(uid == uidOf(1))) return Status::NotFound;
-        *port = _dev; m = _dev->manifest(); if (cfg) *cfg = 1; return Status::Ok;
+        _async = std::make_unique<InlineAsyncPort>(*_dev);
+        *port = _async.get(); m = _dev->manifest(); if (cfg) *cfg = 1; return Status::Ok;
     }
     void release(const DeviceUid&) override {}
 private:
     EchoDevice* _dev;
+    std::unique_ptr<InlineAsyncPort> _async;
 };
 
 struct Rig {
@@ -500,6 +504,7 @@ struct Rig {
     EchoSource      source;
     ExporterSession exporter;
     ManualClock     clock{1000};
+    LeaseAuthority  leases{clock};
     bool            ok = false;
     std::uint64_t   reqId = 0;
 
@@ -516,7 +521,7 @@ struct Rig {
         (void)b.begin(pipe.endpointB(), cb);
         for (int i = 0; i < 40 && !(a.established() && b.established()); ++i) { (void)a.pump(); (void)b.pump(); }
         if (!(a.established() && b.established())) return;
-        ExporterSession::Config ec; ec.devices = &source; ec.clock = &clock;
+        ExporterSession::Config ec; ec.devices = &source; ec.clock = &clock; ec.leases = &leases;
         if (exporter.begin(&b, ec) != Status::Ok) return;
         ok = true;
     }

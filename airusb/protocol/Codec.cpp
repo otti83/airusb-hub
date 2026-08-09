@@ -182,6 +182,59 @@ void encodeHello(const HelloBody& b, std::vector<std::uint8_t>& out)
 }
 
 // ---------------------------------------------------------------------------
+// CANCEL / CANCEL_ACK
+//
+// The reserved fields are decoded rather than skipped, so a caller that wants to
+// enforce MBZ can. This layer does not enforce it: Validate.h owns every
+// semantic rule, and keeping the split means the fuzzer can drive each half on
+// its own — the same reason decodeSubmit does not check bufferLen either.
+// ---------------------------------------------------------------------------
+
+bool decodeCancel(std::span<const std::uint8_t> body, CancelBody& out) noexcept
+{
+    if (body.size() < wire::kBodyCancel) return false;
+    const std::uint8_t* p = body.data();
+
+    out.targetRequestId = rd_u64(p + wire::kCanOffTargetRequestId);
+    out.epAddr          = rd_u8 (p + wire::kCanOffEpAddr);
+    out.scope           = rd_u8 (p + wire::kCanOffScope);
+    out.reserved        = rd_u16(p + wire::kCanOffReserved);
+    out.reserved2       = rd_u32(p + wire::kCanOffReserved2);
+    return true;
+}
+
+void encodeCancel(const CancelBody& b, std::vector<std::uint8_t>& out)
+{
+    std::uint8_t* p = grow(out, wire::kBodyCancel);
+
+    wr_u64(p + wire::kCanOffTargetRequestId, b.targetRequestId);
+    wr_u8 (p + wire::kCanOffEpAddr,          b.epAddr);
+    wr_u8 (p + wire::kCanOffScope,           b.scope);
+    wr_u16(p + wire::kCanOffReserved,        b.reserved);
+    wr_u32(p + wire::kCanOffReserved2,       b.reserved2);
+}
+
+bool decodeCancelAck(std::span<const std::uint8_t> body, CancelAckBody& out) noexcept
+{
+    if (body.size() < wire::kBodyCancelAck) return false;
+    const std::uint8_t* p = body.data();
+
+    out.cancelledCount = rd_u32(p + wire::kCakOffCancelledCount);
+    out.granularity    = rd_u8 (p + wire::kCakOffGranularity);
+    std::memcpy(out.reserved, p + wire::kCakOffReserved, sizeof out.reserved);
+    return true;
+}
+
+void encodeCancelAck(const CancelAckBody& b, std::vector<std::uint8_t>& out)
+{
+    std::uint8_t* p = grow(out, wire::kBodyCancelAck);
+
+    wr_u32(p + wire::kCakOffCancelledCount, b.cancelledCount);
+    wr_u8 (p + wire::kCakOffGranularity,    b.granularity);
+    std::memcpy(p + wire::kCakOffReserved, b.reserved, sizeof b.reserved);
+}
+
+// ---------------------------------------------------------------------------
 // Isochronous packet descriptors
 // ---------------------------------------------------------------------------
 

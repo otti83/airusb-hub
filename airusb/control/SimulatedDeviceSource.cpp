@@ -28,7 +28,7 @@ std::vector<DeviceRecord> SimulatedDeviceSource::list()
     return { r };
 }
 
-Status SimulatedDeviceSource::claim(const DeviceUid& u, IUsbDevicePort** portOut,
+Status SimulatedDeviceSource::claim(const DeviceUid& u, IAsyncUsbDevicePort** portOut,
                                     DeviceManifest& manifestOut, std::uint8_t* configOut,
                                     std::string* whyNot)
 {
@@ -56,7 +56,7 @@ Status SimulatedDeviceSource::claim(const DeviceUid& u, IUsbDevicePort** portOut
     _device.reset();
 
     _claimed    = true;
-    *portOut    = &_device;
+    *portOut    = &_async;
     manifestOut = _device.manifest();
     *configOut  = 1;
     return Status::Ok;

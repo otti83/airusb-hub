@@ -123,6 +123,34 @@ struct CompleteBody {
     constexpr bool collateral()    const noexcept { return cflags & wire::kCfCollateral; }
 };
 
+/// CANCEL (0x42). `scope` says how much the sender means: one request, or every
+/// transfer on the endpoint. It is a u8 rather than a bool because ENDPOINT scope
+/// is the only granularity some exporters can offer — macOS aborts a pipe, not a
+/// single transfer — and ATTACH_OK's `cancelGranularity` is what tells the
+/// importer which it will get.
+enum class CancelScope : std::uint8_t {
+    Request  = 0,   ///< the one named request_id
+    Endpoint = 1,   ///< every transfer outstanding on ep_addr; target id ignored
+};
+
+struct CancelBody {
+    std::uint64_t targetRequestId = 0;
+    std::uint8_t  epAddr          = 0;
+    std::uint8_t  scope           = 0;   ///< CancelScope
+    std::uint16_t reserved        = 0;   ///< MBZ
+    std::uint32_t reserved2       = 0;   ///< MBZ
+};
+
+/// CANCEL_ACK (0x43). `cancelledCount` is how many transfers the exporter
+/// actually stopped, which is legitimately zero: a transfer that had already
+/// completed on the wire cannot be un-completed, and saying so is more useful
+/// than pretending.
+struct CancelAckBody {
+    std::uint32_t cancelledCount = 0;
+    std::uint8_t  granularity    = 0;   ///< the scope actually applied
+    std::uint8_t  reserved[3]    = {};  ///< MBZ
+};
+
 struct HelloBody {
     std::uint16_t protoMin      = 0;
     std::uint16_t protoMax      = 0;
@@ -158,6 +186,8 @@ bool decodeHeader(std::span<const std::uint8_t> in, Header& out) noexcept;
 bool decodeSubmit(std::span<const std::uint8_t> body, SubmitBody& out) noexcept;
 bool decodeComplete(std::span<const std::uint8_t> body, CompleteBody& out) noexcept;
 bool decodeHello(std::span<const std::uint8_t> body, HelloBody& out) noexcept;
+bool decodeCancel(std::span<const std::uint8_t> body, CancelBody& out) noexcept;
+bool decodeCancelAck(std::span<const std::uint8_t> body, CancelAckBody& out) noexcept;
 bool decodeIsoDesc(std::span<const std::uint8_t> in, std::size_t index, IsoDesc& out) noexcept;
 
 // ---------------------------------------------------------------------------
@@ -168,6 +198,8 @@ void encodeHeader(const Header& h, std::vector<std::uint8_t>& out);
 void encodeSubmit(const SubmitBody& b, std::vector<std::uint8_t>& out);
 void encodeComplete(const CompleteBody& b, std::vector<std::uint8_t>& out);
 void encodeHello(const HelloBody& b, std::vector<std::uint8_t>& out);
+void encodeCancel(const CancelBody& b, std::vector<std::uint8_t>& out);
+void encodeCancelAck(const CancelAckBody& b, std::vector<std::uint8_t>& out);
 void encodeIsoDesc(const IsoDesc& d, std::vector<std::uint8_t>& out);
 
 // ---------------------------------------------------------------------------

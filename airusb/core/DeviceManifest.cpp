@@ -157,6 +157,50 @@ std::vector<EndpointModel> DeviceManifest::endpointsFor(std::uint8_t configValue
     return out;
 }
 
+bool DeviceManifest::findEndpoint(std::uint8_t configValue, std::uint8_t epAddr,
+                                  const std::function<std::uint8_t(std::uint8_t)>& altOf,
+                                  EndpointModel& out) const
+{
+    auto cfg = configurationByValue(configValue);
+    if (cfg.empty()) return false;
+
+    bool inActiveAlt = false;
+    bool found       = false;
+
+    forEachDescriptor(cfg, [&](std::uint8_t type, std::span<const std::uint8_t> d) {
+        if (type == kDescInterface && d.size() >= 9) {
+            const std::uint8_t iface = d[2];
+            const std::uint8_t alt   = d[3];
+            // The full 8-bit interface number, not 0..31. This is the range bug
+            // the two bridges independently had; see the header.
+            const std::uint8_t want = altOf ? altOf(iface) : 0;
+            inActiveAlt = (alt == want);
+        } else if (type == kDescEndpoint && inActiveAlt && d.size() >= 7 && !found) {
+            if (d[2] == epAddr) {
+                out = EndpointModel{};
+                out.address       = d[2];
+                out.type          = static_cast<XferType>(d[3] & 0x03u);
+                out.maxPacketSize = rd16(d.data() + 4);
+                out.interval      = d[6];
+                found = true;
+                return true;   // keep walking: the SS companion may still follow
+            }
+        } else if (type == kDescSsEndpointCompanion && found && d.size() >= 6) {
+            // Only ever applies to the endpoint immediately before it, which is
+            // the one just matched — so this must run before the walk stops.
+            out.maxBurst         = d[2];
+            out.mult             = static_cast<std::uint8_t>(d[3] & 0x03u);
+            out.bytesPerInterval = rd16(d.data() + 4);
+            return false;
+        } else if (found && (type == kDescEndpoint || type == kDescInterface)) {
+            return false;      // past our endpoint and its companion
+        }
+        return true;
+    });
+
+    return found;
+}
+
 // ---------------------------------------------------------------------------
 
 Status DeviceManifest::validate(std::string* whyNot) const

@@ -22,6 +22,7 @@
 #define AIRUSB_CONTROL_SIMULATEDDEVICESOURCE_H
 
 #include "../session/ExporterSession.h"
+#include "../session/InlineAsyncPort.h"
 #include "../tests/fakes/ScriptedDevice.h"
 
 namespace airusb::control {
@@ -30,11 +31,11 @@ class SimulatedDeviceSource final : public session::IDeviceSource {
 public:
     explicit SimulatedDeviceSource(std::uint32_t blockCount = 61440,
                                    std::uint32_t blockSize  = 512)
-        : _device(blockCount, blockSize) {}
+        : _device(blockCount, blockSize), _async(_device) {}
 
     std::vector<protocol::DeviceRecord> list() override;
 
-    Status claim(const protocol::DeviceUid& uid, IUsbDevicePort** portOut,
+    Status claim(const protocol::DeviceUid& uid, IAsyncUsbDevicePort** portOut,
                  DeviceManifest& manifestOut, std::uint8_t* configOut,
                  std::string* whyNot) override;
 
@@ -47,6 +48,10 @@ public:
 
 private:
     fakes::ScriptedDevice _device;
+    /// The RAM disk always returns, so issuing its transfers inside submit() is
+    /// correct rather than merely convenient — and `canIdle() == false` keeps
+    /// the exporter from ever attaching an endpoint through it that could not.
+    session::InlineAsyncPort _async;
     bool _claimed = false;
 };
 

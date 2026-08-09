@@ -231,6 +231,10 @@ int HubState::pump()
             ec.devices  = _cfg.devices;
             ec.clock    = &Clock::system();
             ec.peerName = _cfg.machineName;
+            // The authority is a MEMBER of HubState, not of the session, and
+            // that placement is the whole point: a peer that vanishes mid-write
+            // keeps its lease across the session that carried it.
+            ec.leases   = &_leases;
             if (_shareExporter->begin(_shareSecure.get(), ec) != Status::Ok) {
                 shareDropPeer("A machine connected but the session could not be started.");
                 return did + 1;
