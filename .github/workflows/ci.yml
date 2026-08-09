@@ -121,12 +121,33 @@ jobs:
               $code = $LASTEXITCODE
               $out | ForEach-Object { Write-Host $_ }
               Write-Host "exit $code"
-              if ($code -eq 0 -and ($out -match 'RESULT=PASS')) { $passed = $true; break }
+              if ($code -eq 0 -and ($out -match 'RESULT=PASS')) {
+                $passed = $true
+                $segLine = $out | Select-String -Pattern 'SEGMENTATION ' | Select-Object -First 1
+                break
+              }
               if ($server.HasExited) { throw "the exporter died (exit $($server.ExitCode))" }
               Start-Sleep -Milliseconds 500
             }
             if (-not $passed) { throw "no attempt produced exit 0 with RESULT=PASS" }
-            Write-Host 'PASS: a USB Mass Storage exchange completed on Windows.'
+
+            # The claim this job exists to support is not "Windows ran the
+            # protocol" — it is "Windows ran THIS protocol", including the
+            # segmentation that was wired into ExporterSession and
+            # RemoteDevicePort after the last Windows run. Until the write
+            # probe's largest run went past 65 519, every end-to-end transfer
+            # fitted inside one record, so the segmented path had never
+            # executed on Windows at all while this job reported PASS.
+            #
+            # RESULT=PASS already fails if segmentation did not fire, because
+            # the tool gates on it. This is the second lock: it makes the
+            # evidence visible in the log rather than implied by an exit code.
+            if (-not $segLine) { throw "the run produced no SEGMENTATION line" }
+            Write-Host "segmentation evidence: $segLine"
+            if ($segLine -notmatch 'fired=yes') {
+              throw "segmentation did not fire on Windows: $segLine"
+            }
+            Write-Host 'PASS: a USB Mass Storage exchange completed on Windows, segmented.'
           }
           finally {
             if ($server -and -not $server.HasExited) {
@@ -201,6 +222,14 @@ jobs:
             sleep 0.5
           done
           [ "$passed" = 1 ] || { echo "no attempt produced RESULT=PASS"; exit 1; }
+
+          # Same gate as the Windows job, and here it also means ASan watched a
+          # 128 KiB transfer be split, reassembled and compared byte for byte.
+          # The reassembly buffers are exactly the place a heap overrun would
+          # live, and UBSan alone would not see one.
+          grep 'SEGMENTATION ' attempt.out || { echo "no SEGMENTATION line"; exit 1; }
+          grep -q 'SEGMENTATION .*fired=yes' attempt.out || {
+            echo "segmentation did not fire"; exit 1; }
 
   # ---------------------------------------------------------------------------
   # macOS. The development platform, and the only one with the real exporter.

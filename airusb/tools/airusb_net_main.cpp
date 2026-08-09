@@ -320,6 +320,39 @@ int runConnect(const std::string& host, std::uint16_t port, bool probe, bool wri
         std::fflush(stdout);
         writeOk = wr.passed;
         if (!wr.passed) logLine("ERROR", "WRITE=FAIL — " + wr.failure);
+
+        // Segmentation, said out loud rather than assumed.
+        //
+        // The write probe's largest run is 128 KiB, which exceeds 65 519 — the
+        // largest record this protocol can ever negotiate — so a correct
+        // implementation MUST have split it, in both directions: the OUT payload
+        // going down, and the read-back coming up. Until this line existed the
+        // largest transfer any end-to-end run had ever carried was 16 384 bytes,
+        // which fits inside the default 16 640-byte record and therefore proved
+        // the unsegmented path twice while appearing to prove both.
+        //
+        // It is a hard gate, not a note. A run where segmentation did not fire
+        // did not test what this flag claims to test, and reporting PASS for it
+        // is how the Windows path came to look verified when it was not.
+        char seg[256];
+        std::snprintf(seg, sizeof seg,
+                      "SEGMENTATION out=%llu in=%llu contRecords=%llu "
+                      "maxSegment=%u largestOut=%u fired=%s",
+                      static_cast<unsigned long long>(devicePort->segmentedOutTransfers()),
+                      static_cast<unsigned long long>(devicePort->segmentedInTransfers()),
+                      static_cast<unsigned long long>(devicePort->inContinuationRecords()),
+                      devicePort->maxSegmentBytes(), wr.largestOutBytes,
+                      (devicePort->segmentedOutTransfers() > 0 &&
+                       devicePort->segmentedInTransfers()  > 0) ? "yes" : "NO");
+        logLine("XFER", seg);
+
+        if (wr.passed && (devicePort->segmentedOutTransfers() == 0 ||
+                          devicePort->segmentedInTransfers()  == 0)) {
+            logLine("ERROR", "SEGMENTATION=FAIL — a 128 KiB transfer crossed the "
+                             "session without being split, which cannot happen "
+                             "under a legal record size");
+            writeOk = false;
+        }
     }
 
     (void)client.detach();

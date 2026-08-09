@@ -19,6 +19,15 @@ RemoteDevicePort::RemoteDevicePort(transport::RecordLayer* link,
 {
 }
 
+std::uint32_t RemoteDevicePort::maxSegmentBytes() const noexcept
+{
+    if (!_link) return 0;
+    const std::uint32_t maxPlain = _link->maxPlaintextBytes();
+    const std::uint32_t fixed = static_cast<std::uint32_t>(wire::kHeaderSize)
+                              + static_cast<std::uint32_t>(wire::kBodySubmit);
+    return maxPlain > fixed ? maxPlain - fixed : 0;
+}
+
 Status RemoteDevicePort::submit(std::uint8_t epAddr, std::uint8_t xferType,
                                 std::uint8_t dir, std::uint32_t bufferLen,
                                 const std::uint8_t setup[8],
@@ -66,6 +75,8 @@ Status RemoteDevicePort::submit(std::uint8_t epAddr, std::uint8_t xferType,
     if (maxPlain <= wire::kHeaderSize + wire::kBodySubmit) return Status::Internal;
     const std::uint32_t maxSeg = maxPlain - static_cast<std::uint32_t>(wire::kHeaderSize)
                                           - static_cast<std::uint32_t>(wire::kBodySubmit);
+
+    if (outData.size() > maxSeg) ++_segmentedOut;
 
     if (const Status s = emitTransfer(base, submitBody, outData, maxSeg,
             [this](std::span<const std::uint8_t> rec) { return _link->sendRecord(rec); });
@@ -132,6 +143,7 @@ Status RemoteDevicePort::submit(std::uint8_t epAddr, std::uint8_t xferType,
             rl.arenaBytes       = bufferLen;
             rl.maxInFlight      = 1;
             Reassembler ra(rl);
+            ++_segmentedIn;
 
             Status e = Status::Ok;
             Reassembler::Outcome o = ra.accept(rh, firstChunk, e);
@@ -158,6 +170,7 @@ Status RemoteDevicePort::submit(std::uint8_t epAddr, std::uint8_t xferType,
                     return Status::MalformedFrame;
                 if (auto v = validateHeader(dh, dr.size() - wire::kHeaderSize, lim); !v.ok())
                     return v.status;
+                ++_inContinuations;
 
                 const auto dbody = std::span<const std::uint8_t>(dr)
                                       .subspan(wire::kHeaderSize, dh.bodyLen);

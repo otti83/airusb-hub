@@ -15,6 +15,7 @@
 #include "../TestHarness.h"
 #include "../fakes/ScriptedDevice.h"
 #include "../../diag/WriteProbe.h"
+#include "../../protocol/Wire.h"
 
 using namespace airusb;
 using namespace airusb::diag;
@@ -133,19 +134,28 @@ void testHappyPath()
         CHECK_EQ(r.mismatchedBytes, 0u);
         CHECK(r.outBoundariesIntact);
         CHECK(r.restored);
-        // 1 + 4 + 32 blocks of 512, plus the 32-block restore.
-        CHECK_EQ(r.bytesWritten, (1u + 4u + 32u + 32u) * 512u);
+        // 1 + 4 + 32 + 256 blocks of 512, plus the 256-block restore.
+        CHECK_EQ(r.bytesWritten, (1u + 4u + 32u + 256u + 256u) * 512u);
     }
 
-    TEST_CASE("the largest run is big enough to force record fragmentation") {
-        // 32 blocks x 512 = 16384 bytes. The record layer's payload ceiling is
-        // smaller than this, so a single logical OUT transfer has to be split
-        // across records and put back together. Nothing had ever made it do that.
+    TEST_CASE("the largest run cannot fit in any legal record") {
+        // This used to assert 32 blocks x 512 = 16384 and describe it as forcing
+        // the record layer to fragment. It did not. The default record is 16 640
+        // bytes, so 16 384 of payload plus a 32-byte header, a 40-byte body and a
+        // 16-byte AEAD tag came to 16 472 — comfortably inside one record. The
+        // end-to-end runs that cited this test as their segmentation evidence
+        // were therefore exercising the unsegmented path, twice.
+        //
+        // The honest bound is the protocol's, not today's default: 65 519 is
+        // Noise's plaintext limit and so the largest record that can ever be
+        // negotiated. A run above it segments at every legal record size, which
+        // is the property the network probe depends on.
         ScriptedDevice dev{61440, 512};
         WriteProbe probe(dev, endpointsOf(dev));
         const WriteProbeResult r = probe.runDestructiveWriteTest({});
         CHECK(r.passed);
-        CHECK_EQ(r.largestOutBytes, 32u * 512u);
+        CHECK_EQ(r.largestOutBytes, 256u * 512u);
+        CHECK(r.largestOutBytes > wire::kRecordBytesCeiling);
     }
 
     TEST_CASE("the original contents come back") {

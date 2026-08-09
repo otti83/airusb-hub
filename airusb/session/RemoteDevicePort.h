@@ -53,6 +53,20 @@ public:
 
     std::uint64_t transfersIssued() const noexcept { return _issued; }
 
+    /// The largest DATA payload that still fits in one record, given the
+    /// negotiated record size and this cipher's overhead. A transfer bigger than
+    /// this is segmented; one smaller is not. Exposed so a test or a tool can
+    /// state which of the two it just exercised instead of assuming.
+    std::uint32_t maxSegmentBytes() const noexcept;
+
+    /// Transfers that actually spanned more than one record, per direction.
+    /// These are the counters that turn "segmentation is implemented" into
+    /// "segmentation ran on this machine, in this build, over this socket".
+    std::uint64_t segmentedOutTransfers() const noexcept { return _segmentedOut; }
+    std::uint64_t segmentedInTransfers()  const noexcept { return _segmentedIn; }
+    /// Continuation records received while reassembling IN payloads.
+    std::uint64_t inContinuationRecords() const noexcept { return _inContinuations; }
+
 private:
     /// One SUBMIT, then the matching COMPLETE.
     ///
@@ -72,6 +86,9 @@ private:
     std::uint8_t   _attachSlot = 0;
     std::uint64_t  _requestId  = 0;
     std::uint64_t  _issued     = 0;
+    std::uint64_t  _segmentedOut    = 0;
+    std::uint64_t  _segmentedIn     = 0;
+    std::uint64_t  _inContinuations = 0;
 };
 
 } // namespace airusb::session

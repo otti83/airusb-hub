@@ -75,9 +75,18 @@ public:
     struct Options {
         std::uint32_t startLba  = 0;
         std::uint32_t blockSize = 512;
-        /// Block counts to exercise, in order. The last one is deliberately large
-        /// enough to force the record layer to fragment a single logical transfer.
-        std::vector<std::uint32_t> runs { 1, 4, 32 };
+        /// Block counts to exercise, in order.
+        ///
+        /// The last one is 128 KiB, and the size is chosen against the protocol
+        /// rather than picked. 65 519 is Noise's plaintext ceiling and therefore
+        /// the largest record this project can ever negotiate, so a 131 072-byte
+        /// transfer has to be split across records at ANY legal record size —
+        /// not merely at today's 16 640-byte default, which a 16 384-byte run
+        /// slid underneath while claiming otherwise. It is also close to what
+        /// usb-storage really asks for in one URB (122 880 B at high speed,
+        /// 1 MiB at SuperSpeed), so the number a filesystem will produce is the
+        /// number the probe produces.
+        std::vector<std::uint32_t> runs { 1, 4, 32, 256 };
         bool restoreOriginal = true;
     };
 
