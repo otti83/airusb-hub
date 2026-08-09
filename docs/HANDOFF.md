@@ -75,6 +75,18 @@ In order, and none of it waits on Apple:
    `192.168.0.109` in ~28 ms via the Tailscale subnet router on `utun8`, and
    Windows still has no route back — so **Windows shares and the Mac imports**,
    the same direction §3.5 had to use.
+
+   **Getting the binary onto that machine is step 0 and it used to be missing.**
+   `airusb-hubd.exe` was produced by nothing: not CI, not a release, not the
+   cross-build script — so the first version of this procedure told the user to
+   run a file that did not exist. Now `scripts/cross-build-windows.sh` builds it
+   (statically linked PE32+, ~13 MB, no runtime to install) and both CI jobs
+   publish it as `airusb-windows-msvc-x64` / `airusb-windows-mingw-x64`. SMB
+   (445) and RDP (3389) both answer on that box, measured, so copying it there
+   is a question of credentials rather than of route — and credentials are the
+   user's to supply. **No release asset has been published**; if a plain
+   no-login URL would be easier, that is a deliberate publishing step and needs
+   asking for.
 2. **The hub against real hardware.** `airusb-exportd --serve` already speaks this
    exact protocol, so pointing the hub's importer at a real captured drive needs
    no new code — only `sudo` on the Mac, which the assistant does not have. One

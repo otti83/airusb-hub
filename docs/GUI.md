@@ -160,27 +160,78 @@ and **SSH closed**, and it is on a different LAN from the Mac. Measured
 imports — the same direction the two-machine run in `HANDOFF.md` §3.5 had to use,
 for the same reason.
 
-### On Windows, in PowerShell
+### Step 0 — get `airusb-hubd.exe` onto the Windows machine
 
-Use the `airusb-net-msvc-x64` artifact from the latest CI run — the same build
-the Windows job tested — or build it with
-`cmake --build build --config Release --target airusb-hubd`.
+**Read this step. It is the one that used to be missing**, and without it the rest
+is a procedure for running a file that does not exist. There is nothing to
+install — the binary is statically linked, needs no runtime, no Visual C++
+redistributable and no Python. It is one file. Pick whichever route suits.
 
-```powershell
-# Let the sharing port through the firewall. Once, and only for this port.
-New-NetFirewallRule -DisplayName "AirUSB Hub 7714" -Direction Inbound `
-  -Protocol TCP -LocalPort 7714 -Action Allow
+**Route A — copy it from the Mac over SMB.** Fastest, because the Mac can already
+build it. Measured 2026-08-09: `192.168.0.109` answers on 445 (SMB) and 3389
+(RDP), so the file has somewhere to go; the share and the credentials are yours.
 
-mkdir C:\airusb -Force; cd C:\airusb
-.\airusb-hubd.exe --share --share-port 7714 --name "GMKtec"
-```
-
-It opens the window and prints the address. Leave it running.
-
-### On the Mac
+On the Mac:
 
 ```bash
 cd "/Users/mba/Desktop/AirUSB Hub/airusb"
+./scripts/cross-build-windows.sh          # -> build-win/airusb-hubd.exe, ~13 MB
+open build-win                            # then drag it to the mounted share
+```
+
+Mount the share first with **Finder → Go → Connect to Server →
+`smb://192.168.0.109`**, or from an RDP session copy it out of a folder you share
+back. The cross-compiled binary is MinGW-built; it is the same sources and the
+same protocol as the MSVC build, and the MinGW build is exercised by CI on every
+commit.
+
+**Route B — download the MSVC build from CI.** This is the binary the Windows job
+actually tested, which is the stronger provenance. In a browser **on the Windows
+machine**, signed in to GitHub:
+
+<https://github.com/otti83/airusb-hub/actions/workflows/ci.yml> → the newest
+green run → **Artifacts** → `airusb-windows-msvc-x64` → unzip. It contains
+`airusb-hubd.exe` and `airusb-net.exe`.
+
+(Artifacts need a signed-in GitHub session, which is why this is Route B rather
+than a one-line `Invoke-WebRequest`. If it would be more convenient as a public
+release asset — a plain URL, no login — say so and it can be attached to a
+release; that is a deliberate publishing step and is not done unasked.)
+
+**Route C — build it on the Windows machine.** Needs Visual Studio 2022 with the
+"Desktop development with C++" workload. In a *Developer PowerShell for VS 2022*:
+
+```powershell
+git clone https://github.com/otti83/airusb-hub
+cd airusb-hub\airusb
+cmake -S . -B build
+cmake --build build --config Release --target airusb-hubd
+# -> build\Release\airusb-hubd.exe
+```
+
+### Step 1 — run it, sharing
+
+```powershell
+cd C:\where-you-put-it
+
+# Let the sharing port through the firewall. Once, and only for this port.
+# Needs an elevated PowerShell; the daemon itself does NOT.
+New-NetFirewallRule -DisplayName "AirUSB Hub 7714" -Direction Inbound `
+  -Protocol TCP -LocalPort 7714 -Action Allow
+
+.\airusb-hubd.exe --share --share-port 7714 --name "GMKtec"
+```
+
+Windows Defender may also prompt the first time it listens — allow it on private
+networks. The daemon opens the window and prints the address; leave it running.
+It writes three files into the current directory (`airusb-hub.id`,
+`.peers`, `.token`), so run it from a folder you can find again.
+
+### Step 2 — on the Mac
+
+```bash
+cd "/Users/mba/Desktop/AirUSB Hub/airusb"
+cmake --build build --target airusb-hubd     # if it is not built yet
 ./build/airusb-hubd --name "MacBook Air"
 ```
 

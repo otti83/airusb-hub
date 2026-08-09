@@ -132,8 +132,13 @@ browser is already installed:
 .\build\Release\airusb-hubd.exe --share --share-port 7714 --name "GMKtec"
 ```
 
-The two-machine procedure — firewall rule, which side shares, what to compare —
-is written out in [`GUI.md`](GUI.md).
+If you have no toolchain on the Windows machine, you do not need one:
+`airusb-hubd.exe` is statically linked and is published by CI alongside
+`airusb-net.exe` as the `airusb-windows-msvc-x64` artifact, and
+`scripts/cross-build-windows.sh` produces it from a Mac or a Linux box.
+
+The two-machine procedure — where to get the file, the firewall rule, which side
+shares, what to compare — is written out in [`GUI.md`](GUI.md).
 
 ---
 
