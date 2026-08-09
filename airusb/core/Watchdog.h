@@ -99,6 +99,24 @@ static_assert(kNetCtrl < kUrbCeilingBulk,
 static_assert(kKeepaliveInterval * 3 <= kKeepaliveMiss,
               "DEGRADED is defined as three missed keepalives");
 
+// T_urb_ceiling_bulk (30 s) is LONGER than T_lease_exporter (20 s), and that is
+// not an error in the table — it is a relationship the exporter has to honour
+// in code.
+//
+// The lease timer asks "have we heard from the owner". An importer waiting for
+// a transfer it already submitted is silent by design, so a single slow
+// WRITE(10) would otherwise trip the lease and quarantine the drive mid-write
+// on a peer that was never absent. `ExporterSession::pump()` therefore does not
+// run the lease sweep while it owes the peer an answer; the URB ceiling bounds
+// how long that can last.
+//
+// Asserted so that anyone who "fixes" the ordering by shortening the URB
+// ceiling, or lengthening the lease, meets this note first.
+static_assert(kUrbCeilingBulk > kLeaseExporter,
+              "if this ever stops holding, re-read why the lease sweep is "
+              "suppressed while transfers are outstanding — the suppression may "
+              "no longer be needed, and removing it needs a reason, not a guess");
+
 /// Runtime re-check, callable from a test and from daemon startup. Everything here
 /// is also a static_assert; this exists so a build that somehow relaxes one gets
 /// caught at launch rather than in the field.

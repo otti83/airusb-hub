@@ -632,6 +632,153 @@ void testCancel()
         CHECK_EQ(static_cast<long long>(r.exporter.inFlightTransfers()), 1);
     }
 
+    TEST_CASE("a deadline on an un-abortable transfer does not wedge its endpoint") {
+        // The case that leaked, and that 149 green checks did not notice.
+        //
+        // `sweepDeadlines` answers a transfer the port could not cancel and
+        // removes it from the in-flight table while DELIBERATELY leaving the
+        // endpoint reserved — the physical transfer really is still running.
+        // The port's eventual outcome then found nothing in the table and
+        // returned early WITHOUT freeing the endpoint, so every later transfer
+        // on it queued behind a slot nobody owned. Throughput on that endpoint
+        // goes to zero with nothing looking broken, which is the same shape as
+        // the cancellation bug §3.10 records.
+        IdlingPort port;
+        port.cancellable = false;
+        PortSource src(&port);
+        Rig r(src);
+        CHECK(r.ok);
+        CHECK(r.doAttach());
+
+        // Bulk, so it has a deadline at all; an interrupt IN deliberately has none.
+        (void)r.submitIn(0x81, static_cast<std::uint8_t>(wire::XferType::Bulk), 64);
+        (void)r.exporter.pump();
+        CHECK_EQ(static_cast<long long>(r.exporter.inFlightTransfers()), 1);
+
+        // Past the bulk ceiling. The sweep answers the peer and keeps the
+        // endpoint reserved.
+        r.clock.advanceMs(watchdog::kUrbCeilingBulk + 1000);
+        (void)r.exporter.pump();
+        CHECK_EQ(static_cast<long long>(r.exporter.inFlightTransfers()), 0);
+
+        Header h;
+        std::vector<std::uint8_t> rb;
+        CHECK(r.recvOfType(wire::Type::Complete, h, rb));
+        CHECK(static_cast<Status>(h.status) == Status::XferTimeout);
+
+        // Now the device finishes on its own, late. Its outcome matches nothing
+        // and is dropped — but it MUST release the endpoint.
+        port.finishNext(std::vector<std::uint8_t>(8, 0x22));
+        (void)r.exporter.pump();
+
+        // No PING is needed, and that is itself the point: the clock moved past
+        // the LEASE timer too, and the session survived because we owed this
+        // peer an answer the whole time.
+        CHECK(r.exporter.state() == ExporterSession::State::Leased);
+
+        // And the proof: a fresh transfer on that endpoint reaches the device.
+        const std::uint64_t before = port.submits;
+        (void)r.submitIn(0x81, static_cast<std::uint8_t>(wire::XferType::Bulk), 64);
+        (void)r.exporter.pump();
+        CHECK_EQ(static_cast<long long>(port.submits),
+                 static_cast<long long>(before + 1));
+        CHECK_EQ(static_cast<long long>(r.exporter.queuedTransfers()), 0);
+    }
+
+    TEST_CASE("a slow transfer does not trip the lease timer under the peer") {
+        // The bug this case exists for was found BY a test written for a
+        // different one, which is worth recording: T_urb_ceiling_bulk is 30 s
+        // and T_lease_exporter is 20 s, and an importer waiting for a transfer
+        // it already submitted is silent by design. So a cheap flash stick
+        // doing garbage collection on one WRITE(10) — 8-12 s legitimately, and
+        // macOS allows 30 — would have quarantined the drive MID-WRITE on a
+        // peer that was never absent.
+        IdlingPort port;
+        PortSource src(&port);
+        Rig r(src);
+        CHECK(r.ok);
+        CHECK(r.doAttach());
+
+        (void)r.submitIn(0x81, static_cast<std::uint8_t>(wire::XferType::Bulk), 64);
+        (void)r.exporter.pump();
+        CHECK_EQ(static_cast<long long>(r.exporter.inFlightTransfers()), 1);
+
+        // Well past the lease timer, and still inside the URB ceiling.
+        r.clock.advanceMs(watchdog::kLeaseExporter + 5000);
+        (void)r.exporter.pump();
+
+        // Still leased, still working. Quarantining here would hand the drive
+        // to nobody while its owner waited for an answer we owed it.
+        CHECK(r.exporter.state() == ExporterSession::State::Leased);
+        CHECK(r.leases.state() == LeaseState::Leased);
+        CHECK_EQ(static_cast<long long>(r.exporter.inFlightTransfers()), 1);
+
+        // And the device answers, as it was always going to.
+        port.finishNext(std::vector<std::uint8_t>(64, 0x44));
+        (void)r.exporter.pump();
+        Header h;
+        std::vector<std::uint8_t> rb;
+        CHECK(r.recvOfType(wire::Type::Complete, h, rb));
+        CHECK(static_cast<Status>(h.status) == Status::Ok);
+    }
+
+    TEST_CASE("but silence with NOTHING outstanding does quarantine") {
+        // The other half. The suppression above must not turn the lease timer
+        // off; it must only stop it firing while we owe an answer.
+        IdlingPort port;
+        PortSource src(&port);
+        Rig r(src);
+        CHECK(r.ok);
+        CHECK(r.doAttach());
+        CHECK(r.leases.state() == LeaseState::Leased);
+
+        r.clock.advanceMs(watchdog::kLeaseExporter + 1000);
+        (void)r.exporter.pump();
+
+        CHECK(r.exporter.state() == ExporterSession::State::Orphaned);
+        CHECK(r.leases.state() == LeaseState::Quarantined);
+    }
+
+    TEST_CASE("an un-abortable transfer that finishes normally is NOT reported cancelled") {
+        // `kCfWasCancelled` says the transfer WAS cancelled. A backend that
+        // could not abort, whose device then completed the transfer, has not
+        // cancelled anything — and real data beside a cancelled flag is a
+        // contradiction the importer cannot act on.
+        IdlingPort port;
+        port.cancellable = false;
+        PortSource src(&port);
+        Rig r(src);
+        CHECK(r.ok);
+        CHECK(r.doAttach());
+
+        const std::uint64_t rid =
+            r.submitIn(0x81, static_cast<std::uint8_t>(wire::XferType::Bulk), 64);
+        (void)r.exporter.pump();
+
+        CancelBody cb;
+        cb.targetRequestId = rid;
+        cb.epAddr          = 0x81;
+        cb.scope           = static_cast<std::uint8_t>(CancelScope::Request);
+        std::vector<std::uint8_t> body;
+        encodeCancel(cb, body);
+        (void)r.send(wire::Type::Cancel, body, r.attachId, r.channelFor(0x81));
+        (void)r.exporter.pump();
+
+        Header h;
+        std::vector<std::uint8_t> rb;
+        CHECK(r.recvOfType(wire::Type::CancelAck, h, rb));
+
+        // The device finishes anyway.
+        port.finishNext(std::vector<std::uint8_t>(4, 0x33));
+        (void)r.exporter.pump();
+
+        CHECK(r.recvOfType(wire::Type::Complete, h, rb));
+        CompleteBody done;
+        CHECK(decodeComplete(rb, done));
+        CHECK(!done.wasCancelled());
+        CHECK(static_cast<Status>(h.status) == Status::Ok);
+    }
+
     TEST_CASE("a cancel that names two different endpoints is refused") {
         IdlingPort port;
         PortSource src(&port);

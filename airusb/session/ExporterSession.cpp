@@ -238,12 +238,52 @@ Status ExporterSession::pump()
     // answered one pump later than it could be.
     if (const Status s = collect(); isFatal(s)) return s;
 
+    // WHILE WE OWE THE PEER AN ANSWER, IT COUNTS AS PRESENT.
+    //
+    // `heard()` means "the owner is demonstrably there", and it normally fires
+    // when a record arrives. But an importer waiting for a transfer it already
+    // submitted is silent BY DESIGN — it has nothing to say until we answer —
+    // and a peer we have spent thirty seconds working for is as demonstrably
+    // present as one that just pinged. So the timer is refreshed here, which
+    // also means it restarts from the moment the LAST transfer is answered:
+    // the clock on "are they still there?" starts when it becomes their turn to
+    // speak.
+    //
+    // Without this the two numbers make a mid-write quarantine inevitable:
+    // T_urb_ceiling_bulk is 30 s, T_lease_exporter is 20 s, and one WRITE(10)
+    // on a cheap stick doing garbage collection legitimately takes 8-12 s.
+    if (!_inFlight.empty() || queuedTransfers() != 0)
+        _leases->heard(_secure->peerIdentity().identityKey);
+
     // The device has no clock of its own; ours is the only one.
     if (const Status s = sweepDeadlines(); isFatal(s)) return s;
 
     // The lease timer. Expiry QUARANTINES — it never frees, because the exporter
     // cannot know whether the silent importer has a dirty filesystem mounted.
-    if (_state == State::Leased && _leases->silenceExpired()) {
+    //
+    // AND IT DOES NOT RUN WHILE WE OWE THE PEER AN ANSWER.
+    //
+    // The lease timer asks "have we heard from the owner", and `heard()` fires
+    // only when a record ARRIVES. An importer waiting for a transfer it already
+    // submitted is silent BY DESIGN — it has nothing to say until we answer.
+    // The two numbers make that fatal on their own: T_urb_ceiling_bulk is 30 s
+    // and T_lease_exporter is 20 s, so a cheap flash stick doing internal
+    // garbage collection on one WRITE(10) — which the timeout table itself says
+    // legitimately takes 8-12 s and which macOS allows 30 s for — would trip
+    // the lease at 20 s and quarantine the drive MID-WRITE, on a peer that was
+    // never absent.
+    //
+    // Found by a test written for a different bug: advancing the clock past the
+    // URB ceiling necessarily advances it past the lease, and the session went
+    // Orphaned where the test expected it to keep working.
+    //
+    // A peer we owe an answer to is demonstrably alive, so the sweep waits —
+    // see the `heard()` above, which is what makes the timer restart from the
+    // moment the last transfer is answered rather than from the last record.
+    // It is not deferred indefinitely: the URB deadline answers the transfer at
+    // the ceiling, and the lease timer resumes from there.
+    const bool owedAnswers = !_inFlight.empty() || queuedTransfers() != 0;
+    if (!owedAnswers && _state == State::Leased && _leases->silenceExpired()) {
         _leases->quarantine();
         _state = State::Orphaned;
         _why   = "the importer stopped answering; the device is held for it";
@@ -941,21 +981,35 @@ Status ExporterSession::collect()
             return;
         }
 
+        // THE ENDPOINT IS FREED FIRST, and unconditionally.
+        //
+        // It used to be freed only on the path that found the transfer in
+        // `_inFlight`, which leaks the slot in exactly the case the slot exists
+        // for: `sweepDeadlines()` answers a transfer the port could not cancel
+        // and removes it from `_inFlight` while DELIBERATELY leaving the
+        // endpoint reserved, and the port's eventual outcome then took the
+        // early return below. The endpoint stayed busy for the life of the
+        // session and every later transfer on it queued behind nothing.
+        for (auto b = _busyEndpoint.begin(); b != _busyEndpoint.end(); ++b) {
+            if (b->second == o.token) { _busyEndpoint.erase(b); break; }
+        }
+
         auto it = _inFlight.find(o.token);
         if (it == _inFlight.end()) {
             // A late outcome for a transfer already retired. Normal after a
-            // teardown; never an error, and never delivered twice.
+            // cancellation or a deadline; never an error, and never delivered
+            // twice.
             return;
         }
         const InFlight f = it->second;
         _inFlight.erase(it);
 
-        if (auto b = _busyEndpoint.find(f.epAddr);
-            b != _busyEndpoint.end() && b->second == o.token)
-            _busyEndpoint.erase(b);
-
-        const Status s = emitComplete(f, o.status, o.actualLen,
-                                      o.cancelled || f.cancelRequested,
+        // `kCfWasCancelled` says the transfer WAS cancelled, so it comes from
+        // what the port actually did — not from the fact that somebody asked.
+        // A backend that could not abort and whose device then finished
+        // normally has completed the transfer, and reporting real data beside
+        // a cancelled flag is a contradiction the importer cannot act on.
+        const Status s = emitComplete(f, o.status, o.actualLen, o.cancelled,
                                       o.zlpSent, o.dataIn);
         if (isFatal(s)) worst = s;
     });
