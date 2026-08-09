@@ -255,10 +255,22 @@ void testExporterApprovesFirst()
         // The importer must reconnect on its own and offer a NEW number, which
         // the sharer — now paired — shows as its session number rather than as
         // a question. Nobody is left comparing a number to nothing.
-        CHECK(waitFor(imp.hub, [&] {
+        //
+        // Sampled rather than merely awaited, because the defect this catches
+        // is a state that exists for about a second and then repairs itself:
+        // the session dies, taking the SAS with it, and the window goes on
+        // asking "do these six digits match?" above a blank space. Observed
+        // against `airusb-net serve`, which pins and drops on the spot.
+        bool everAskedWithoutANumber = false;
+        const bool reconnected = waitFor(imp.hub, [&] {
+            if (imp.hub.importState() == ImportState::AwaitingApproval &&
+                imp.hub.importSas() == 0)
+                everAskedWithoutANumber = true;
             return imp.hub.importState() == ImportState::AwaitingApproval &&
                    imp.hub.importSas() != 0 && imp.hub.importSas() != firstSas;
-        }));
+        });
+        CHECK(reconnected);
+        CHECK(!everAskedWithoutANumber);
         CHECK(waitForShare(sharer, ShareState::Serving));
         CHECK_EQ(imp.hub.importSas(), sharer.sas());
 

@@ -310,7 +310,8 @@ int HubState::pumpImportPairing()
 {
     if (!_importAuto) return 0;
     if (_importState != ImportState::AwaitingApproval &&
-        _importState != ImportState::WaitingForPeer)
+        _importState != ImportState::WaitingForPeer &&
+        _importState != ImportState::Connecting)
         return 0;
 
     const ContinuousNs now = Clock::system().nowNs();
@@ -334,6 +335,13 @@ int HubState::pumpImportPairing()
     std::uint64_t rtt = 0;
     if (_client->ping(&rtt) != Status::Ok) {
         importDropSession();
+        // Connecting, NOT AwaitingApproval. The SAS died with the session, and
+        // leaving the state at AwaitingApproval would put the question "do
+        // these six digits match?" on screen above a blank space — for about a
+        // second, every single first pairing. Observed against `airusb-net
+        // serve`, which pins and drops on the spot, so the window is not
+        // theoretical and not rare.
+        _importState = ImportState::Connecting;
         setNotice(_importPinned
                       ? "The other machine ended the session — that is what it does "
                         "when it accepts. Reconnecting."
@@ -705,7 +713,11 @@ void HubState::writeStateJson(JsonOut& j) const
     } else {
         j.key("sas").null();
     }
-    j.kv("needsApproval", _importState == ImportState::AwaitingApproval);
+    // `_client` is in the condition as well as the state, so this can never be
+    // true with a null `sas` beside it. A pairing prompt with no number in it
+    // is worse than no prompt: it asks a person to compare something that is
+    // not on screen, and the honest answer to that question is unavailable.
+    j.kv("needsApproval", _importState == ImportState::AwaitingApproval && _client != nullptr);
     j.kv("pinned", _importPinned);
     j.kv("attachedUid", _attachedUid);
     j.kv("attachedName", _attachedName);
