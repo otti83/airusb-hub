@@ -197,12 +197,46 @@ would have caught the other's.
 and Windows/MSVC in CI. It asserts the DISAGREEMENTS, so the table cannot decay
 into a no-op without failing.
 
-**The numbers themselves are transcribed, and transcription can be wrong.** When
-a build defines `AIRUSB_WITH_WDK` — which any real driver build does —
-`WindowsUsb.cpp` `static_assert`s every constant against Microsoft's own
-headers. That build is the acceptance test for the values; these tests are the
-acceptance test for the mapping. A constant that only ever exists in our header
-is a constant nobody has checked.
+**The numbers themselves are transcribed — and as of 2026-08-09 they are
+VERIFIED.** `platform/windows/wdk_abi_check.c` includes the real WDK headers and
+`C_ASSERT`s every value in `WindowsUsbAbi.h`; it emits no code and is never
+linked, so compiling it IS the test. Run on the GMKtec against SDK 10.0.28000.0,
+KMDF 1.35, UdeCx 1.1:
+
+```
+SDK 10.0.28000.0   KMDF 1.35   UdeCx 1.1
+wdk_abi_check.c
+ABI CHECK PASS - every transcribed constant matches the WDK
+```
+
+`scripts/wdk-abi-check.ps1` finds the kit, the KMDF version and the UdeCx
+version and invokes `cl.exe`. Deliberately not a `.vcxproj`: a project file is
+one more thing that can be configured differently from the answer you wanted.
+
+**Four things that first attempt got wrong, none of them a wrong constant**, and
+all four produce errors that point somewhere other than the cause:
+
+1. `usbdi.h` is in `shared\`, not `km\`, and `shared\usb.h` does NOT include
+   it. Without it the 0x8-class statuses (`REQUEST_FAILED`, `NO_MEMORY`) are
+   absent and their `C_ASSERT`s fail — **which reads exactly like a wrong
+   value.** It was the include set. This is the single best argument for
+   compiling the check rather than reading the header: the failure mode of a
+   missing include and a bad constant are indistinguishable on paper.
+2. Include ORDER matters: `usb.h`/`usbdi.h`/`usbdlib.h` before `wdfusb.h`,
+   `wdfusb.h` before `UdeCx.h`. Get it wrong and the errors appear inside
+   Microsoft's headers, reading like a broken kit.
+3. `ucrt` must be on the include path even for a kernel-mode compile — `ntdef.h`
+   reaches `ctype.h`. Leaving it out looks like a broken WDK.
+4. The kit's headers need `/external:I` + `/external:W0`. Under a plain `/I`
+   they are "our" code, and `/WX` promotes the WDK's own C4324 padding warnings
+   into a failure in `wdfrequest.h`. Our file stays at `/W4 /WX`.
+
+**And one real finding: `USBD_STATUS_TYPE` does not exist.** Searched across the
+entire kit, not assumed. `USBD_STATUS_HALTED` (0xC0000000) does, and
+`USBD_SUCCESS`/`USBD_PENDING`/`USBD_ERROR` do. So `haltsEndpoint()` is our own
+convention over a documented constant rather than a wrapper around a documented
+macro — the check asserts the mask against `USBD_STATUS_HALTED` directly, which
+is as close to verified as that idea can get.
 
 **PASS.**
 
